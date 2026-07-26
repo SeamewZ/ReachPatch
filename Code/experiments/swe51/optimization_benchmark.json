@@ -1,0 +1,82 @@
+{
+  "benchmark_case": "psf__requests-2148",
+  "collected_at": "2026-07-26T19:20:00+08:00",
+  "context": "directional measurements under concurrent SWE-51 execution",
+  "stages": {
+    "program_graph": {
+      "previous_seconds": 15.09840840101242,
+      "current_seconds_range": [9.921533278000425, 10.44],
+      "previous_peak_rss_kib": 254864,
+      "current_peak_rss_kib": 255592,
+      "semantic_signature": {
+        "nodes": 113843,
+        "edges_or_hyperedges": 149365,
+        "protocol_operations": 2063,
+        "protocol_candidate_targets": 10246
+      }
+    },
+    "requirement_graph": {
+      "previous_seconds": 117.13769526965916,
+      "current_seconds": 13.738893331001236,
+      "semantic_signature": {
+        "leaves": 6,
+        "partitions": 1320,
+        "path_obligations": 1098,
+        "edge_ledger_records": 4086,
+        "frontiers": 216,
+        "path_classes": 366
+      }
+    },
+    "binding_graph": {
+      "previous_seconds": 29.191360705532134,
+      "current_seconds": 2.3901374010001746,
+      "semantic_signature": {
+        "binding_units": 1098,
+        "frontiers": 3357,
+        "repair_components": 185
+      }
+    },
+    "challenge_graph": {
+      "previous_seconds": 22.832106362096965,
+      "current_seconds": 0.33743442600098206,
+      "semantic_signature": {
+        "challenge_cells": 1098,
+        "frontiers": 1098
+      }
+    }
+  },
+  "synthetic_scalability": {
+    "graph_shape": {
+      "nodes": 100000,
+      "edges": 99999,
+      "kind": "acyclic_dependency_chain"
+    },
+    "iterative_scc": {
+      "seconds": 3.188,
+      "peak_added_mib": 16.6,
+      "components": 100000,
+      "recursive": false,
+      "duplicate_adjacency": false
+    },
+    "scc_and_path_class": {
+      "seconds": 7.907,
+      "peak_added_mib": 16.61,
+      "path_classes": 1,
+      "path_nodes": 100000,
+      "explored_states": 100000,
+      "capped": false
+    }
+  },
+  "validation": {
+    "test_result": "71 passed",
+    "canonical_json_differential": true,
+    "merkle_hash_byte_equivalence": true,
+    "hyperedge_pairwise_relation_equivalence": true,
+    "adjacency_cache_invalidation": true,
+    "path_topology_cache_invalidation": true,
+    "iterative_scc_filtered_hyperedge_equivalence": true,
+    "long_corridor_path_completion": true,
+    "unknown_promoted_to_pass": false,
+    "frontier_reduction": false
+  }
+}

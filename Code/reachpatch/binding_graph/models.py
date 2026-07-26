@@ -1,0 +1,150 @@
+from __future__ import annotations
+
+from dataclasses import dataclass, field, replace
+from typing import Any, Iterable
+
+from reachpatch.models.base import SerializableRecord, content_hash
+from reachpatch.models.core import Frontier
+from reachpatch.oracle.models import ExecutableScenario, Oracle
+
+
+@dataclass(frozen=True, slots=True)
+class ProjectionWitness(SerializableRecord):
+    witness_id: str
+    compatible: bool
+    trigger_projection: dict[str, Any]
+    domain_guard_projection: dict[str, Any]
+    observation_projection: dict[str, Any]
+    oracle_projection: dict[str, Any]
+    reason: str
+
+
+@dataclass(frozen=True, slots=True)
+class BindingUnit(SerializableRecord):
+    unit_id: str
+    path_obligation_id: str
+    assignment_scope: str
+    leaf_id: str
+    authority: str
+    trigger_id: str | None
+    entrypoint_id: str | None
+    path_class_id: str
+    interaction_path_ids: tuple[str, ...]
+    guard: str
+    exit_kind: str
+    repair_cut_node_ids: tuple[str, ...]
+    observation_node_ids: tuple[str, ...]
+    bypass_path_ids: tuple[str, ...]
+    preservation_node_ids: tuple[str, ...]
+    repair_component_id: str | None
+    oracle_id: str | None
+    scenario_ids: tuple[str, ...]
+    frontier_ids: tuple[str, ...]
+    status: str
+    requirement_graph_hash: str
+    program_graph_hash: str
+    projection_witness: ProjectionWitness
+    impact_cone_node_ids: tuple[str, ...]
+
+
+@dataclass(frozen=True, slots=True)
+class RepairComponent(SerializableRecord):
+    component_id: str
+    unit_ids: tuple[str, ...]
+    common_dominator_ids: tuple[str, ...]
+    state_owner_ids: tuple[str, ...]
+    dispatch_boundary_ids: tuple[str, ...]
+    legal_repair_cut_ids: tuple[str, ...]
+    preservation_node_ids: tuple[str, ...]
+    interaction_witnesses: tuple[dict[str, Any], ...]
+
+
+@dataclass(frozen=True, slots=True)
+class BindingClosure(SerializableRecord):
+    closed: bool
+    ready_ratio: float
+    missing_path_obligation_ids: tuple[str, ...]
+    duplicate_path_obligation_ids: tuple[str, ...]
+    stale_unit_ids: tuple[str, ...]
+    blocked_unit_ids: tuple[str, ...]
+    frontier_ids: tuple[str, ...]
+    graph_hash: str
+
+
+class BindingGraph(SerializableRecord):
+    def __init__(
+        self,
+        *,
+        requirement_graph_hash: str,
+        program_graph_hash: str,
+        assignment_id: str,
+        version: int = 1,
+    ) -> None:
+        self.requirement_graph_hash = requirement_graph_hash
+        self.program_graph_hash = program_graph_hash
+        self.assignment_id = assignment_id
+        self.version = version
+        self.units: dict[str, BindingUnit] = {}
+        self.components: dict[str, RepairComponent] = {}
+        self.oracles: dict[str, Oracle] = {}
+        self.scenarios: dict[str, ExecutableScenario] = {}
+        self.frontiers: dict[str, Frontier] = {}
+        self.by_leaf: dict[str, set[str]] = {}
+        self.by_program_node: dict[str, set[str]] = {}
+        self.by_path_obligation: dict[str, set[str]] = {}
+        self.by_observation: dict[str, set[str]] = {}
+        # Runtime telemetry is not part of the constrained-product identity.
+        self.build_timings: dict[str, float] = {}
+        self.build_stats: dict[str, int] = {}
+
+    def add_unit(self, unit: BindingUnit) -> None:
+        previous = self.units.get(unit.unit_id)
+        if previous is not None and previous != unit:
+            raise ValueError(f"binding unit collision: {unit.unit_id}")
+        self.units[unit.unit_id] = unit
+        self.by_leaf.setdefault(unit.leaf_id, set()).add(unit.unit_id)
+        self.by_path_obligation.setdefault(unit.path_obligation_id, set()).add(unit.unit_id)
+        for node_id in unit.interaction_path_ids + unit.repair_cut_node_ids:
+            self.by_program_node.setdefault(node_id, set()).add(unit.unit_id)
+        for node_id in unit.observation_node_ids:
+            self.by_observation.setdefault(node_id, set()).add(unit.unit_id)
+
+    def replace_unit(self, unit_id: str, **changes: Any) -> BindingUnit:
+        old = self.units[unit_id]
+        updated = replace(old, **changes)
+        self.units[unit_id] = updated
+        return updated
+
+    def add_frontier(self, frontier: Frontier) -> None:
+        self.frontiers[frontier.frontier_id] = frontier
+
+    def to_dict(self) -> dict[str, Any]:
+        body = {
+            "requirement_graph_hash": self.requirement_graph_hash,
+            "program_graph_hash": self.program_graph_hash,
+            "assignment_id": self.assignment_id,
+            "version": self.version,
+            "units": [self.units[key].to_dict() for key in sorted(self.units)],
+            "components": [self.components[key].to_dict() for key in sorted(self.components)],
+            "oracles": [self.oracles[key].to_dict() for key in sorted(self.oracles)],
+            "scenarios": [self.scenarios[key].to_dict() for key in sorted(self.scenarios)],
+            "frontiers": [self.frontiers[key].to_dict() for key in sorted(self.frontiers)],
+            "by_leaf": {key: sorted(value) for key, value in sorted(self.by_leaf.items())},
+            "by_program_node": {key: sorted(value) for key, value in sorted(self.by_program_node.items())},
+            "by_path_obligation": {
+                key: sorted(value) for key, value in sorted(self.by_path_obligation.items())
+            },
+            "by_observation": {key: sorted(value) for key, value in sorted(self.by_observation.items())},
+        }
+        body["graph_hash"] = content_hash(body)
+        return body
+
+    def graph_hash(self) -> str:
+        return self.to_dict()["graph_hash"]
+
+    def unit_ids_for_nodes(self, node_ids: Iterable[str]) -> set[str]:
+        return {
+            unit_id
+            for node_id in node_ids
+            for unit_id in self.by_program_node.get(node_id, ())
+        }

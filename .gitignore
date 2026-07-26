@@ -1,0 +1,31 @@
+__pycache__/
+.venv/
+.vscode/
+*.py[cod]
+.pytest_cache/
+.pytest-tmp*/
+.coverage
+htmlcov/
+*.egg-info/
+build/
+dist/
+.reachpatch/
+runs/
+*.log
+*.prof
+ds_pwd.txt
+slt_pwd.txt
+
+# Local experiment inputs, repository clones, worktrees, and mutable outputs.
+# Reports and the experiment runner remain tracked.
+Code/dataset/
+Code/experiments/swe51/case_trees/
+Code/experiments/swe51/repos/
+Code/experiments/swe51/runs/
+Code/experiments/swe51/results/
+Code/experiments/swe51/harness/
+Code/experiments/swe51/public_instances/
+Code/experiments/swe51/generation_summary.json
+
+# The manuscript is maintained outside the implementation repository.
+/Paper/

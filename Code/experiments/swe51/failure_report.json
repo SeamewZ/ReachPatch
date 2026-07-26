@@ -1,0 +1,4207 @@
+{
+  "case_count": 51,
+  "failure_count": 9,
+  "failures": [
+    {
+      "analysis_resources": {
+        "program_graph_initial": {
+          "complete_peak_rss_mib": 9837.96484375,
+          "in_progress_peak_rss_mib": 30.9921875
+        },
+        "requirement_graph_initial": {
+          "in_progress_peak_rss_mib": 9838.03515625
+        },
+        "semantic_analysis": {
+          "complete_peak_rss_mib": 30.9921875
+        }
+      },
+      "analysis_stats": {},
+      "analysis_timings": {
+        "program_graph_initial_seconds": 2726.916206283,
+        "semantic_analysis_seconds": 0.008541046001482755
+      },
+      "component_effectiveness": [],
+      "deepseek_calls": [],
+      "error": "RecursionError: maximum recursion depth exceeded",
+      "error_traceback": null,
+      "fail_to_pass": null,
+      "finished_at": "2026-07-26T15:36:34.135831+00:00",
+      "graph_summary": {},
+      "instance_id": "astropy__astropy-14182",
+      "pass_to_pass": null,
+      "patch_apply": null,
+      "patch_path": null,
+      "reach_avoid": null,
+      "result_path": "/home/slt/ReachPatch/Code/experiments/swe51/results/astropy__astropy-14182.json",
+      "run_root": "/home/slt/ReachPatch/Code/experiments/swe51/runs/astropy__astropy-14182",
+      "stage": "generation",
+      "started_at": "2026-07-26T14:47:13.239223+00:00",
+      "status": "ERROR",
+      "transition_count": null,
+      "worker_return_code": null,
+      "worker_stderr": "",
+      "worker_stdout": ""
+    },
+    {
+      "analysis_resources": {},
+      "analysis_stats": {},
+      "analysis_timings": {
+        "analysis_total_seconds": 2.1784658739343286,
+        "semantic_analysis_seconds": 2.1784644071012735
+      },
+      "component_effectiveness": [],
+      "deepseek_calls": [],
+      "error": "public evidence leaves multiple mutually exclusive semantic assignments",
+      "error_traceback": null,
+      "fail_to_pass": null,
+      "finished_at": "2026-07-25T17:17:25.463400+00:00",
+      "graph_summary": {
+        "expected_full_closure_graph_count": 5,
+        "full_closure": false,
+        "graph_count": 1,
+        "graph_names": [
+          "semantic_hypothesis_graph"
+        ],
+        "graphs": {
+          "semantic_hypothesis_graph": {
+            "artifact_ids": [],
+            "hash": "1dd7a5c1fb725e767e07d3df0a18080e711b3f2e1d5a67d41381f87e937c7867"
+          }
+        }
+      },
+      "instance_id": "django__django-11905",
+      "pass_to_pass": null,
+      "patch_apply": null,
+      "patch_path": null,
+      "reach_avoid": null,
+      "result_path": "/home/slt/ReachPatch/Code/experiments/swe51/results/django__django-11905.json",
+      "run_root": "/home/slt/ReachPatch/Code/experiments/swe51/runs/django__django-11905",
+      "stage": "generation",
+      "started_at": "2026-07-25T17:17:23.272418+00:00",
+      "status": "SEMANTIC_BLOCKED",
+      "transition_count": null,
+      "worker_return_code": 0,
+      "worker_stderr": "",
+      "worker_stdout": "{\"instance_id\": \"django__django-11905\", \"status\": \"SEMANTIC_BLOCKED\"}\n"
+    },
+    {
+      "analysis_resources": {},
+      "analysis_stats": {},
+      "analysis_timings": {
+        "analysis_total_seconds": 4.170931367203593,
+        "semantic_analysis_seconds": 4.1709298035129905
+      },
+      "component_effectiveness": [],
+      "deepseek_calls": [],
+      "error": "public evidence leaves multiple mutually exclusive semantic assignments",
+      "error_traceback": null,
+      "fail_to_pass": null,
+      "finished_at": "2026-07-25T17:18:00.670522+00:00",
+      "graph_summary": {
+        "expected_full_closure_graph_count": 5,
+        "full_closure": false,
+        "graph_count": 1,
+        "graph_names": [
+          "semantic_hypothesis_graph"
+        ],
+        "graphs": {
+          "semantic_hypothesis_graph": {
+            "artifact_ids": [],
+            "hash": "50787fcce54cff5e78701a73a944679a7da509df609b76a44c95dc85397b59be"
+          }
+        }
+      },
+      "instance_id": "django__django-12308",
+      "pass_to_pass": null,
+      "patch_apply": null,
+      "patch_path": null,
+      "reach_avoid": null,
+      "result_path": "/home/slt/ReachPatch/Code/experiments/swe51/results/django__django-12308.json",
+      "run_root": "/home/slt/ReachPatch/Code/experiments/swe51/runs/django__django-12308",
+      "stage": "generation",
+      "started_at": "2026-07-25T17:17:56.488281+00:00",
+      "status": "SEMANTIC_BLOCKED",
+      "transition_count": null,
+      "worker_return_code": 0,
+      "worker_stderr": "",
+      "worker_stdout": "{\"instance_id\": \"django__django-12308\", \"status\": \"SEMANTIC_BLOCKED\"}\n"
+    },
+    {
+      "analysis_resources": {},
+      "analysis_stats": {},
+      "analysis_timings": {
+        "analysis_total_seconds": 397.54618411231786,
+        "baseline_execution_initial_seconds": 0.00038877222687005997,
+        "baseline_execution_replay_seconds": 0.000327051617205143,
+        "binding_graph_dynamic_rebuild_seconds": 29.31760357040912,
+        "binding_graph_initial_seconds": 29.191360705532134,
+        "challenge_graph_dynamic_rebuild_seconds": 22.408939834684134,
+        "challenge_graph_initial_seconds": 22.832106362096965,
+        "program_graph_dynamic_merge_seconds": 5.566515028476715e-06,
+        "program_graph_initial_seconds": 15.09840840101242,
+        "requirement_graph_dynamic_rebuild_seconds": 114.79989553336054,
+        "requirement_graph_initial_seconds": 117.13769526965916,
+        "semantic_analysis_seconds": 0.004490036517381668
+      },
+      "component_effectiveness": [
+        {
+          "component_id": "repair-component-02592d3a1680266dfc92191b",
+          "effective": false,
+          "legal_repair_cut_ids": [],
+          "outcome_count": 3,
+          "outcome_counts": {
+            "UNKNOWN_ORACLE": 3
+          },
+          "pass_ratio": 0.0,
+          "preservation_node_ids": [],
+          "unit_count": 3,
+          "unit_ids": [
+            "binding-unit-5f4cf7741e30e40bdb3f7d34",
+            "binding-unit-9426f0cf4fb19653ca1d8b25",
+            "binding-unit-96ad509a04a160d468bc5270"
+          ]
+        },
+        {
+          "component_id": "repair-component-09aa732fb8eb12a8756f607d",
+          "effective": false,
+          "legal_repair_cut_ids": [],
+          "outcome_count": 3,
+          "outcome_counts": {
+            "UNKNOWN_ORACLE": 3
+          },
+          "pass_ratio": 0.0,
+          "preservation_node_ids": [],
+          "unit_count": 3,
+          "unit_ids": [
+            "binding-unit-842d5813fed41281557098c6",
+            "binding-unit-c9b4f1c3c87f286129f21831",
+            "binding-unit-d49e3ed2f06d03fb143b461c"
+          ]
+        },
+        {
+          "component_id": "repair-component-0a095720d42d50a8f7c8d0d1",
+          "effective": false,
+          "legal_repair_cut_ids": [],
+          "outcome_count": 6,
+          "outcome_counts": {
+            "UNKNOWN_ORACLE": 6
+          },
+          "pass_ratio": 0.0,
+          "preservation_node_ids": [],
+          "unit_count": 6,
+          "unit_ids": [
+            "binding-unit-120bf9aa4b2126effa9b05eb",
+            "binding-unit-2b74d4a9ea92830fc0bd90b0",
+            "binding-unit-3e931b0734e32b5d0cd3f024",
+            "binding-unit-4610eed06aecbe82117e2a2e",
+            "binding-unit-a22076a7ba16b3ee4f33c94e",
+            "binding-unit-debfbf8c43fb8bcda2956861"
+          ]
+        },
+        {
+          "component_id": "repair-component-0a4d3c4cec0b86eca8013365",
+          "effective": false,
+          "legal_repair_cut_ids": [],
+          "outcome_count": 3,
+          "outcome_counts": {
+            "UNKNOWN_ORACLE": 3
+          },
+          "pass_ratio": 0.0,
+          "preservation_node_ids": [],
+          "unit_count": 3,
+          "unit_ids": [
+            "binding-unit-0d3e70ffdb4af4056d0d5fc3",
+            "binding-unit-251a1816ef7c14f0ce63f503",
+            "binding-unit-34ed722157ddd5878293486a"
+          ]
+        },
+        {
+          "component_id": "repair-component-0d6f3758940efdf5c8f7cada",
+          "effective": false,
+          "legal_repair_cut_ids": [],
+          "outcome_count": 6,
+          "outcome_counts": {
+            "UNKNOWN_ORACLE": 6
+          },
+          "pass_ratio": 0.0,
+          "preservation_node_ids": [],
+          "unit_count": 6,
+          "unit_ids": [
+            "binding-unit-045759e7c671d1a6a6909369",
+            "binding-unit-17746441e6ddf8357fed4249",
+            "binding-unit-1ead402db5f8b54643185d2c",
+            "binding-unit-2ab7d6a0f2f6a5c3957fe53e",
+            "binding-unit-7c2e50ee26df90b805060f87",
+            "binding-unit-f877685c400f463b75ef1b81"
+          ]
+        },
+        {
+          "component_id": "repair-component-0e20e251c07ea73f991abba0",
+          "effective": false,
+          "legal_repair_cut_ids": [],
+          "outcome_count": 9,
+          "outcome_counts": {
+            "UNKNOWN_ORACLE": 9
+          },
+          "pass_ratio": 0.0,
+          "preservation_node_ids": [],
+          "unit_count": 9,
+          "unit_ids": [
+            "binding-unit-0694ead2b6c90b53a24a5b00",
+            "binding-unit-39e96105b29e7fcaa1d699ed",
+            "binding-unit-3d2bd38c00998f8afa06cc9a",
+            "binding-unit-4e699c97effb043cd04bef29",
+            "binding-unit-83bbf81dcb24ce83c03b6618",
+            "binding-unit-a3c0773c2462842bae567647",
+            "binding-unit-ae88f62f61e54cff801b9d8f",
+            "binding-unit-c133249cc6083b187d6b68db",
+            "binding-unit-f89d9fecdabb7d64d58903aa"
+          ]
+        },
+        {
+          "component_id": "repair-component-0e6af1a0e86cde132d409170",
+          "effective": false,
+          "legal_repair_cut_ids": [],
+          "outcome_count": 12,
+          "outcome_counts": {
+            "UNKNOWN_ORACLE": 12
+          },
+          "pass_ratio": 0.0,
+          "preservation_node_ids": [],
+          "unit_count": 12,
+          "unit_ids": [
+            "binding-unit-14fa5f97004086086bee2a1b",
+            "binding-unit-1c640d5097d285d1a2c4445e",
+            "binding-unit-4dfb9857d3ad3b5843282973",
+            "binding-unit-50eef551c38e85306de68c4d",
+            "binding-unit-907d9f9471c0c4ed9fda2ad0",
+            "binding-unit-9d55bfa6109f8ed406b0dfb2",
+            "binding-unit-a2c46555799ce52e3c8af5f0",
+            "binding-unit-bd6cdefc324dafd87f70326a",
+            "binding-unit-c64fd3ef2435fdd25ea75d49",
+            "binding-unit-c66a34c2043574d05bc87ea1",
+            "binding-unit-cfb664c745763652b7638d06",
+            "binding-unit-e72da33bf5ce0e6982b8c47d"
+          ]
+        },
+        {
+          "component_id": "repair-component-112aba32b418b9b954a8379a",
+          "effective": false,
+          "legal_repair_cut_ids": [],
+          "outcome_count": 6,
+          "outcome_counts": {
+            "UNKNOWN_ORACLE": 6
+          },
+          "pass_ratio": 0.0,
+          "preservation_node_ids": [],
+          "unit_count": 6,
+          "unit_ids": [
+            "binding-unit-12242df76cf81408478ccb6b",
+            "binding-unit-5c86c5c0a92122d9a75c5d62",
+            "binding-unit-6773ec9158dc6dffc295be39",
+            "binding-unit-7181591838c049bcfc344797",
+            "binding-unit-88f7cc80eafebb94c9bc09de",
+            "binding-unit-acf4748563f496a5baef0783"
+          ]
+        },
+        {
+          "component_id": "repair-component-129d0dc15e78f523f3d59461",
+          "effective": false,
+          "legal_repair_cut_ids": [],
+          "outcome_count": 15,
+          "outcome_counts": {
+            "UNKNOWN_ORACLE": 15
+          },
+          "pass_ratio": 0.0,
+          "preservation_node_ids": [],
+          "unit_count": 15,
+          "unit_ids": [
+            "binding-unit-14c8ec0c92a9f68374c23870",
+            "binding-unit-2f97a52cb051acefc491d5d7",
+            "binding-unit-2f9e3d999b069e8221616204",
+            "binding-unit-4491365b1deb786526b78fc8",
+            "binding-unit-4b65432e5604a23482f9cb24",
+            "binding-unit-53cb25630553edb0710947d6",
+            "binding-unit-68c1c7c3b157e1e5ede152c2",
+            "binding-unit-af7237f9b791756a60c64e4e",
+            "binding-unit-b94169891ca4e50031d447e4",
+            "binding-unit-bdbb55f4ded950e9a76efe74",
+            "binding-unit-cd6c2930dc9e721078fc1b8d",
+            "binding-unit-da506be808fcac22453573c3",
+            "binding-unit-dc11ff1a61b49ffb1eea31c2",
+            "binding-unit-e5b41fa1ac1477fb490fbe37",
+            "binding-unit-f2a6a773749a767c7e5bcbb0"
+          ]
+        },
+        {
+          "component_id": "repair-component-13cde1504597b7a52b439f23",
+          "effective": false,
+          "legal_repair_cut_ids": [],
+          "outcome_count": 3,
+          "outcome_counts": {
+            "UNKNOWN_ORACLE": 3
+          },
+          "pass_ratio": 0.0,
+          "preservation_node_ids": [],
+          "unit_count": 3,
+          "unit_ids": [
+            "binding-unit-23f4728fdffcc909858c0cbb",
+            "binding-unit-25902f02653fb86d3da047e3",
+            "binding-unit-39fbcd1c2e31068befb1107b"
+          ]
+        },
+        {
+          "component_id": "repair-component-18033f0d47eab910ee60b84e",
+          "effective": false,
+          "legal_repair_cut_ids": [],
+          "outcome_count": 9,
+          "outcome_counts": {
+            "UNKNOWN_ORACLE": 9
+          },
+          "pass_ratio": 0.0,
+          "preservation_node_ids": [],
+          "unit_count": 9,
+          "unit_ids": [
+            "binding-unit-095a98ba794ce2e059b9afdf",
+            "binding-unit-0965d2c096fcda62ccbfe062",
+            "binding-unit-1a77797892cf017290a49550",
+            "binding-unit-28bd0028dd1c06e13b80093b",
+            "binding-unit-35d0773482fa911b280acb22",
+            "binding-unit-3b036d9844d7b2e48c291c2e",
+            "binding-unit-5b33ec68d16af22a88705044",
+            "binding-unit-8946a9098ceafca7c0fb024f",
+            "binding-unit-d1b38ae621513d9a6c22aa67"
+          ]
+        },
+        {
+          "component_id": "repair-component-19849418b371893369731ea1",
+          "effective": false,
+          "legal_repair_cut_ids": [],
+          "outcome_count": 3,
+          "outcome_counts": {
+            "UNKNOWN_ORACLE": 3
+          },
+          "pass_ratio": 0.0,
+          "preservation_node_ids": [],
+          "unit_count": 3,
+          "unit_ids": [
+            "binding-unit-b7dcc90fcff5fd947dbb3e93",
+            "binding-unit-bc720db131bef846ba089f08",
+            "binding-unit-e6614041874827419ea05704"
+          ]
+        },
+        {
+          "component_id": "repair-component-1a020211b9f59d157cbba902",
+          "effective": false,
+          "legal_repair_cut_ids": [],
+          "outcome_count": 6,
+          "outcome_counts": {
+            "UNKNOWN_ORACLE": 6
+          },
+          "pass_ratio": 0.0,
+          "preservation_node_ids": [],
+          "unit_count": 6,
+          "unit_ids": [
+            "binding-unit-12d116a88da32cc2f9ff8146",
+            "binding-unit-1c9b0801b9f6505e847e4c94",
+            "binding-unit-217f6e704f89392bc736dc4b",
+            "binding-unit-8d672bbe5b6e0195effc4240",
+            "binding-unit-983126d927bdff665963f1ed",
+            "binding-unit-b09d917f403988a61a38f258"
+          ]
+        },
+        {
+          "component_id": "repair-component-1a6d726b67e31502387a6237",
+          "effective": false,
+          "legal_repair_cut_ids": [],
+          "outcome_count": 3,
+          "outcome_counts": {
+            "UNKNOWN_ORACLE": 3
+          },
+          "pass_ratio": 0.0,
+          "preservation_node_ids": [],
+          "unit_count": 3,
+          "unit_ids": [
+            "binding-unit-b601c265d29b18e4b3c0efc1",
+            "binding-unit-c59da99d4c8b7de17d4dfb28",
+            "binding-unit-f6f85af33e9b6952dfb380a3"
+          ]
+        },
+        {
+          "component_id": "repair-component-1c77d7780ea7e6fe10f010b6",
+          "effective": false,
+          "legal_repair_cut_ids": [],
+          "outcome_count": 12,
+          "outcome_counts": {
+            "UNKNOWN_ORACLE": 12
+          },
+          "pass_ratio": 0.0,
+          "preservation_node_ids": [],
+          "unit_count": 12,
+          "unit_ids": [
+            "binding-unit-00fb36c02a07787e3185b67b",
+            "binding-unit-0e683e064bf4e53f5328e27c",
+            "binding-unit-1a5552bd565a8b1642c01147",
+            "binding-unit-2561362a9d9415746137abab",
+            "binding-unit-2b2192515284cd6d48789520",
+            "binding-unit-68bc487c4f2694792ea7df99",
+            "binding-unit-6dbce82a137785e0c4d1354c",
+            "binding-unit-7ca8c4d4f86ed559a2be6f3e",
+            "binding-unit-97d4958d1345014645d0910a",
+            "binding-unit-9b4b3830912ed45f1c0066df",
+            "binding-unit-bb5244d43c334ff89e17c09f",
+            "binding-unit-e6ab0a54aa3d901b3f6e0b0d"
+          ]
+        },
+        {
+          "component_id": "repair-component-1daeb78e29c3d573ee01e467",
+          "effective": false,
+          "legal_repair_cut_ids": [],
+          "outcome_count": 18,
+          "outcome_counts": {
+            "UNKNOWN_ORACLE": 18
+          },
+          "pass_ratio": 0.0,
+          "preservation_node_ids": [],
+          "unit_count": 18,
+          "unit_ids": [
+            "binding-unit-0c4e4b60732a7748510aa4c6",
+            "binding-unit-0c83c321e117c7d1edbd1632",
+            "binding-unit-113388f38d076d9972165982",
+            "binding-unit-24b0c24a94010cb1a91509c9",
+            "binding-unit-2c3770e5ed75c424ad40c556",
+            "binding-unit-33af2fc787d9b99c09ebc9e5",
+            "binding-unit-3ae49e4252add705120a3aa9",
+            "binding-unit-4161ee7213d5e916efbd951f",
+            "binding-unit-63130a30b09af20af65db7d9",
+            "binding-unit-639fe9b4fa999628401937a8",
+            "binding-unit-7702b9c1e796b610443440eb",
+            "binding-unit-83ada3c253d85cd15fa0922d",
+            "binding-unit-91366100c9bfea6f33b9e190",
+            "binding-unit-913a31c223b2eb9c98d989ac",
+            "binding-unit-a6466dcc21c519eff7874263",
+            "binding-unit-bd7cd247f33da06c803eb957",
+            "binding-unit-c32f194a743a9bdd626918d5",
+            "binding-unit-ff0518b68de4f5f37256f3f7"
+          ]
+        },
+        {
+          "component_id": "repair-component-1fa32872329c28957d0bc1c8",
+          "effective": false,
+          "legal_repair_cut_ids": [],
+          "outcome_count": 15,
+          "outcome_counts": {
+            "UNKNOWN_ORACLE": 15
+          },
+          "pass_ratio": 0.0,
+          "preservation_node_ids": [],
+          "unit_count": 15,
+          "unit_ids": [
+            "binding-unit-0b0bd8ccaf1613aa43ee1315",
+            "binding-unit-3fb64eab55733780ef9bd0fe",
+            "binding-unit-43dc3809c1da72a41269d251",
+            "binding-unit-51ac89c83a6337d8d1a697f9",
+            "binding-unit-628fe9a66dc8e9f7ba54b5b2",
+            "binding-unit-658b94e0f040db27c7f0c75a",
+            "binding-unit-7a98ba581656f7ea394f0877",
+            "binding-unit-9308d027bab2822799cffe61",
+            "binding-unit-a588e0761af05e2a2d5ad351",
+            "binding-unit-b0be13d8941885bbeef0e8ce",
+            "binding-unit-cef14bc78135d64e25f7b2b3",
+            "binding-unit-d4125b3e73641d78e7c4e3e3",
+            "binding-unit-d6b04127f1a7806f86ef0292",
+            "binding-unit-eb4227f2b51c97bfcf8ebc61",
+            "binding-unit-f855ccf7c8014aaf8e34aadc"
+          ]
+        },
+        {
+          "component_id": "repair-component-206ebbec98ca7a3769522f1f",
+          "effective": false,
+          "legal_repair_cut_ids": [],
+          "outcome_count": 6,
+          "outcome_counts": {
+            "UNKNOWN_ORACLE": 6
+          },
+          "pass_ratio": 0.0,
+          "preservation_node_ids": [],
+          "unit_count": 6,
+          "unit_ids": [
+            "binding-unit-0029ce615eac1c2a393d7abb",
+            "binding-unit-11d2aebf49b25e9ddf55eed9",
+            "binding-unit-5299b4e94b0275b498abbc4a",
+            "binding-unit-6f6e674d08ea8e9fbef769e2",
+            "binding-unit-a52251e37ffeac05301546cf",
+            "binding-unit-bd98b8bf3d856a10fec73874"
+          ]
+        },
+        {
+          "component_id": "repair-component-20ade6148519c0642ad0b06f",
+          "effective": false,
+          "legal_repair_cut_ids": [],
+          "outcome_count": 6,
+          "outcome_counts": {
+            "UNKNOWN_ORACLE": 6
+          },
+          "pass_ratio": 0.0,
+          "preservation_node_ids": [],
+          "unit_count": 6,
+          "unit_ids": [
+            "binding-unit-6b052ae6c18dda02902f8092",
+            "binding-unit-81630b851f26a468aba98f06",
+            "binding-unit-b4256491da07516d63be0936",
+            "binding-unit-d9bd1a5ee3072bb0bbf90512",
+            "binding-unit-e167bad1672b494f6972f3b8",
+            "binding-unit-e748685314de7b33dbbc1f19"
+          ]
+        },
+        {
+          "component_id": "repair-component-21a36ac762d457d8c0f1d3f3",
+          "effective": false,
+          "legal_repair_cut_ids": [],
+          "outcome_count": 6,
+          "outcome_counts": {
+            "UNKNOWN_ORACLE": 6
+          },
+          "pass_ratio": 0.0,
+          "preservation_node_ids": [],
+          "unit_count": 6,
+          "unit_ids": [
+            "binding-unit-0751a5b453315cdd6c6ae079",
+            "binding-unit-4e1abec49b80e1cf872e1ed2",
+            "binding-unit-4e2897326230478fb5ff952f",
+            "binding-unit-60aa7d8fbdaeb474bdb08585",
+            "binding-unit-942069aa355abc720c007ba1",
+            "binding-unit-e002b441f2a8890826732042"
+          ]
+        },
+        {
+          "component_id": "repair-component-234d8647c6e000230075d8c0",
+          "effective": false,
+          "legal_repair_cut_ids": [],
+          "outcome_count": 3,
+          "outcome_counts": {
+            "UNKNOWN_ORACLE": 3
+          },
+          "pass_ratio": 0.0,
+          "preservation_node_ids": [],
+          "unit_count": 3,
+          "unit_ids": [
+            "binding-unit-082a676e6e58376c045b7d3a",
+            "binding-unit-8a0ea85ca76d317ffe3f7fb5",
+            "binding-unit-9841121ce2fbd0f0f1b5a11a"
+          ]
+        },
+        {
+          "component_id": "repair-component-24d9a30f5d60f0cb4090ad8d",
+          "effective": false,
+          "legal_repair_cut_ids": [],
+          "outcome_count": 6,
+          "outcome_counts": {
+            "UNKNOWN_ORACLE": 6
+          },
+          "pass_ratio": 0.0,
+          "preservation_node_ids": [],
+          "unit_count": 6,
+          "unit_ids": [
+            "binding-unit-250de531512764580f4a7b03",
+            "binding-unit-266ba2b43562819e8c56c070",
+            "binding-unit-27f4163c63e88a2c7165f8a3",
+            "binding-unit-48930ad270ab99d542655f96",
+            "binding-unit-943a2bb10078ab61e72566a3",
+            "binding-unit-aac5f9df1dfac0c416e73625"
+          ]
+        },
+        {
+          "component_id": "repair-component-252b09bd844a9a10ece46251",
+          "effective": false,
+          "legal_repair_cut_ids": [],
+          "outcome_count": 9,
+          "outcome_counts": {
+            "UNKNOWN_ORACLE": 9
+          },
+          "pass_ratio": 0.0,
+          "preservation_node_ids": [],
+          "unit_count": 9,
+          "unit_ids": [
+            "binding-unit-019fc698b8172dfad6ebc64a",
+            "binding-unit-0ad86b0a01d6bddcf26c7054",
+            "binding-unit-0ad9661dbbb84a6b26cddbad",
+            "binding-unit-33734ba723de465cfc9e618c",
+            "binding-unit-5df41d0a03cbb29d870a8484",
+            "binding-unit-b585e81626ee2836e8bc4f56",
+            "binding-unit-e66f6fe76336f0bdd3591735",
+            "binding-unit-eb71b65f301ce12d79ec0724",
+            "binding-unit-ecd61676ae8154baf93a4080"
+          ]
+        },
+        {
+          "component_id": "repair-component-271109e816c7c96e352f09f8",
+          "effective": false,
+          "legal_repair_cut_ids": [],
+          "outcome_count": 9,
+          "outcome_counts": {
+            "UNKNOWN_ORACLE": 9
+          },
+          "pass_ratio": 0.0,
+          "preservation_node_ids": [],
+          "unit_count": 9,
+          "unit_ids": [
+            "binding-unit-089a619581daab7d9ec2d0c2",
+            "binding-unit-233bb2e452d4182c52dc2ec9",
+            "binding-unit-23ece6b64f7bfe91a80dcab4",
+            "binding-unit-2f1c97086986e390404f2ce7",
+            "binding-unit-467c8dbd6123b2e5372767e0",
+            "binding-unit-8617c768f07bdc43271fb530",
+            "binding-unit-8bfca8d01cb8a93346c218a3",
+            "binding-unit-9f0c6f437c2e763baf0bc450",
+            "binding-unit-a77ab9a1f48f2642f25de868"
+          ]
+        },
+        {
+          "component_id": "repair-component-27a17f7bc2f6f2608f8bfdb4",
+          "effective": false,
+          "legal_repair_cut_ids": [],
+          "outcome_count": 6,
+          "outcome_counts": {
+            "UNKNOWN_ORACLE": 6
+          },
+          "pass_ratio": 0.0,
+          "preservation_node_ids": [],
+          "unit_count": 6,
+          "unit_ids": [
+            "binding-unit-065c1423b6ecfdee32798961",
+            "binding-unit-22b3788551532547e5d718c9",
+            "binding-unit-596cb3ccf6b26a0b6014cdfd",
+            "binding-unit-786e91d3a967a5b1dc950838",
+            "binding-unit-ac254a1185e052aa6bb92d3e",
+            "binding-unit-b919d23a06cbf8c298bcc9f3"
+          ]
+        },
+        {
+          "component_id": "repair-component-2801e55831888b5bc767d012",
+          "effective": false,
+          "legal_repair_cut_ids": [],
+          "outcome_count": 6,
+          "outcome_counts": {
+            "UNKNOWN_ORACLE": 6
+          },
+          "pass_ratio": 0.0,
+          "preservation_node_ids": [],
+          "unit_count": 6,
+          "unit_ids": [
+            "binding-unit-004aef70b730798323f66c8d",
+            "binding-unit-172e00d8f5c9f80f902300d4",
+            "binding-unit-1c64f7aeb2bdd0f0abc78bc3",
+            "binding-unit-31b8d4c9686f1605703427aa",
+            "binding-unit-3db3ffc3ad084ed0f6041e6f",
+            "binding-unit-b2578b3ee495129c033a8fbe"
+          ]
+        },
+        {
+          "component_id": "repair-component-2ab44b809f751ce67a546057",
+          "effective": false,
+          "legal_repair_cut_ids": [],
+          "outcome_count": 9,
+          "outcome_counts": {
+            "UNKNOWN_ORACLE": 9
+          },
+          "pass_ratio": 0.0,
+          "preservation_node_ids": [],
+          "unit_count": 9,
+          "unit_ids": [
+            "binding-unit-0bf7e9b3fddf4ca35af99ee3",
+            "binding-unit-0ea240adbadd0770d11461c9",
+            "binding-unit-2940d377050cbf41b81d1635",
+            "binding-unit-5a88ba3ce1b5044acb4ec035",
+            "binding-unit-a82b07ed10197d6b395d153f",
+            "binding-unit-bb4df4666d776a87af5d1250",
+            "binding-unit-bc4a696724cc3aadb482a672",
+            "binding-unit-bf398fb6b0e30fdef7557294",
+            "binding-unit-fc70adcd85623455c6a2a0ed"
+          ]
+        },
+        {
+          "component_id": "repair-component-2c3ed277c66ddb195bd06bdc",
+          "effective": false,
+          "legal_repair_cut_ids": [],
+          "outcome_count": 3,
+          "outcome_counts": {
+            "UNKNOWN_ORACLE": 3
+          },
+          "pass_ratio": 0.0,
+          "preservation_node_ids": [],
+          "unit_count": 3,
+          "unit_ids": [
+            "binding-unit-040845cd3d53dd95d2c4290d",
+            "binding-unit-33a5db0025669c417ce77c6d",
+            "binding-unit-9b4e426ac660c5bf3f05dcba"
+          ]
+        },
+        {
+          "component_id": "repair-component-2ece1735bb87b2e307003211",
+          "effective": false,
+          "legal_repair_cut_ids": [],
+          "outcome_count": 3,
+          "outcome_counts": {
+            "UNKNOWN_ORACLE": 3
+          },
+          "pass_ratio": 0.0,
+          "preservation_node_ids": [],
+          "unit_count": 3,
+          "unit_ids": [
+            "binding-unit-41e50bb5ddb57602383e6cc8",
+            "binding-unit-5a8b33d2b27cddacc7705e6c",
+            "binding-unit-f4f772b546f855d481450887"
+          ]
+        },
+        {
+          "component_id": "repair-component-30de54804768d362a077042d",
+          "effective": false,
+          "legal_repair_cut_ids": [],
+          "outcome_count": 3,
+          "outcome_counts": {
+            "UNKNOWN_ORACLE": 3
+          },
+          "pass_ratio": 0.0,
+          "preservation_node_ids": [],
+          "unit_count": 3,
+          "unit_ids": [
+            "binding-unit-0b34023f66af4aa4bc039979",
+            "binding-unit-458d2d9c8ccf25f9771f713f",
+            "binding-unit-b1fc1ba202e748c2430cb9f8"
+          ]
+        },
+        {
+          "component_id": "repair-component-31c3030fbd183fc84921bb11",
+          "effective": false,
+          "legal_repair_cut_ids": [],
+          "outcome_count": 3,
+          "outcome_counts": {
+            "UNKNOWN_ORACLE": 3
+          },
+          "pass_ratio": 0.0,
+          "preservation_node_ids": [],
+          "unit_count": 3,
+          "unit_ids": [
+            "binding-unit-51fdf723e32434ff348b99c4",
+            "binding-unit-6045c810035ff6802c9284d3",
+            "binding-unit-fc1f68a04f0a06df1e8cb4dd"
+          ]
+        },
+        {
+          "component_id": "repair-component-31ef90dc95da634678fc75c4",
+          "effective": false,
+          "legal_repair_cut_ids": [],
+          "outcome_count": 6,
+          "outcome_counts": {
+            "UNKNOWN_ORACLE": 6
+          },
+          "pass_ratio": 0.0,
+          "preservation_node_ids": [],
+          "unit_count": 6,
+          "unit_ids": [
+            "binding-unit-033adb432cdf535553ccbbb8",
+            "binding-unit-0eb9d8edb962f1524356e13f",
+            "binding-unit-12f8fc082e763f2c05ce5565",
+            "binding-unit-4aca02e6e5eea0d59dd47bc9",
+            "binding-unit-92eed7208cfb653e03308fe3",
+            "binding-unit-eb0b725544abc6dfb8a8abd8"
+          ]
+        },
+        {
+          "component_id": "repair-component-31f4c316955b77029046a92e",
+          "effective": false,
+          "legal_repair_cut_ids": [],
+          "outcome_count": 3,
+          "outcome_counts": {
+            "UNKNOWN_ORACLE": 3
+          },
+          "pass_ratio": 0.0,
+          "preservation_node_ids": [],
+          "unit_count": 3,
+          "unit_ids": [
+            "binding-unit-5beb0878fab71c472255f59d",
+            "binding-unit-9c70ef8aee7e6f19e0fe6ab8",
+            "binding-unit-e2c143d407886f3075132d15"
+          ]
+        },
+        {
+          "component_id": "repair-component-329e7e68e9ab6c8007c83f03",
+          "effective": false,
+          "legal_repair_cut_ids": [],
+          "outcome_count": 6,
+          "outcome_counts": {
+            "UNKNOWN_ORACLE": 6
+          },
+          "pass_ratio": 0.0,
+          "preservation_node_ids": [],
+          "unit_count": 6,
+          "unit_ids": [
+            "binding-unit-1159ff8abd361ceb783a2e4b",
+            "binding-unit-157a3dc80f1268da60b4acc9",
+            "binding-unit-447cf45efd4cb8a8f25635ce",
+            "binding-unit-585411ee1cf02b9dd2725917",
+            "binding-unit-eb463b5f20812637aaf19d7f",
+            "binding-unit-f9475c11b2c893d72efd2448"
+          ]
+        },
+        {
+          "component_id": "repair-component-33be024858091d3f58c2430c",
+          "effective": false,
+          "legal_repair_cut_ids": [],
+          "outcome_count": 3,
+          "outcome_counts": {
+            "UNKNOWN_ORACLE": 3
+          },
+          "pass_ratio": 0.0,
+          "preservation_node_ids": [],
+          "unit_count": 3,
+          "unit_ids": [
+            "binding-unit-68bd2c2921817cd76386399e",
+            "binding-unit-bccf5a4723f261827b0e4ecc",
+            "binding-unit-db36405ed21e908f4e178312"
+          ]
+        },
+        {
+          "component_id": "repair-component-35e6fe6725a0c182ae521a02",
+          "effective": false,
+          "legal_repair_cut_ids": [],
+          "outcome_count": 15,
+          "outcome_counts": {
+            "UNKNOWN_ORACLE": 15
+          },
+          "pass_ratio": 0.0,
+          "preservation_node_ids": [],
+          "unit_count": 15,
+          "unit_ids": [
+            "binding-unit-0cf74bf31210e33ea4fb0e37",
+            "binding-unit-2758c251f9897c4a278f9d2c",
+            "binding-unit-27fa89f86d528d2796189b92",
+            "binding-unit-2a852884b6de06e6602110fc",
+            "binding-unit-2eebb9dcd7a452a554ecb20e",
+            "binding-unit-39532c31c8b67ccf8f8b1464",
+            "binding-unit-67715fe7bca51029d30a0224",
+            "binding-unit-684820616fd7a5847de04023",
+            "binding-unit-6ec707d2c8ca82f60962c1c5",
+            "binding-unit-99ebcecc4f12672893302179",
+            "binding-unit-ae25c722efc8f5c0a18d630d",
+            "binding-unit-b8fa4ee3cc32d3b37f088ee5",
+            "binding-unit-bbbab711699e25378b583b0a",
+            "binding-unit-d466c02e29c8cc4cca31041b",
+            "binding-unit-d95e9567608ecbe11011ab40"
+          ]
+        },
+        {
+          "component_id": "repair-component-36b0d3f983c5d91b436e5efc",
+          "effective": false,
+          "legal_repair_cut_ids": [],
+          "outcome_count": 3,
+          "outcome_counts": {
+            "UNKNOWN_ORACLE": 3
+          },
+          "pass_ratio": 0.0,
+          "preservation_node_ids": [],
+          "unit_count": 3,
+          "unit_ids": [
+            "binding-unit-026a610edbcb0c6e702b21e1",
+            "binding-unit-eb492c154d0b7afca333a08b",
+            "binding-unit-eef464126db02e8d58a80907"
+          ]
+        },
+        {
+          "component_id": "repair-component-370af7555555f39ff8345a8d",
+          "effective": false,
+          "legal_repair_cut_ids": [],
+          "outcome_count": 6,
+          "outcome_counts": {
+            "UNKNOWN_ORACLE": 6
+          },
+          "pass_ratio": 0.0,
+          "preservation_node_ids": [],
+          "unit_count": 6,
+          "unit_ids": [
+            "binding-unit-0e8b26738e65514f690784e0",
+            "binding-unit-2e5194ff3cea1b2ccb5c3773",
+            "binding-unit-712f0e0ca33b9ed6e2010070",
+            "binding-unit-8b888132fdf15251bf0600bc",
+            "binding-unit-ebb01d4dbca6e47291a0fb9f",
+            "binding-unit-f147fb02b3c10b0d10c3aece"
+          ]
+        },
+        {
+          "component_id": "repair-component-3799a372978b7de9da11c761",
+          "effective": false,
+          "legal_repair_cut_ids": [],
+          "outcome_count": 3,
+          "outcome_counts": {
+            "UNKNOWN_ORACLE": 3
+          },
+          "pass_ratio": 0.0,
+          "preservation_node_ids": [],
+          "unit_count": 3,
+          "unit_ids": [
+            "binding-unit-55160b49d3401d11b6f0d295",
+            "binding-unit-77b3bf523c61db271f82f98f",
+            "binding-unit-e31fa18f1b8c380aa5cde81c"
+          ]
+        },
+        {
+          "component_id": "repair-component-38b67a2637af93c97d843b36",
+          "effective": false,
+          "legal_repair_cut_ids": [],
+          "outcome_count": 9,
+          "outcome_counts": {
+            "UNKNOWN_ORACLE": 9
+          },
+          "pass_ratio": 0.0,
+          "preservation_node_ids": [],
+          "unit_count": 9,
+          "unit_ids": [
+            "binding-unit-1201dd13ce6450f6bc23f089",
+            "binding-unit-3647a1e622969fc183d508d6",
+            "binding-unit-4aca5a5f70378a114992711d",
+            "binding-unit-4ea21a07690bc64027e27ccd",
+            "binding-unit-55441a21610f59deb596e71e",
+            "binding-unit-5fb8e7f8f629a737be2aad15",
+            "binding-unit-7772c998614c970c55931111",
+            "binding-unit-cba59400c4f7f31faa3498db",
+            "binding-unit-da87211f2ec4403e983fce23"
+          ]
+        },
+        {
+          "component_id": "repair-component-3e0e942ff3c311a20dd18e35",
+          "effective": false,
+          "legal_repair_cut_ids": [],
+          "outcome_count": 3,
+          "outcome_counts": {
+            "UNKNOWN_ORACLE": 3
+          },
+          "pass_ratio": 0.0,
+          "preservation_node_ids": [],
+          "unit_count": 3,
+          "unit_ids": [
+            "binding-unit-04ca91fddd1f3e4fe1852c08",
+            "binding-unit-1e79de6ad219532d8a94fa9b",
+            "binding-unit-9a900cddd987a2242367e6c7"
+          ]
+        },
+        {
+          "component_id": "repair-component-44d5f16f11bdeb6b2067c63b",
+          "effective": false,
+          "legal_repair_cut_ids": [],
+          "outcome_count": 15,
+          "outcome_counts": {
+            "UNKNOWN_ORACLE": 15
+          },
+          "pass_ratio": 0.0,
+          "preservation_node_ids": [],
+          "unit_count": 15,
+          "unit_ids": [
+            "binding-unit-0fa36695c7330af27c05cf8c",
+            "binding-unit-116d87b96220525e769ba5bd",
+            "binding-unit-2938d49d4a611a94ce7fdb21",
+            "binding-unit-3d9de8b26159e9dd2951b2e0",
+            "binding-unit-50f6af05f10a6f4f3656b11c",
+            "binding-unit-557de456596228a137dd7834",
+            "binding-unit-579bb3b06b49d7036e4e516b",
+            "binding-unit-849841d7040a818e88849955",
+            "binding-unit-993006c12157bbbd7fdcaac0",
+            "binding-unit-cc8a30a232626c5216fb0111",
+            "binding-unit-ddab4bf36312f7273a7c5c92",
+            "binding-unit-e500160497656e156cc6b850",
+            "binding-unit-e9e1b8fc9c333683f57f5687",
+            "binding-unit-fab3a9336bea1066bfa3d8d9",
+            "binding-unit-fba898c46d7d347409ea4e21"
+          ]
+        },
+        {
+          "component_id": "repair-component-49d2e7c451adbb4fe544c184",
+          "effective": false,
+          "legal_repair_cut_ids": [],
+          "outcome_count": 6,
+          "outcome_counts": {
+            "UNKNOWN_ORACLE": 6
+          },
+          "pass_ratio": 0.0,
+          "preservation_node_ids": [],
+          "unit_count": 6,
+          "unit_ids": [
+            "binding-unit-39f8d39c2f02356627723a82",
+            "binding-unit-706131a2c9b46cee0f96adf5",
+            "binding-unit-7c89c2aefc69fbe7f12e65ce",
+            "binding-unit-8b7e7ce4c444d24e77b3bde4",
+            "binding-unit-a7355210ba490c77387c6a25",
+            "binding-unit-be894f4b7174a4ad8f5fa1ea"
+          ]
+        },
+        {
+          "component_id": "repair-component-4b5e4b4f83659b96ecc6a7ea",
+          "effective": false,
+          "legal_repair_cut_ids": [],
+          "outcome_count": 9,
+          "outcome_counts": {
+            "UNKNOWN_ORACLE": 9
+          },
+          "pass_ratio": 0.0,
+          "preservation_node_ids": [],
+          "unit_count": 9,
+          "unit_ids": [
+            "binding-unit-33ee89959e685e1725dcfe5e",
+            "binding-unit-37d1add00bb6d9326d8f1693",
+            "binding-unit-592e5a12e5093796ed0408d4",
+            "binding-unit-5a153782270297f328801fea",
+            "binding-unit-6369feae5af40d69feca4dc2",
+            "binding-unit-6ee776fdf2cdcb883e48a023",
+            "binding-unit-9a20be5bd50dd539e5ef492f",
+            "binding-unit-c4ebb4c1489d2c8329af49f4",
+            "binding-unit-ec56d56244f8b8ada8de4497"
+          ]
+        },
+        {
+          "component_id": "repair-component-4cdbceb3f92e3205919080cb",
+          "effective": false,
+          "legal_repair_cut_ids": [],
+          "outcome_count": 15,
+          "outcome_counts": {
+            "UNKNOWN_ORACLE": 15
+          },
+          "pass_ratio": 0.0,
+          "preservation_node_ids": [],
+          "unit_count": 15,
+          "unit_ids": [
+            "binding-unit-0068e19d0adfcdf1a19e6877",
+            "binding-unit-01000f9000ef9660dd204dfc",
+            "binding-unit-1e22d9272af0e8e42784f95a",
+            "binding-unit-401e8244731c5c3168bada41",
+            "binding-unit-48404a0200db1aa48d8561d2",
+            "binding-unit-4f72437017f0895ad1103194",
+            "binding-unit-6252e3e091a4e9d818a4efb5",
+            "binding-unit-7e6b33aeef98eb3431d5dbf0",
+            "binding-unit-8396ba1e86932739d81c1c03",
+            "binding-unit-af9b7018a5e95b7f84d7e14e",
+            "binding-unit-c13fa411d42a64939560f122",
+            "binding-unit-d5f44a99e646b66a88ae2ee0",
+            "binding-unit-f21838cad4abbe26c37f95df",
+            "binding-unit-f36ddfb081fce9b4e9e47b24",
+            "binding-unit-fd0cfbebe3909cb46eec9509"
+          ]
+        },
+        {
+          "component_id": "repair-component-4efa500cf4bb6e76a2a46bff",
+          "effective": false,
+          "legal_repair_cut_ids": [],
+          "outcome_count": 12,
+          "outcome_counts": {
+            "UNKNOWN_ORACLE": 12
+          },
+          "pass_ratio": 0.0,
+          "preservation_node_ids": [],
+          "unit_count": 12,
+          "unit_ids": [
+            "binding-unit-0a53982caaf6e56671481d71",
+            "binding-unit-0cf2d1dcdf19707e6bce79d7",
+            "binding-unit-321aa908d294f1ab810eff22",
+            "binding-unit-332a1b773455c7d6699fda67",
+            "binding-unit-789bdce828e2314fe427eeb4",
+            "binding-unit-8312a6a25d526ce65b8d2d98",
+            "binding-unit-8d2831cb13be86ae88f2a78e",
+            "binding-unit-996c15048239e506a38dc572",
+            "binding-unit-b180e39635fdff8784e4e4e8",
+            "binding-unit-bf0133bbd1703b89349fd519",
+            "binding-unit-cff7097e66f6724f002d3cf9",
+            "binding-unit-f23622ee58480297c358f76f"
+          ]
+        },
+        {
+          "component_id": "repair-component-4f0b5d8a73ec6767ae6e40a0",
+          "effective": false,
+          "legal_repair_cut_ids": [],
+          "outcome_count": 3,
+          "outcome_counts": {
+            "UNKNOWN_ORACLE": 3
+          },
+          "pass_ratio": 0.0,
+          "preservation_node_ids": [],
+          "unit_count": 3,
+          "unit_ids": [
+            "binding-unit-4029187adcfd20fc72c09377",
+            "binding-unit-6565ef9e2b6975c9ae25ed27",
+            "binding-unit-b8155dcd0a1d52716a97e483"
+          ]
+        },
+        {
+          "component_id": "repair-component-50bea084c2d3e54fe353fb97",
+          "effective": false,
+          "legal_repair_cut_ids": [],
+          "outcome_count": 15,
+          "outcome_counts": {
+            "UNKNOWN_ORACLE": 15
+          },
+          "pass_ratio": 0.0,
+          "preservation_node_ids": [],
+          "unit_count": 15,
+          "unit_ids": [
+            "binding-unit-089edd9a7b17f199208cf8dd",
+            "binding-unit-1e61823036f184c7d323be2f",
+            "binding-unit-2a5d0b579a08d7af0702a4f5",
+            "binding-unit-366e90663a3075eea2b49a5e",
+            "binding-unit-3ee4938205eefe834b3447e5",
+            "binding-unit-408e1731e97e5be295c263ec",
+            "binding-unit-45d75004f656ad606c0aedcb",
+            "binding-unit-781b6e5ef2e66aa3143f1596",
+            "binding-unit-7feba100638e2d6759005096",
+            "binding-unit-8c8891e56e0084df19d90d1d",
+            "binding-unit-952a461dac3da53883b81fed",
+            "binding-unit-a4d9b5321c8da01da7b4dd76",
+            "binding-unit-b824a8a2676b1048127088d1",
+            "binding-unit-c044d6438df80b33e6aaffe0",
+            "binding-unit-e185d1e42dedc420263f2ee9"
+          ]
+        },
+        {
+          "component_id": "repair-component-52adec4646437e42e0d097b8",
+          "effective": false,
+          "legal_repair_cut_ids": [],
+          "outcome_count": 6,
+          "outcome_counts": {
+            "UNKNOWN_ORACLE": 6
+          },
+          "pass_ratio": 0.0,
+          "preservation_node_ids": [],
+          "unit_count": 6,
+          "unit_ids": [
+            "binding-unit-0fc33556a0781349cddaaa42",
+            "binding-unit-1cba24ae452ea6a1bc61afcf",
+            "binding-unit-4deb7c99a2e78e15ab434c30",
+            "binding-unit-5c725d42f46de6d29e7d6430",
+            "binding-unit-76ac59ae8e3facdb6e95d62f",
+            "binding-unit-9b1ba938346e8858dacb63af"
+          ]
+        },
+        {
+          "component_id": "repair-component-55f6f2c847ffb0886bea9352",
+          "effective": false,
+          "legal_repair_cut_ids": [],
+          "outcome_count": 6,
+          "outcome_counts": {
+            "UNKNOWN_ORACLE": 6
+          },
+          "pass_ratio": 0.0,
+          "preservation_node_ids": [],
+          "unit_count": 6,
+          "unit_ids": [
+            "binding-unit-0c8f2b5241068cdf3a2fff03",
+            "binding-unit-2704e343c2eceba70a0a831f",
+            "binding-unit-3c456d6c84ef3793f93d14a8",
+            "binding-unit-6e0f6e06ea1fc56d31f35848",
+            "binding-unit-abbf8d7411b5c2348fa3ae58",
+            "binding-unit-ff61955795ac56d0ce4846bb"
+          ]
+        },
+        {
+          "component_id": "repair-component-56c51b33df58923185c6651a",
+          "effective": false,
+          "legal_repair_cut_ids": [],
+          "outcome_count": 6,
+          "outcome_counts": {
+            "UNKNOWN_ORACLE": 6
+          },
+          "pass_ratio": 0.0,
+          "preservation_node_ids": [],
+          "unit_count": 6,
+          "unit_ids": [
+            "binding-unit-70cf6f95baf9344e16ff885a",
+            "binding-unit-719d51aea7162af2e46cf3f0",
+            "binding-unit-7ba068c5908bead2ca31a723",
+            "binding-unit-7fec4b7090de52f4159940d6",
+            "binding-unit-8b8b86440e26f3c57fb42fe2",
+            "binding-unit-db94d70f0fa985eb89dd385b"
+          ]
+        },
+        {
+          "component_id": "repair-component-56db9895754f8b591a92f423",
+          "effective": false,
+          "legal_repair_cut_ids": [],
+          "outcome_count": 3,
+          "outcome_counts": {
+            "UNKNOWN_ORACLE": 3
+          },
+          "pass_ratio": 0.0,
+          "preservation_node_ids": [],
+          "unit_count": 3,
+          "unit_ids": [
+            "binding-unit-08fb5a93330efaca8a05dc0d",
+            "binding-unit-383bb6f02e6acca991d72819",
+            "binding-unit-c3a8ef799cd9fefb5a299097"
+          ]
+        },
+        {
+          "component_id": "repair-component-578bbd5d2d548c5c2bf2acf7",
+          "effective": false,
+          "legal_repair_cut_ids": [],
+          "outcome_count": 3,
+          "outcome_counts": {
+            "UNKNOWN_ORACLE": 3
+          },
+          "pass_ratio": 0.0,
+          "preservation_node_ids": [],
+          "unit_count": 3,
+          "unit_ids": [
+            "binding-unit-11baf7f8d9b4ec97a7c740e3",
+            "binding-unit-dbb8c7ce9ca5adc8255e9b91",
+            "binding-unit-ea7c75a8cf10bf501b0fe8eb"
+          ]
+        },
+        {
+          "component_id": "repair-component-58dbab4023a3a5fa4ac9a939",
+          "effective": false,
+          "legal_repair_cut_ids": [],
+          "outcome_count": 6,
+          "outcome_counts": {
+            "UNKNOWN_ORACLE": 6
+          },
+          "pass_ratio": 0.0,
+          "preservation_node_ids": [],
+          "unit_count": 6,
+          "unit_ids": [
+            "binding-unit-0dabc4003fdb6ecc8e5dab5e",
+            "binding-unit-14b9394100dfaf496ed25d17",
+            "binding-unit-2955d12262168752495c0a0d",
+            "binding-unit-7f525748e437ae29951ed651",
+            "binding-unit-cd58680358a68e18b6a526a6",
+            "binding-unit-ed342f482ebb18d7ada5088a"
+          ]
+        },
+        {
+          "component_id": "repair-component-59d971c081589f2c81fa27d4",
+          "effective": false,
+          "legal_repair_cut_ids": [],
+          "outcome_count": 3,
+          "outcome_counts": {
+            "UNKNOWN_ORACLE": 3
+          },
+          "pass_ratio": 0.0,
+          "preservation_node_ids": [],
+          "unit_count": 3,
+          "unit_ids": [
+            "binding-unit-46489bac5f12535015e37079",
+            "binding-unit-7ed2d1cf45454e4cc5dfa3ae",
+            "binding-unit-d5c1f843082eb1f2bf59bbc9"
+          ]
+        },
+        {
+          "component_id": "repair-component-5a326b786fc7484b3f46d227",
+          "effective": false,
+          "legal_repair_cut_ids": [],
+          "outcome_count": 6,
+          "outcome_counts": {
+            "UNKNOWN_ORACLE": 6
+          },
+          "pass_ratio": 0.0,
+          "preservation_node_ids": [],
+          "unit_count": 6,
+          "unit_ids": [
+            "binding-unit-02a561e2c2987b8f0ac07de8",
+            "binding-unit-131e3405094c8e7abf77e2c3",
+            "binding-unit-377496f0b0f9c6c4e935cf5c",
+            "binding-unit-532172eb9d3554a72c3c79cb",
+            "binding-unit-88e25cf541cf6e1ea012fa83",
+            "binding-unit-a3526281214e62a0b80890f4"
+          ]
+        },
+        {
+          "component_id": "repair-component-5b4648da8c67c14193d2a649",
+          "effective": false,
+          "legal_repair_cut_ids": [],
+          "outcome_count": 15,
+          "outcome_counts": {
+            "UNKNOWN_ORACLE": 15
+          },
+          "pass_ratio": 0.0,
+          "preservation_node_ids": [],
+          "unit_count": 15,
+          "unit_ids": [
+            "binding-unit-10db17e1ef27a4a19c6a8c50",
+            "binding-unit-15835c2ea5e1401713d52797",
+            "binding-unit-54911ea527b06617ef888cf9",
+            "binding-unit-6063a03c5247e63d1c40e6be",
+            "binding-unit-6103a7e7fbaaefa80c6cd22f",
+            "binding-unit-6f2825f979e8323d1878f871",
+            "binding-unit-8168ee7017a111584fab450b",
+            "binding-unit-8e89be7832f760415d4b5807",
+            "binding-unit-99a65df24d50efc5fe304d75",
+            "binding-unit-a47e202acb7f41eb81557f7e",
+            "binding-unit-a977c2c6d8f61b067a0b7721",
+            "binding-unit-bd87bc68886e3da25286d68f",
+            "binding-unit-d47d208b7a4bc681efa88a64",
+            "binding-unit-e4fbe43bf6fa17a0dbaa932c",
+            "binding-unit-f1179cd183df60902ad424cd"
+          ]
+        },
+        {
+          "component_id": "repair-component-5b7fd68467be8c904695c973",
+          "effective": false,
+          "legal_repair_cut_ids": [],
+          "outcome_count": 12,
+          "outcome_counts": {
+            "UNKNOWN_ORACLE": 12
+          },
+          "pass_ratio": 0.0,
+          "preservation_node_ids": [],
+          "unit_count": 12,
+          "unit_ids": [
+            "binding-unit-02a2542f6f4992d4f8632302",
+            "binding-unit-0f6137d6806434e2215b704e",
+            "binding-unit-1cf187bd1d8097ea02198ede",
+            "binding-unit-24524eb980e37ae858dd6a66",
+            "binding-unit-3d7815833cc0e106230fc8a7",
+            "binding-unit-446ca07eddda451ea7a6cc05",
+            "binding-unit-5cf7e2c98c7d91f34a2d4a22",
+            "binding-unit-7c50da17790437468e841806",
+            "binding-unit-7fb0b0776cb1c4465b728d9f",
+            "binding-unit-b33c28445882dd199dcc695f",
+            "binding-unit-b9ab5aec8a4cc951eef9d9dc",
+            "binding-unit-f9768c855cd6c8c6fa8f23fc"
+          ]
+        },
+        {
+          "component_id": "repair-component-5c22152e9f8095412b77509f",
+          "effective": false,
+          "legal_repair_cut_ids": [],
+          "outcome_count": 3,
+          "outcome_counts": {
+            "UNKNOWN_ORACLE": 3
+          },
+          "pass_ratio": 0.0,
+          "preservation_node_ids": [],
+          "unit_count": 3,
+          "unit_ids": [
+            "binding-unit-45fd1809f1e8f0debdd4a80a",
+            "binding-unit-49b0081116cba7880779a7cc",
+            "binding-unit-d66d2411339ff9d2bcab0d87"
+          ]
+        },
+        {
+          "component_id": "repair-component-5c58bdbbd26fa61f395643f0",
+          "effective": false,
+          "legal_repair_cut_ids": [],
+          "outcome_count": 15,
+          "outcome_counts": {
+            "UNKNOWN_ORACLE": 15
+          },
+          "pass_ratio": 0.0,
+          "preservation_node_ids": [],
+          "unit_count": 15,
+          "unit_ids": [
+            "binding-unit-0ed412aaa7951f0aa85fa647",
+            "binding-unit-132efe309b2c4bd61356425f",
+            "binding-unit-144b7e71b998a4be65627c0e",
+            "binding-unit-4a4712258e6bba07f14eea82",
+            "binding-unit-53ec842d6d9e06ebee01c928",
+            "binding-unit-67ef7f1f7cddea0bb12687e7",
+            "binding-unit-8cb7df41294c61117901a234",
+            "binding-unit-8d3d5ffcb0894b55c91fae17",
+            "binding-unit-9cb3cc96c0967cfb89199069",
+            "binding-unit-ac8cb3cbf4d07d900b5701d4",
+            "binding-unit-bc3a6285d4173e7a364a64be",
+            "binding-unit-c48af345ef138cc9499718ec",
+            "binding-unit-c6b3024c1b7091d5d5eefc28",
+            "binding-unit-d30d74b5a08b41d0a48666df",
+            "binding-unit-dcf6a0cb8ed94697a4437dca"
+          ]
+        },
+        {
+          "component_id": "repair-component-5c677411d81fac152cd8f933",
+          "effective": false,
+          "legal_repair_cut_ids": [],
+          "outcome_count": 3,
+          "outcome_counts": {
+            "UNKNOWN_ORACLE": 3
+          },
+          "pass_ratio": 0.0,
+          "preservation_node_ids": [],
+          "unit_count": 3,
+          "unit_ids": [
+            "binding-unit-0e717c143d8356aee79d8d03",
+            "binding-unit-6a977ed21fc4f8df829166ae",
+            "binding-unit-ce0a6cc3c66a8485e0e6c951"
+          ]
+        },
+        {
+          "component_id": "repair-component-5d3ca18913636adfe1c88a75",
+          "effective": false,
+          "legal_repair_cut_ids": [],
+          "outcome_count": 12,
+          "outcome_counts": {
+            "UNKNOWN_ORACLE": 12
+          },
+          "pass_ratio": 0.0,
+          "preservation_node_ids": [],
+          "unit_count": 12,
+          "unit_ids": [
+            "binding-unit-2a8adbc5cbf40f5820d02213",
+            "binding-unit-3408a64eb1ba5c609ebe9a42",
+            "binding-unit-52bfbe03c4051c6d6e507562",
+            "binding-unit-64755891e24f874cd7ec83f9",
+            "binding-unit-6b2d57444a66644fe178415e",
+            "binding-unit-8517254ea37d20d77f67092a",
+            "binding-unit-9b9cec866eb0ccaa302c0efa",
+            "binding-unit-b40e577af68f60bbe4881fad",
+            "binding-unit-b5f001f77b36ec834c5bc602",
+            "binding-unit-d063767c0e96bb326d26c4c6",
+            "binding-unit-e5c7adef9c16a181673da3fd",
+            "binding-unit-f7560e74e95fe4da0d543bf5"
+          ]
+        },
+        {
+          "component_id": "repair-component-5f5a68681e2962b399f68c50",
+          "effective": false,
+          "legal_repair_cut_ids": [],
+          "outcome_count": 3,
+          "outcome_counts": {
+            "UNKNOWN_ORACLE": 3
+          },
+          "pass_ratio": 0.0,
+          "preservation_node_ids": [],
+          "unit_count": 3,
+          "unit_ids": [
+            "binding-unit-41ddb47bca45688c64745d6d",
+            "binding-unit-5e67d7465adf1e45480d748c",
+            "binding-unit-884fbb68d6402400d8065c44"
+          ]
+        },
+        {
+          "component_id": "repair-component-5fb1f1d407aaf680022d5711",
+          "effective": false,
+          "legal_repair_cut_ids": [],
+          "outcome_count": 3,
+          "outcome_counts": {
+            "UNKNOWN_ORACLE": 3
+          },
+          "pass_ratio": 0.0,
+          "preservation_node_ids": [],
+          "unit_count": 3,
+          "unit_ids": [
+            "binding-unit-2ad3406bfec80324700444c0",
+            "binding-unit-3c8545b69e98f9753f5b10c3",
+            "binding-unit-8173938d26b985853251110a"
+          ]
+        },
+        {
+          "component_id": "repair-component-5fe16842432790285c32a88e",
+          "effective": false,
+          "legal_repair_cut_ids": [],
+          "outcome_count": 6,
+          "outcome_counts": {
+            "UNKNOWN_ORACLE": 6
+          },
+          "pass_ratio": 0.0,
+          "preservation_node_ids": [],
+          "unit_count": 6,
+          "unit_ids": [
+            "binding-unit-0ebc885a3968154ce7c1b4ac",
+            "binding-unit-6f38dbf8405412cd29e075d2",
+            "binding-unit-8e929ab7d2929eb3c8d9d6ec",
+            "binding-unit-bd60f66a55ee42f03e62f066",
+            "binding-unit-e7a6a34ada702598b2b30781",
+            "binding-unit-fae9a83a3862a4224d480e7c"
+          ]
+        },
+        {
+          "component_id": "repair-component-600e56a8c8fb062a92991fb7",
+          "effective": false,
+          "legal_repair_cut_ids": [],
+          "outcome_count": 3,
+          "outcome_counts": {
+            "UNKNOWN_ORACLE": 3
+          },
+          "pass_ratio": 0.0,
+          "preservation_node_ids": [],
+          "unit_count": 3,
+          "unit_ids": [
+            "binding-unit-47ddc85dade9aace5abe5173",
+            "binding-unit-990569e3ff24ac1e27c09e2b",
+            "binding-unit-c04fa2977363f0f9ccd3618e"
+          ]
+        },
+        {
+          "component_id": "repair-component-61696d9d4266838b95900e25",
+          "effective": false,
+          "legal_repair_cut_ids": [],
+          "outcome_count": 3,
+          "outcome_counts": {
+            "UNKNOWN_ORACLE": 3
+          },
+          "pass_ratio": 0.0,
+          "preservation_node_ids": [],
+          "unit_count": 3,
+          "unit_ids": [
+            "binding-unit-07555b51651111790aabd273",
+            "binding-unit-d9d4a994ffd7ccab08fb5e6b",
+            "binding-unit-f311c93778163aa6914723bc"
+          ]
+        },
+        {
+          "component_id": "repair-component-61f75dfee87437c7099690b0",
+          "effective": false,
+          "legal_repair_cut_ids": [],
+          "outcome_count": 3,
+          "outcome_counts": {
+            "UNKNOWN_ORACLE": 3
+          },
+          "pass_ratio": 0.0,
+          "preservation_node_ids": [],
+          "unit_count": 3,
+          "unit_ids": [
+            "binding-unit-23c87f8ac2b9ec8d34ee6b3d",
+            "binding-unit-cae031764dd3d989c7bfbaab",
+            "binding-unit-ffab07f8cb3a8630101e383c"
+          ]
+        },
+        {
+          "component_id": "repair-component-6207e95590da8ea6af127a5b",
+          "effective": false,
+          "legal_repair_cut_ids": [],
+          "outcome_count": 3,
+          "outcome_counts": {
+            "UNKNOWN_ORACLE": 3
+          },
+          "pass_ratio": 0.0,
+          "preservation_node_ids": [],
+          "unit_count": 3,
+          "unit_ids": [
+            "binding-unit-1c84af9d2084f416c73ebd45",
+            "binding-unit-368c07b0949bde4b13383337",
+            "binding-unit-9d9cf69a9f9b3cc6f5473f40"
+          ]
+        },
+        {
+          "component_id": "repair-component-62b32adeb81e53183310d418",
+          "effective": false,
+          "legal_repair_cut_ids": [],
+          "outcome_count": 3,
+          "outcome_counts": {
+            "UNKNOWN_ORACLE": 3
+          },
+          "pass_ratio": 0.0,
+          "preservation_node_ids": [],
+          "unit_count": 3,
+          "unit_ids": [
+            "binding-unit-5a4d039255557f1b6326979b",
+            "binding-unit-5a523352a859a65a0b914749",
+            "binding-unit-9da20c2285d05dca18108669"
+          ]
+        },
+        {
+          "component_id": "repair-component-646690019fabb9ec963fc04a",
+          "effective": false,
+          "legal_repair_cut_ids": [],
+          "outcome_count": 6,
+          "outcome_counts": {
+            "UNKNOWN_ORACLE": 6
+          },
+          "pass_ratio": 0.0,
+          "preservation_node_ids": [],
+          "unit_count": 6,
+          "unit_ids": [
+            "binding-unit-1417d81631b8fcb39366d872",
+            "binding-unit-1cf7645baeced1ae3d14e12f",
+            "binding-unit-63836dcf1c431a3086bdc2b2",
+            "binding-unit-9495c8a2fdf09c0ed7260501",
+            "binding-unit-962151800cd12f24baaf70ae",
+            "binding-unit-e66d1f397dc52c4c41442ce4"
+          ]
+        },
+        {
+          "component_id": "repair-component-64d6aac0a8fc38c46190f69f",
+          "effective": false,
+          "legal_repair_cut_ids": [],
+          "outcome_count": 3,
+          "outcome_counts": {
+            "UNKNOWN_ORACLE": 3
+          },
+          "pass_ratio": 0.0,
+          "preservation_node_ids": [],
+          "unit_count": 3,
+          "unit_ids": [
+            "binding-unit-69b963e55352eb333d5b9f21",
+            "binding-unit-d3023cafa90341c0a6d5adba",
+            "binding-unit-fe1b7a3230f831ebe48546a1"
+          ]
+        },
+        {
+          "component_id": "repair-component-64e36e84ac497feb63607f79",
+          "effective": false,
+          "legal_repair_cut_ids": [],
+          "outcome_count": 6,
+          "outcome_counts": {
+            "UNKNOWN_ORACLE": 6
+          },
+          "pass_ratio": 0.0,
+          "preservation_node_ids": [],
+          "unit_count": 6,
+          "unit_ids": [
+            "binding-unit-39ad74db24b4d74ed1b37eb2",
+            "binding-unit-57e437b4d1361a929d00023c",
+            "binding-unit-842b4ffecff5ab21dcca4a34",
+            "binding-unit-8865963ecf0fb25d2e3cf816",
+            "binding-unit-9aca1df060117f492bb891b3",
+            "binding-unit-eb4e8505721a4441a61c158a"
+          ]
+        },
+        {
+          "component_id": "repair-component-65706cf1a4f31638e9a00b32",
+          "effective": false,
+          "legal_repair_cut_ids": [],
+          "outcome_count": 3,
+          "outcome_counts": {
+            "UNKNOWN_ORACLE": 3
+          },
+          "pass_ratio": 0.0,
+          "preservation_node_ids": [],
+          "unit_count": 3,
+          "unit_ids": [
+            "binding-unit-1685c3ae1ea4f4b1d132af01",
+            "binding-unit-3cba0123c64a92d4248dddcf",
+            "binding-unit-c9b7bee7743718e16047c3f3"
+          ]
+        },
+        {
+          "component_id": "repair-component-660a2c40ddbb472cb1917a6d",
+          "effective": false,
+          "legal_repair_cut_ids": [],
+          "outcome_count": 9,
+          "outcome_counts": {
+            "UNKNOWN_ORACLE": 9
+          },
+          "pass_ratio": 0.0,
+          "preservation_node_ids": [],
+          "unit_count": 9,
+          "unit_ids": [
+            "binding-unit-4b1f3c06fbd9f4e1e275b200",
+            "binding-unit-57ce3efaaa71e6a82ca1d6fe",
+            "binding-unit-6e0f9130d207f1446fb589b7",
+            "binding-unit-91c16cfcd824f4f48d3814ac",
+            "binding-unit-c062fc32a12720e7418c4dad",
+            "binding-unit-c335770beba874ca9eea1910",
+            "binding-unit-cbb504335eceaf9a9fc82c05",
+            "binding-unit-d069f30d3357a73e17bc178f",
+            "binding-unit-da8e6e4af656159977adbe00"
+          ]
+        },
+        {
+          "component_id": "repair-component-66b90f453171d576a71a2953",
+          "effective": false,
+          "legal_repair_cut_ids": [],
+          "outcome_count": 3,
+          "outcome_counts": {
+            "UNKNOWN_ORACLE": 3
+          },
+          "pass_ratio": 0.0,
+          "preservation_node_ids": [],
+          "unit_count": 3,
+          "unit_ids": [
+            "binding-unit-4ee0bfb033c6c190ff0599cd",
+            "binding-unit-6e56c83897c07138258af070",
+            "binding-unit-7e78bc94d660a88caada7563"
+          ]
+        },
+        {
+          "component_id": "repair-component-684a4c2fee69a8025797746a",
+          "effective": false,
+          "legal_repair_cut_ids": [],
+          "outcome_count": 3,
+          "outcome_counts": {
+            "UNKNOWN_ORACLE": 3
+          },
+          "pass_ratio": 0.0,
+          "preservation_node_ids": [],
+          "unit_count": 3,
+          "unit_ids": [
+            "binding-unit-51ae73664160a88232aea963",
+            "binding-unit-a9c11f6a92246b5bae29572d",
+            "binding-unit-dd468bfb1f1c9337a9cd5f4e"
+          ]
+        },
+        {
+          "component_id": "repair-component-689bd042f39db46c591aad15",
+          "effective": false,
+          "legal_repair_cut_ids": [],
+          "outcome_count": 3,
+          "outcome_counts": {
+            "UNKNOWN_ORACLE": 3
+          },
+          "pass_ratio": 0.0,
+          "preservation_node_ids": [],
+          "unit_count": 3,
+          "unit_ids": [
+            "binding-unit-0fffeced39486ae696aa53db",
+            "binding-unit-16cd3dbbfcb97645ac83e5c9",
+            "binding-unit-d35716728eb635bb5bbe3818"
+          ]
+        },
+        {
+          "component_id": "repair-component-68a00a3a373d6631ce4d7d46",
+          "effective": false,
+          "legal_repair_cut_ids": [],
+          "outcome_count": 3,
+          "outcome_counts": {
+            "UNKNOWN_ORACLE": 3
+          },
+          "pass_ratio": 0.0,
+          "preservation_node_ids": [],
+          "unit_count": 3,
+          "unit_ids": [
+            "binding-unit-07ede47918a599f825a539c0",
+            "binding-unit-a6047fdfa057d73d070ce976",
+            "binding-unit-f1530924d2c4d779b13472a1"
+          ]
+        },
+        {
+          "component_id": "repair-component-68b966ca379d3631dd4a7ff9",
+          "effective": false,
+          "legal_repair_cut_ids": [],
+          "outcome_count": 3,
+          "outcome_counts": {
+            "UNKNOWN_ORACLE": 3
+          },
+          "pass_ratio": 0.0,
+          "preservation_node_ids": [],
+          "unit_count": 3,
+          "unit_ids": [
+            "binding-unit-19e2e45ffd74043575bea6a2",
+            "binding-unit-6cb214c066d9de0196e82a88",
+            "binding-unit-c7b9583ab20ef037c1ec4482"
+          ]
+        },
+        {
+          "component_id": "repair-component-6bc42701b3c933194d3dc0c3",
+          "effective": false,
+          "legal_repair_cut_ids": [],
+          "outcome_count": 15,
+          "outcome_counts": {
+            "UNKNOWN_ORACLE": 15
+          },
+          "pass_ratio": 0.0,
+          "preservation_node_ids": [],
+          "unit_count": 15,
+          "unit_ids": [
+            "binding-unit-098a35f098f359ad8edbdc3f",
+            "binding-unit-0d140b1ffc63b7ed0ddd8b89",
+            "binding-unit-25cefa2d82acccae8155d608",
+            "binding-unit-3e93412378dc86c400a9e895",
+            "binding-unit-4e2388ff396e4f181c86f13e",
+            "binding-unit-64c141adfef37739770c9d53",
+            "binding-unit-72239bf364e1aaabde4ad5ad",
+            "binding-unit-869ebd8a44e203ba17521865",
+            "binding-unit-ae4fa9d257efb0a0f822c07f",
+            "binding-unit-cd9a137b76560968e8f275e8",
+            "binding-unit-db8e2b5686d654563e29a523",
+            "binding-unit-e61ccb658084129daa39a40d",
+            "binding-unit-ed4b17e3acf107e4e073aafd",
+            "binding-unit-f51e03e2e3fcd59afa0ec6e2",
+            "binding-unit-ff59e813b806679dcd6958a6"
+          ]
+        },
+        {
+          "component_id": "repair-component-6f31b3e71d30e637f36fad5c",
+          "effective": false,
+          "legal_repair_cut_ids": [
+            "program-node-eb6bb323c3ed2d525ac939ef"
+          ],
+          "outcome_count": 3,
+          "outcome_counts": {
+            "UNKNOWN_ORACLE": 3
+          },
+          "pass_ratio": 0.0,
+          "preservation_node_ids": [],
+          "unit_count": 3,
+          "unit_ids": [
+            "binding-unit-012cbf87d45a0376b902e546",
+            "binding-unit-059b36bd3eb9cfbb0b3b6374",
+            "binding-unit-c8ca07bacec633f74a7106b7"
+          ]
+        },
+        {
+          "component_id": "repair-component-7063e4d9c862db6f4065563d",
+          "effective": false,
+          "legal_repair_cut_ids": [],
+          "outcome_count": 15,
+          "outcome_counts": {
+            "UNKNOWN_ORACLE": 15
+          },
+          "pass_ratio": 0.0,
+          "preservation_node_ids": [],
+          "unit_count": 15,
+          "unit_ids": [
+            "binding-unit-12b5d064b89addf4496bfbd6",
+            "binding-unit-539a1856e4fae30d6fdc35e5",
+            "binding-unit-6381ec77d18512bbb761d97f",
+            "binding-unit-723e1f317215e0de10a8c92c",
+            "binding-unit-9903df93c64963af919e5d24",
+            "binding-unit-994acf106c8438f692dcc249",
+            "binding-unit-a1114d940a11ed08f2395401",
+            "binding-unit-ab1becf2445805a52d038908",
+            "binding-unit-b0058c49c1c69f280b1dc740",
+            "binding-unit-b92d02c523a2e98b2ed370e2",
+            "binding-unit-c79605cb629d8b8807831e07",
+            "binding-unit-e24c3ff2f9bc228907280973",
+            "binding-unit-f049be5e129dadf256963906",
+            "binding-unit-f5de5504dce927d7cf38220b",
+            "binding-unit-f999a8f8165a0a59ed77dc3a"
+          ]
+        },
+        {
+          "component_id": "repair-component-70f6e8bf5d103783ff677ba0",
+          "effective": false,
+          "legal_repair_cut_ids": [],
+          "outcome_count": 3,
+          "outcome_counts": {
+            "UNKNOWN_ORACLE": 3
+          },
+          "pass_ratio": 0.0,
+          "preservation_node_ids": [],
+          "unit_count": 3,
+          "unit_ids": [
+            "binding-unit-643e0e874df5d83137d01913",
+            "binding-unit-ada8d1abf6668fbedecb6d44",
+            "binding-unit-d9086432d688be4546abd22a"
+          ]
+        },
+        {
+          "component_id": "repair-component-7180cbba3107ec4612fb799a",
+          "effective": false,
+          "legal_repair_cut_ids": [],
+          "outcome_count": 6,
+          "outcome_counts": {
+            "UNKNOWN_ORACLE": 6
+          },
+          "pass_ratio": 0.0,
+          "preservation_node_ids": [],
+          "unit_count": 6,
+          "unit_ids": [
+            "binding-unit-0b9614244c9ab7f7eab3c387",
+            "binding-unit-449cce815aecd6a18afd435e",
+            "binding-unit-759904b51cdf9f17a4aeb98f",
+            "binding-unit-8f87a7bbe75f2d78f28d4331",
+            "binding-unit-a3c9f20bfebb31f9c9cdf645",
+            "binding-unit-e82f48390895b95deff1a545"
+          ]
+        },
+        {
+          "component_id": "repair-component-743758985bd5e74a2752f0fa",
+          "effective": false,
+          "legal_repair_cut_ids": [],
+          "outcome_count": 9,
+          "outcome_counts": {
+            "UNKNOWN_ORACLE": 9
+          },
+          "pass_ratio": 0.0,
+          "preservation_node_ids": [],
+          "unit_count": 9,
+          "unit_ids": [
+            "binding-unit-0e6d1f7b01eb37f45ed3ae38",
+            "binding-unit-24e3e35275cb81dd83bca6f6",
+            "binding-unit-25bccaf5ef4941aca006c7bf",
+            "binding-unit-2a003326a44c9f290728f38b",
+            "binding-unit-324e6d230a6d58d92cf72ee9",
+            "binding-unit-4a5fd1a5267c6470b94ce7d4",
+            "binding-unit-a745aa0e3ffb6debe1782d7c",
+            "binding-unit-ae98e9dec327600c3ab347a6",
+            "binding-unit-eccd22f980bbec21046c55e9"
+          ]
+        },
+        {
+          "component_id": "repair-component-764920dfadb031fcb9ec19d2",
+          "effective": false,
+          "legal_repair_cut_ids": [],
+          "outcome_count": 3,
+          "outcome_counts": {
+            "UNKNOWN_ORACLE": 3
+          },
+          "pass_ratio": 0.0,
+          "preservation_node_ids": [],
+          "unit_count": 3,
+          "unit_ids": [
+            "binding-unit-52249c03d9498179941f14c8",
+            "binding-unit-9e4012695f7241b85de03219",
+            "binding-unit-d2c5e00f8cc87ba5a15c9751"
+          ]
+        },
+        {
+          "component_id": "repair-component-76bc9bbdfb7394cbc51dc82e",
+          "effective": false,
+          "legal_repair_cut_ids": [],
+          "outcome_count": 12,
+          "outcome_counts": {
+            "UNKNOWN_ORACLE": 12
+          },
+          "pass_ratio": 0.0,
+          "preservation_node_ids": [],
+          "unit_count": 12,
+          "unit_ids": [
+            "binding-unit-020a33680a56f0ee32d190f0",
+            "binding-unit-0f234092458e7f903b00844b",
+            "binding-unit-212671b27276d9ec3fae9d1a",
+            "binding-unit-5e911e46ffcf23a63e971eff",
+            "binding-unit-6a79d0b6cce83c8d1775ce0d",
+            "binding-unit-7297752673ab0f698ad5e8ce",
+            "binding-unit-84a4ae5b866f2d1047776048",
+            "binding-unit-a630cde489283083bc41e98b",
+            "binding-unit-b30fde749aad42e5fae079bd",
+            "binding-unit-c40cc7d41d95c9f6468afbca",
+            "binding-unit-e797382d3645e486b159ee3e",
+            "binding-unit-fb5eb91642dec1afc50a9e08"
+          ]
+        },
+        {
+          "component_id": "repair-component-782d1f8292d88d88bf9996eb",
+          "effective": false,
+          "legal_repair_cut_ids": [],
+          "outcome_count": 12,
+          "outcome_counts": {
+            "UNKNOWN_ORACLE": 12
+          },
+          "pass_ratio": 0.0,
+          "preservation_node_ids": [],
+          "unit_count": 12,
+          "unit_ids": [
+            "binding-unit-201fb1b342b981c820f3208a",
+            "binding-unit-34df1db9d373f0700ecd68cb",
+            "binding-unit-6cf698b04289a84a5868cf43",
+            "binding-unit-8135e7bfd20dea68c90d8e1c",
+            "binding-unit-95b97996a0642c810fa9f823",
+            "binding-unit-99811513b5955d6382591cf7",
+            "binding-unit-beca3646d421ba1e2e3d1cf1",
+            "binding-unit-c3d7fe5a4023c02ac755a1d4",
+            "binding-unit-d2fa1eb1252df469a61ca6f4",
+            "binding-unit-d321ca0188d83221dfee2b66",
+            "binding-unit-ecb8514d922ad372744a4dba",
+            "binding-unit-fc61489462ae6b77c7a3d9a6"
+          ]
+        },
+        {
+          "component_id": "repair-component-78415283912c2430e0f696ee",
+          "effective": false,
+          "legal_repair_cut_ids": [],
+          "outcome_count": 3,
+          "outcome_counts": {
+            "UNKNOWN_ORACLE": 3
+          },
+          "pass_ratio": 0.0,
+          "preservation_node_ids": [],
+          "unit_count": 3,
+          "unit_ids": [
+            "binding-unit-7f1558466be4ec7a2c040705",
+            "binding-unit-81787995ed5122a3319c9e21",
+            "binding-unit-c138d1ef1ddd3ae7889ec0c4"
+          ]
+        },
+        {
+          "component_id": "repair-component-79d73de565bbe5fed1e4cf46",
+          "effective": false,
+          "legal_repair_cut_ids": [],
+          "outcome_count": 6,
+          "outcome_counts": {
+            "UNKNOWN_ORACLE": 6
+          },
+          "pass_ratio": 0.0,
+          "preservation_node_ids": [],
+          "unit_count": 6,
+          "unit_ids": [
+            "binding-unit-1266f005a8492bb2e2833524",
+            "binding-unit-1576d4b090519bea2ebe70f3",
+            "binding-unit-26fac9ef1e91395ef9032eed",
+            "binding-unit-ae7bc850948c9cbb3ed2df1a",
+            "binding-unit-b16598f4fea535b1f856a2e7",
+            "binding-unit-f8e0a41dbb4ed3a4a2e1a13b"
+          ]
+        },
+        {
+          "component_id": "repair-component-7ad07604a57fb54e88a21c8a",
+          "effective": false,
+          "legal_repair_cut_ids": [],
+          "outcome_count": 9,
+          "outcome_counts": {
+            "UNKNOWN_ORACLE": 9
+          },
+          "pass_ratio": 0.0,
+          "preservation_node_ids": [],
+          "unit_count": 9,
+          "unit_ids": [
+            "binding-unit-0dd2ae708f1373836ae461ca",
+            "binding-unit-1a464eb99278e04538c9418a",
+            "binding-unit-1b4883033aa861b22e95df8c",
+            "binding-unit-3ce19d335c27169f954168af",
+            "binding-unit-9286ffa17edba70f363241ba",
+            "binding-unit-9ce811aeb53ef38f0797dbfa",
+            "binding-unit-a772b256a5d174fb35ae2abb",
+            "binding-unit-d6e3a819e233567cb6626534",
+            "binding-unit-ea376c23bb37e3b8170696f9"
+          ]
+        },
+        {
+          "component_id": "repair-component-7c2866492dcd6635b80e447c",
+          "effective": false,
+          "legal_repair_cut_ids": [],
+          "outcome_count": 3,
+          "outcome_counts": {
+            "UNKNOWN_ORACLE": 3
+          },
+          "pass_ratio": 0.0,
+          "preservation_node_ids": [],
+          "unit_count": 3,
+          "unit_ids": [
+            "binding-unit-4f1aa017523ba8c365b4c86b",
+            "binding-unit-a71d9d145bdbd47770ebb12d",
+            "binding-unit-da2ff9ce5e14a197ed1f5f69"
+          ]
+        },
+        {
+          "component_id": "repair-component-7cf1ee19bfefc2d087b3caed",
+          "effective": false,
+          "legal_repair_cut_ids": [
+            "program-node-7af2115caf06d80dcc28aee0",
+            "program-node-7d85074e8b13ef575d21d9d4",
+            "program-node-de6d2cbe63b8661fbcbeb86d"
+          ],
+          "outcome_count": 18,
+          "outcome_counts": {
+            "UNKNOWN_ORACLE": 18
+          },
+          "pass_ratio": 0.0,
+          "preservation_node_ids": [
+            "program-node-01f5951da028c7615cb8341b",
+            "program-node-028d1a85dccbebae1b926006",
+            "program-node-199c6261aa534d8bc03d2663",
+            "program-node-225eb76d70a1147fef99b8c2",
+            "program-node-24d2ae14c71bb23bc0cac290",
+            "program-node-274aab48fd76216713cd9336",
+            "program-node-2d0ad10df57c09e31ecc8436",
+            "program-node-3084f5e3b4be6844b49a713a",
+            "program-node-309b4ae7eb8d8bde591b4e82",
+            "program-node-310960168ac6eae4e6760da1",
+            "program-node-3b3fdd67270b19bfc9b19d50",
+            "program-node-4527a2a28d995f163d4f1b0b",
+            "program-node-489dd246887f778d84386cb1",
+            "program-node-510f4667bb7b43388a493c02",
+            "program-node-544d63fa564b79414b9767ee",
+            "program-node-5924c3cb52620b5be3e316c8",
+            "program-node-5d039c6efa7faf92a64fa581",
+            "program-node-5d0623defeff4aba68e47902",
+            "program-node-5e91cf5db53f833c77eb2cc5",
+            "program-node-5fb652a5975931771df8b712",
+            "program-node-6167053c495ca4aa4b074f03",
+            "program-node-61dbb838635fd2a66578e146",
+            "program-node-66f960e458f6f4a2403bbfe7",
+            "program-node-68cdc9e602ca36bb6d9a77b0",
+            "program-node-6c902851edcef5dd36ca916d",
+            "program-node-6cd032c30f765e38cad5b366",
+            "program-node-723c31c152a031aff3036142",
+            "program-node-75ddb3db0da90640d00c6c9b",
+            "program-node-832643f307d44cc3bd96c649",
+            "program-node-89d9ac73f29daaf49a5d8609",
+            "program-node-8fccea4d36cf225a757c509c",
+            "program-node-992f8e06f02724220bf9127d",
+            "program-node-a6aaf5849479fd51e57d9e68",
+            "program-node-b4bb81c0d5b7e640f5a7d2d4",
+            "program-node-b66c44818e41e818263f7e1b",
+            "program-node-bd3cf96b088d238be7af3bf9",
+            "program-node-cbb3cc8974f2aea31abd5fe9",
+            "program-node-cbbf870baf0f7ae55e238afd",
+            "program-node-cf1086f561a352289e306b19",
+            "program-node-d13111343f2cedcf705b14a4",
+            "program-node-d57bbe8035bb33975f6e8ef3",
+            "program-node-e208d08702ef828b472126ed",
+            "program-node-e2d82d53634832edc58772a8",
+            "program-node-e46d4edb086084394868705d",
+            "program-node-f1f47db4a7dc51bddbf2ff27",
+            "program-node-f2f87c92b28b3a76472660e8",
+            "program-node-f30269d8e2e81f300c849f55",
+            "program-node-fbcaa7f73f20ea032e814559"
+          ],
+          "unit_count": 18,
+          "unit_ids": [
+            "binding-unit-08b37104d5ddae2f6cc2f69c",
+            "binding-unit-0b4a23c9ae36ae2b472e30a0",
+            "binding-unit-116247abed18501d374fa2f6",
+            "binding-unit-1bb22b0f8a9417bf76488e33",
+            "binding-unit-33031982791b3becfb671772",
+            "binding-unit-490e9a54319d1ace0e2c1fee",
+            "binding-unit-4e69c2146a4f2c36c9c43fda",
+            "binding-unit-63e29ab89f4a133b00c2124d",
+            "binding-unit-7fb0c13e28d5a89043f0bcde",
+            "binding-unit-8eecdf68cc05eb50803c530f",
+            "binding-unit-920b5f244d39a9e93cfa3217",
+            "binding-unit-93ee408cfe76fd238f2e8fc7",
+            "binding-unit-a08478e182921349fd33f1ee",
+            "binding-unit-a25ceebd470965aed0761245",
+            "binding-unit-d79cb5e7be2d9dbd8908cc10",
+            "binding-unit-db40be289dab4ba862b712af",
+            "binding-unit-e206578f0f48924ed51ea16e",
+            "binding-unit-e74a73394bfe19b262cdd918"
+          ]
+        },
+        {
+          "component_id": "repair-component-7e3f8b42b0cf93feb9a8dec4",
+          "effective": false,
+          "legal_repair_cut_ids": [],
+          "outcome_count": 3,
+          "outcome_counts": {
+            "UNKNOWN_ORACLE": 3
+          },
+          "pass_ratio": 0.0,
+          "preservation_node_ids": [],
+          "unit_count": 3,
+          "unit_ids": [
+            "binding-unit-5ce41d684fd84c1b0d8d1758",
+            "binding-unit-6ae2977d5dddae45c811f771",
+            "binding-unit-a4eb2cff89c69a6ea83422aa"
+          ]
+        },
+        {
+          "component_id": "repair-component-7e6987f2b7c95a1c5eafcd85",
+          "effective": false,
+          "legal_repair_cut_ids": [],
+          "outcome_count": 12,
+          "outcome_counts": {
+            "UNKNOWN_ORACLE": 12
+          },
+          "pass_ratio": 0.0,
+          "preservation_node_ids": [],
+          "unit_count": 12,
+          "unit_ids": [
+            "binding-unit-0ed327c7f6df4dbf198244ab",
+            "binding-unit-2b29f7be8c7b5f67a83e372b",
+            "binding-unit-3727e8c2ab5e5e00e2e8a3b3",
+            "binding-unit-388fda3849067927f8b0bc8b",
+            "binding-unit-39e2623e4c80cb95564511ea",
+            "binding-unit-3b1db4a9e9101aef1ac14d5d",
+            "binding-unit-76bf9142b405f10fdf2ca0d0",
+            "binding-unit-794103b5ee4411ee2d6387e1",
+            "binding-unit-97d5c77711697c2dbb377f54",
+            "binding-unit-a025ad6cd79affd780bb53ac",
+            "binding-unit-c9f89ad3367574a2e494803b",
+            "binding-unit-cc6e896fb1c718149a925d7e"
+          ]
+        },
+        {
+          "component_id": "repair-component-811b8e8b0fd040e16de0d220",
+          "effective": false,
+          "legal_repair_cut_ids": [],
+          "outcome_count": 3,
+          "outcome_counts": {
+            "UNKNOWN_ORACLE": 3
+          },
+          "pass_ratio": 0.0,
+          "preservation_node_ids": [],
+          "unit_count": 3,
+          "unit_ids": [
+            "binding-unit-56aab9f35fedffe8c471596d",
+            "binding-unit-a68b42b52639cc2cbe64377f",
+            "binding-unit-ce086d5974114e8a95deae14"
+          ]
+        },
+        {
+          "component_id": "repair-component-81a2b273bb2ddd9f361bc673",
+          "effective": false,
+          "legal_repair_cut_ids": [],
+          "outcome_count": 12,
+          "outcome_counts": {
+            "UNKNOWN_ORACLE": 12
+          },
+          "pass_ratio": 0.0,
+          "preservation_node_ids": [],
+          "unit_count": 12,
+          "unit_ids": [
+            "binding-unit-16b653c599a79f4205701031",
+            "binding-unit-1c421d4c2aa51af44c45c916",
+            "binding-unit-2cd3d7cc63959b066ed74394",
+            "binding-unit-3fcf00353c805120c568a86d",
+            "binding-unit-5ebfe784c71fd868938c008e",
+            "binding-unit-6e310ade20ea4f7826b55776",
+            "binding-unit-76d0e677b290178e6437adc0",
+            "binding-unit-ba115b49393c091f6d10dc62",
+            "binding-unit-bd275ffdbf370ab3d9db140a",
+            "binding-unit-d78ad2d07f6bbb0ac9e74206",
+            "binding-unit-dc2e618f85c63ea9191bf5e3",
+            "binding-unit-e93638444342c139d21c7c00"
+          ]
+        },
+        {
+          "component_id": "repair-component-833cba9042e13478cadea313",
+          "effective": false,
+          "legal_repair_cut_ids": [],
+          "outcome_count": 3,
+          "outcome_counts": {
+            "UNKNOWN_ORACLE": 3
+          },
+          "pass_ratio": 0.0,
+          "preservation_node_ids": [],
+          "unit_count": 3,
+          "unit_ids": [
+            "binding-unit-494e9835ec632fdeb688a916",
+            "binding-unit-a00a0354e8e4e074e8e6ddc5",
+            "binding-unit-aa674bb99ed0ded93ec764f0"
+          ]
+        },
+        {
+          "component_id": "repair-component-83669f28383754ed5ec359e0",
+          "effective": false,
+          "legal_repair_cut_ids": [],
+          "outcome_count": 3,
+          "outcome_counts": {
+            "UNKNOWN_ORACLE": 3
+          },
+          "pass_ratio": 0.0,
+          "preservation_node_ids": [],
+          "unit_count": 3,
+          "unit_ids": [
+            "binding-unit-3da2bb09e7e967ef3babb4b9",
+            "binding-unit-7dc08033b3ca0e8e1ca944ab",
+            "binding-unit-c804c2f60befe05f87f31fcc"
+          ]
+        },
+        {
+          "component_id": "repair-component-8649896bf291e77b94c61195",
+          "effective": false,
+          "legal_repair_cut_ids": [],
+          "outcome_count": 3,
+          "outcome_counts": {
+            "UNKNOWN_ORACLE": 3
+          },
+          "pass_ratio": 0.0,
+          "preservation_node_ids": [],
+          "unit_count": 3,
+          "unit_ids": [
+            "binding-unit-0ae352ec1b1dcc491497bcf8",
+            "binding-unit-15e7a3476acf19caa63eddf6",
+            "binding-unit-e8795195671f0b32e6e1fb9c"
+          ]
+        },
+        {
+          "component_id": "repair-component-86a27e9b2e40f0756d953104",
+          "effective": false,
+          "legal_repair_cut_ids": [],
+          "outcome_count": 15,
+          "outcome_counts": {
+            "UNKNOWN_ORACLE": 15
+          },
+          "pass_ratio": 0.0,
+          "preservation_node_ids": [],
+          "unit_count": 15,
+          "unit_ids": [
+            "binding-unit-0a2b1ebc8d0552f07fc0de79",
+            "binding-unit-1269ef528106df095054b205",
+            "binding-unit-2566d14e1db91db454f01b87",
+            "binding-unit-52873233ba343b3368706097",
+            "binding-unit-65c27db94015eced3b5019cb",
+            "binding-unit-6aad2a5d6430a20fcc79106e",
+            "binding-unit-78366158e396757d7dce9899",
+            "binding-unit-78bd0a0c45c18e37dc4464d9",
+            "binding-unit-8a90bcec2c0716421a578f42",
+            "binding-unit-945a9b8ee404bbac445c6c49",
+            "binding-unit-99e474e61a62f871a17b7786",
+            "binding-unit-a73bcabb7cdfbd31c82d36b6",
+            "binding-unit-aa854c526b82b84d706facab",
+            "binding-unit-f30b068ce3ceb013fa476816",
+            "binding-unit-f36d0256a912176fec9d126f"
+          ]
+        },
+        {
+          "component_id": "repair-component-8b5897473a04d572416a334b",
+          "effective": false,
+          "legal_repair_cut_ids": [],
+          "outcome_count": 3,
+          "outcome_counts": {
+            "UNKNOWN_ORACLE": 3
+          },
+          "pass_ratio": 0.0,
+          "preservation_node_ids": [],
+          "unit_count": 3,
+          "unit_ids": [
+            "binding-unit-71cfac91fb893847797a1ec6",
+            "binding-unit-a2bcfa449516ceef3952aa4b",
+            "binding-unit-d863b0fb05caf195ac5d23b1"
+          ]
+        },
+        {
+          "component_id": "repair-component-8bd7c6c0ce8a7fc7c132d36e",
+          "effective": false,
+          "legal_repair_cut_ids": [],
+          "outcome_count": 3,
+          "outcome_counts": {
+            "UNKNOWN_ORACLE": 3
+          },
+          "pass_ratio": 0.0,
+          "preservation_node_ids": [],
+          "unit_count": 3,
+          "unit_ids": [
+            "binding-unit-2f95862fd145e00ee07a9bbe",
+            "binding-unit-a922a6e68377341ee7bb0806",
+            "binding-unit-fea20ace6b060a551a4ed54c"
+          ]
+        },
+        {
+          "component_id": "repair-component-8cb5e2cab91440f1eab2deae",
+          "effective": false,
+          "legal_repair_cut_ids": [],
+          "outcome_count": 3,
+          "outcome_counts": {
+            "UNKNOWN_ORACLE": 3
+          },
+          "pass_ratio": 0.0,
+          "preservation_node_ids": [],
+          "unit_count": 3,
+          "unit_ids": [
+            "binding-unit-6917ccf3c826b1205a1d968e",
+            "binding-unit-f50680ae14b5ea106b107e45",
+            "binding-unit-f7646ee27f7d1a1c0523ebca"
+          ]
+        },
+        {
+          "component_id": "repair-component-927399b8af7aa92df6fe0f75",
+          "effective": false,
+          "legal_repair_cut_ids": [],
+          "outcome_count": 3,
+          "outcome_counts": {
+            "UNKNOWN_ORACLE": 3
+          },
+          "pass_ratio": 0.0,
+          "preservation_node_ids": [],
+          "unit_count": 3,
+          "unit_ids": [
+            "binding-unit-782fa4b3db5f22ef354d1d93",
+            "binding-unit-d9115091459a9b4fa7e41d2b",
+            "binding-unit-e993846f00b63b915dbd8ddd"
+          ]
+        },
+        {
+          "component_id": "repair-component-937b0b416cce32dc009d4b01",
+          "effective": false,
+          "legal_repair_cut_ids": [],
+          "outcome_count": 3,
+          "outcome_counts": {
+            "UNKNOWN_ORACLE": 3
+          },
+          "pass_ratio": 0.0,
+          "preservation_node_ids": [],
+          "unit_count": 3,
+          "unit_ids": [
+            "binding-unit-1a174b5c33fb1d70ee7474de",
+            "binding-unit-28c59a06a7659c848b467e95",
+            "binding-unit-741bd186e0bf6cc3cc7e9776"
+          ]
+        },
+        {
+          "component_id": "repair-component-937d75459cca76b3451b2494",
+          "effective": false,
+          "legal_repair_cut_ids": [],
+          "outcome_count": 3,
+          "outcome_counts": {
+            "UNKNOWN_ORACLE": 3
+          },
+          "pass_ratio": 0.0,
+          "preservation_node_ids": [],
+          "unit_count": 3,
+          "unit_ids": [
+            "binding-unit-006a334bedf9d758ba046c48",
+            "binding-unit-38e9355aeb05677c5f356af2",
+            "binding-unit-e9ff16382463eb9cf7d0a384"
+          ]
+        },
+        {
+          "component_id": "repair-component-969a2c264705440860d3a3ad",
+          "effective": false,
+          "legal_repair_cut_ids": [],
+          "outcome_count": 12,
+          "outcome_counts": {
+            "UNKNOWN_ORACLE": 12
+          },
+          "pass_ratio": 0.0,
+          "preservation_node_ids": [],
+          "unit_count": 12,
+          "unit_ids": [
+            "binding-unit-07fcbb8a8ab73c6dcfd14d45",
+            "binding-unit-0a66ad7f73098d21dd71e72f",
+            "binding-unit-11bc01673a3d185bc7a292f2",
+            "binding-unit-15bd9d50950f75afaa0faa0f",
+            "binding-unit-8bd0302fc0d6b35a0b07577f",
+            "binding-unit-ac48dfed2439baf818800f46",
+            "binding-unit-b924f774106c3bf94c9a27ee",
+            "binding-unit-d136981d60cf475d4df733fe",
+            "binding-unit-dc49f285ae00a5dea7af4c57",
+            "binding-unit-ea23d8d10eaceeb8ba6cc8ec",
+            "binding-unit-ed80dc47817debcf93efd0f6",
+            "binding-unit-f1d7ca51326827082a4deb39"
+          ]
+        },
+        {
+          "component_id": "repair-component-98bbacf132797bb2811253ec",
+          "effective": false,
+          "legal_repair_cut_ids": [],
+          "outcome_count": 3,
+          "outcome_counts": {
+            "UNKNOWN_ORACLE": 3
+          },
+          "pass_ratio": 0.0,
+          "preservation_node_ids": [],
+          "unit_count": 3,
+          "unit_ids": [
+            "binding-unit-0bb6527f31d41ae71f993529",
+            "binding-unit-5f2d1bf12f78930565d97ab8",
+            "binding-unit-7a587858aca355be1d434028"
+          ]
+        },
+        {
+          "component_id": "repair-component-9b008b7385eff9d5dd9c4134",
+          "effective": false,
+          "legal_repair_cut_ids": [],
+          "outcome_count": 3,
+          "outcome_counts": {
+            "UNKNOWN_ORACLE": 3
+          },
+          "pass_ratio": 0.0,
+          "preservation_node_ids": [],
+          "unit_count": 3,
+          "unit_ids": [
+            "binding-unit-968fd80bb84404a962f0ccfd",
+            "binding-unit-96e636368b0f5dc701b800c7",
+            "binding-unit-ad942aa707833e3fe69bdc64"
+          ]
+        },
+        {
+          "component_id": "repair-component-9c20ecb5e4f664f8b3d7139d",
+          "effective": false,
+          "legal_repair_cut_ids": [],
+          "outcome_count": 6,
+          "outcome_counts": {
+            "UNKNOWN_ORACLE": 6
+          },
+          "pass_ratio": 0.0,
+          "preservation_node_ids": [],
+          "unit_count": 6,
+          "unit_ids": [
+            "binding-unit-195fab13d6ea1908aa16b929",
+            "binding-unit-3396de6286a5871f21b841e7",
+            "binding-unit-4ac4d83a59402a406edc6631",
+            "binding-unit-6f70df8cd69db0ed5c225ec7",
+            "binding-unit-86238620a4d54930e1a41734",
+            "binding-unit-95f4db03814487880b20b3b6"
+          ]
+        },
+        {
+          "component_id": "repair-component-9c388172b117bd057b9d843b",
+          "effective": false,
+          "legal_repair_cut_ids": [],
+          "outcome_count": 3,
+          "outcome_counts": {
+            "UNKNOWN_ORACLE": 3
+          },
+          "pass_ratio": 0.0,
+          "preservation_node_ids": [],
+          "unit_count": 3,
+          "unit_ids": [
+            "binding-unit-094bb7a83d109b3915290948",
+            "binding-unit-52489d6c220c5f537420d852",
+            "binding-unit-dcf073bd5cc77fb5124a1821"
+          ]
+        },
+        {
+          "component_id": "repair-component-9d5027150825f68405add3b8",
+          "effective": false,
+          "legal_repair_cut_ids": [],
+          "outcome_count": 6,
+          "outcome_counts": {
+            "UNKNOWN_ORACLE": 6
+          },
+          "pass_ratio": 0.0,
+          "preservation_node_ids": [],
+          "unit_count": 6,
+          "unit_ids": [
+            "binding-unit-064cae2da1c3573959f1f1cc",
+            "binding-unit-6ad0a94fe2a26200c9a0b0d4",
+            "binding-unit-9d52f11a52f19a46a2d745cc",
+            "binding-unit-a1d1b1a4a57456194b20aea7",
+            "binding-unit-bb18fc88e125977ae0a78ac0",
+            "binding-unit-c003facc1dad19af9d1cf2cb"
+          ]
+        },
+        {
+          "component_id": "repair-component-a04e5bd5afccab732a472aff",
+          "effective": false,
+          "legal_repair_cut_ids": [],
+          "outcome_count": 6,
+          "outcome_counts": {
+            "UNKNOWN_ORACLE": 6
+          },
+          "pass_ratio": 0.0,
+          "preservation_node_ids": [],
+          "unit_count": 6,
+          "unit_ids": [
+            "binding-unit-0ad48b40821eaf8e4454c66d",
+            "binding-unit-49c55c191f1ea67634650080",
+            "binding-unit-5e74c69dd9345dc0fd4cb420",
+            "binding-unit-620b9513e3318cf8819abe06",
+            "binding-unit-7b7ecbe88715925a92457bce",
+            "binding-unit-de27759a200907d110a5ddcc"
+          ]
+        },
+        {
+          "component_id": "repair-component-a5d4775df63a0c09110acb8f",
+          "effective": false,
+          "legal_repair_cut_ids": [],
+          "outcome_count": 3,
+          "outcome_counts": {
+            "UNKNOWN_ORACLE": 3
+          },
+          "pass_ratio": 0.0,
+          "preservation_node_ids": [],
+          "unit_count": 3,
+          "unit_ids": [
+            "binding-unit-128903d54114b0a9e8e115a8",
+            "binding-unit-9953044c04d3b62a598fcfe7",
+            "binding-unit-fe8820eb9e015966c852a416"
+          ]
+        },
+        {
+          "component_id": "repair-component-a93f33146a1dcaf9596b8a41",
+          "effective": false,
+          "legal_repair_cut_ids": [],
+          "outcome_count": 3,
+          "outcome_counts": {
+            "UNKNOWN_ORACLE": 3
+          },
+          "pass_ratio": 0.0,
+          "preservation_node_ids": [],
+          "unit_count": 3,
+          "unit_ids": [
+            "binding-unit-15221c907b70a3ac83894205",
+            "binding-unit-669119f9d9c9f1243fd228b0",
+            "binding-unit-bba679d40b0be23b127ef385"
+          ]
+        },
+        {
+          "component_id": "repair-component-aafadecac65b3eae010a953d",
+          "effective": false,
+          "legal_repair_cut_ids": [],
+          "outcome_count": 3,
+          "outcome_counts": {
+            "UNKNOWN_ORACLE": 3
+          },
+          "pass_ratio": 0.0,
+          "preservation_node_ids": [],
+          "unit_count": 3,
+          "unit_ids": [
+            "binding-unit-090182e882b25974a054aae8",
+            "binding-unit-0be6a8bea9598283318eb729",
+            "binding-unit-efbcb6a9956221b2c4613ab9"
+          ]
+        },
+        {
+          "component_id": "repair-component-ab6a9bcec439c5f079aebd54",
+          "effective": false,
+          "legal_repair_cut_ids": [],
+          "outcome_count": 3,
+          "outcome_counts": {
+            "UNKNOWN_ORACLE": 3
+          },
+          "pass_ratio": 0.0,
+          "preservation_node_ids": [],
+          "unit_count": 3,
+          "unit_ids": [
+            "binding-unit-5d2f52e7b53d9ad338b36d4b",
+            "binding-unit-8d624b4031efcea3cce62698",
+            "binding-unit-eceaed1e888a56e83236ccf8"
+          ]
+        },
+        {
+          "component_id": "repair-component-add8a9298e022d72ab91d55a",
+          "effective": false,
+          "legal_repair_cut_ids": [],
+          "outcome_count": 3,
+          "outcome_counts": {
+            "UNKNOWN_ORACLE": 3
+          },
+          "pass_ratio": 0.0,
+          "preservation_node_ids": [],
+          "unit_count": 3,
+          "unit_ids": [
+            "binding-unit-319089104cca92ec7c1f308a",
+            "binding-unit-35eb33cffcec76c8180b76d1",
+            "binding-unit-8d8ab368444f84569a6aa705"
+          ]
+        },
+        {
+          "component_id": "repair-component-af57b9af3cde5da434ccc6ea",
+          "effective": false,
+          "legal_repair_cut_ids": [],
+          "outcome_count": 3,
+          "outcome_counts": {
+            "UNKNOWN_ORACLE": 3
+          },
+          "pass_ratio": 0.0,
+          "preservation_node_ids": [],
+          "unit_count": 3,
+          "unit_ids": [
+            "binding-unit-41110281544267c9e8979613",
+            "binding-unit-558b4d4857209626413ce1bd",
+            "binding-unit-c874cf5c26e9f41d670c46d4"
+          ]
+        },
+        {
+          "component_id": "repair-component-b272f92480a19b311ae2fe73",
+          "effective": false,
+          "legal_repair_cut_ids": [],
+          "outcome_count": 3,
+          "outcome_counts": {
+            "UNKNOWN_ORACLE": 3
+          },
+          "pass_ratio": 0.0,
+          "preservation_node_ids": [],
+          "unit_count": 3,
+          "unit_ids": [
+            "binding-unit-5bca22a6c1b00a6d602b76a1",
+            "binding-unit-6308b5874e5ccfdde3c456d0",
+            "binding-unit-b4639dfc6de6c28dbba00b79"
+          ]
+        },
+        {
+          "component_id": "repair-component-b482a61abe5291a4d90563bb",
+          "effective": false,
+          "legal_repair_cut_ids": [],
+          "outcome_count": 6,
+          "outcome_counts": {
+            "UNKNOWN_ORACLE": 6
+          },
+          "pass_ratio": 0.0,
+          "preservation_node_ids": [],
+          "unit_count": 6,
+          "unit_ids": [
+            "binding-unit-16f4b5de3c592c13bb4d806c",
+            "binding-unit-46a9b2ccbdd0b35bed195bd8",
+            "binding-unit-5562826e2209328b30fddc08",
+            "binding-unit-84a1f3939cdae4c7e9dc07be",
+            "binding-unit-9769c3f69c80881ea4df4730",
+            "binding-unit-a5598edbab2894a41e9fa219"
+          ]
+        },
+        {
+          "component_id": "repair-component-b77181361cefff7714a92534",
+          "effective": false,
+          "legal_repair_cut_ids": [],
+          "outcome_count": 3,
+          "outcome_counts": {
+            "UNKNOWN_ORACLE": 3
+          },
+          "pass_ratio": 0.0,
+          "preservation_node_ids": [],
+          "unit_count": 3,
+          "unit_ids": [
+            "binding-unit-021380f7a288b360da4e1cf6",
+            "binding-unit-5d5acf6b1e7a00fd9c56c753",
+            "binding-unit-b14e436f91cfdb5a99bae806"
+          ]
+        },
+        {
+          "component_id": "repair-component-b79c5c0b53addb6afc325fdb",
+          "effective": false,
+          "legal_repair_cut_ids": [],
+          "outcome_count": 15,
+          "outcome_counts": {
+            "UNKNOWN_ORACLE": 15
+          },
+          "pass_ratio": 0.0,
+          "preservation_node_ids": [],
+          "unit_count": 15,
+          "unit_ids": [
+            "binding-unit-1750d0dda8ff041dd55ba6a8",
+            "binding-unit-258e699790990ac5f4511487",
+            "binding-unit-293b58cab95240f3124c9729",
+            "binding-unit-33dbf64855e9ae3a5ad42e31",
+            "binding-unit-344ef517319886d451e3beff",
+            "binding-unit-396188501cb6a5ee5bf35486",
+            "binding-unit-4de44b3e4d7a4ddd325df80b",
+            "binding-unit-52aad82de09dff2b1630d7b0",
+            "binding-unit-5b670181aafa67b926bab614",
+            "binding-unit-8575c14cabe50abf3820e7e7",
+            "binding-unit-d573be9dcda1bc3c1542eb9b",
+            "binding-unit-da74916b55ac5ecac6732c1b",
+            "binding-unit-ebdfeeaa3294e003b7d34b5a",
+            "binding-unit-ee27ef38b81d2f471b4a4adb",
+            "binding-unit-f4554c7360e7ddc07168d1d3"
+          ]
+        },
+        {
+          "component_id": "repair-component-b9397eed62d14ada1066a269",
+          "effective": false,
+          "legal_repair_cut_ids": [],
+          "outcome_count": 3,
+          "outcome_counts": {
+            "UNKNOWN_ORACLE": 3
+          },
+          "pass_ratio": 0.0,
+          "preservation_node_ids": [],
+          "unit_count": 3,
+          "unit_ids": [
+            "binding-unit-ab4421ba62ac7ece894ddbdb",
+            "binding-unit-af61429c1a976c041027fe95",
+            "binding-unit-d24f4532f9afe1a94c064e45"
+          ]
+        },
+        {
+          "component_id": "repair-component-bb11989b3a34d5bedbd3d26c",
+          "effective": false,
+          "legal_repair_cut_ids": [],
+          "outcome_count": 6,
+          "outcome_counts": {
+            "UNKNOWN_ORACLE": 6
+          },
+          "pass_ratio": 0.0,
+          "preservation_node_ids": [],
+          "unit_count": 6,
+          "unit_ids": [
+            "binding-unit-0a412359ecf018424caceef8",
+            "binding-unit-0ce6cbda3c58b8155b9dd345",
+            "binding-unit-7fcdc84b6e74eb80ced268b9",
+            "binding-unit-84ac5ce21ac2890d641f153d",
+            "binding-unit-92f9d06f45d6b144220d816f",
+            "binding-unit-f2d5252fad18efb4de595e1c"
+          ]
+        },
+        {
+          "component_id": "repair-component-bb2510d5f9017da9f108c6c3",
+          "effective": false,
+          "legal_repair_cut_ids": [],
+          "outcome_count": 6,
+          "outcome_counts": {
+            "UNKNOWN_ORACLE": 6
+          },
+          "pass_ratio": 0.0,
+          "preservation_node_ids": [],
+          "unit_count": 6,
+          "unit_ids": [
+            "binding-unit-149c89b4e884d97f1d23b015",
+            "binding-unit-40571344eca71c01b536a5b2",
+            "binding-unit-78f4fe74779826f0803caed9",
+            "binding-unit-8833674f66056569bcbab17d",
+            "binding-unit-9022a5b6e34ac20351189dbc",
+            "binding-unit-e07e85048a01e938670ecb2f"
+          ]
+        },
+        {
+          "component_id": "repair-component-bb80737b557151425cf7fd87",
+          "effective": false,
+          "legal_repair_cut_ids": [],
+          "outcome_count": 6,
+          "outcome_counts": {
+            "UNKNOWN_ORACLE": 6
+          },
+          "pass_ratio": 0.0,
+          "preservation_node_ids": [],
+          "unit_count": 6,
+          "unit_ids": [
+            "binding-unit-068bf4d004d33de9b5decfa3",
+            "binding-unit-1e051fe0fcba04c64f04291a",
+            "binding-unit-4a7c3af9a1f560e8eca4799a",
+            "binding-unit-6f967fd3947d507cf6ecd199",
+            "binding-unit-97a6a95adffda6f55a3b144a",
+            "binding-unit-dbb2ffe79892027f3678c1c5"
+          ]
+        },
+        {
+          "component_id": "repair-component-c11db9ddc46cc0845e9c84e6",
+          "effective": false,
+          "legal_repair_cut_ids": [],
+          "outcome_count": 6,
+          "outcome_counts": {
+            "UNKNOWN_ORACLE": 6
+          },
+          "pass_ratio": 0.0,
+          "preservation_node_ids": [],
+          "unit_count": 6,
+          "unit_ids": [
+            "binding-unit-4f1e8cc016d11e650401af85",
+            "binding-unit-5cdd2e2d2e7afbe54571afb4",
+            "binding-unit-670d30a4c17b507464f3be97",
+            "binding-unit-960034109b9d151c8821a170",
+            "binding-unit-b34600c12a976a0901c544a9",
+            "binding-unit-ecdf30148392c6dc207b0898"
+          ]
+        },
+        {
+          "component_id": "repair-component-c20e55e8493db8ed35b08a5a",
+          "effective": false,
+          "legal_repair_cut_ids": [],
+          "outcome_count": 6,
+          "outcome_counts": {
+            "UNKNOWN_ORACLE": 6
+          },
+          "pass_ratio": 0.0,
+          "preservation_node_ids": [],
+          "unit_count": 6,
+          "unit_ids": [
+            "binding-unit-09b2782b9ec8e326e314cbd4",
+            "binding-unit-2fc39d91fa31deadccf97995",
+            "binding-unit-a722bc9c051173ff63de8872",
+            "binding-unit-c0c1468a1fe25588d3d46dfb",
+            "binding-unit-d260848596794431e48de14b",
+            "binding-unit-e501c167db072bcad646fc8d"
+          ]
+        },
+        {
+          "component_id": "repair-component-c29786888bfa965f8cbf5709",
+          "effective": false,
+          "legal_repair_cut_ids": [],
+          "outcome_count": 6,
+          "outcome_counts": {
+            "UNKNOWN_ORACLE": 6
+          },
+          "pass_ratio": 0.0,
+          "preservation_node_ids": [],
+          "unit_count": 6,
+          "unit_ids": [
+            "binding-unit-1734aef296c7b6ea418da6b0",
+            "binding-unit-1a585db80fbd08c26f1f9fec",
+            "binding-unit-63ba7352b347e40d439ff439",
+            "binding-unit-c750774a03696c4b186eb010",
+            "binding-unit-f2a8139fd0ee9f035875993d",
+            "binding-unit-f72a18ff222f1db4437aca3b"
+          ]
+        },
+        {
+          "component_id": "repair-component-c406b607d20bde0ae46ca26d",
+          "effective": false,
+          "legal_repair_cut_ids": [],
+          "outcome_count": 3,
+          "outcome_counts": {
+            "UNKNOWN_ORACLE": 3
+          },
+          "pass_ratio": 0.0,
+          "preservation_node_ids": [],
+          "unit_count": 3,
+          "unit_ids": [
+            "binding-unit-9b4689d6fc32f31a37676b84",
+            "binding-unit-d66ed95137b806870d2e0172",
+            "binding-unit-e7d2c75991c6c71e7d0773b9"
+          ]
+        },
+        {
+          "component_id": "repair-component-c59ad9abdd0a8f378c810c9b",
+          "effective": false,
+          "legal_repair_cut_ids": [],
+          "outcome_count": 3,
+          "outcome_counts": {
+            "UNKNOWN_ORACLE": 3
+          },
+          "pass_ratio": 0.0,
+          "preservation_node_ids": [],
+          "unit_count": 3,
+          "unit_ids": [
+            "binding-unit-05278fb593a593489d3cde58",
+            "binding-unit-4027b036a265c225da334088",
+            "binding-unit-edebca6d60daff50ff687e0f"
+          ]
+        },
+        {
+          "component_id": "repair-component-c6eb304d688f0f86d851fcab",
+          "effective": false,
+          "legal_repair_cut_ids": [],
+          "outcome_count": 3,
+          "outcome_counts": {
+            "UNKNOWN_ORACLE": 3
+          },
+          "pass_ratio": 0.0,
+          "preservation_node_ids": [],
+          "unit_count": 3,
+          "unit_ids": [
+            "binding-unit-16cb13ef07bedffd7c3a7f1c",
+            "binding-unit-d77510a388397373e45f1dea",
+            "binding-unit-f3097df16d58adb07c75ead4"
+          ]
+        },
+        {
+          "component_id": "repair-component-c8e3702064bb226eeefd17a4",
+          "effective": false,
+          "legal_repair_cut_ids": [],
+          "outcome_count": 3,
+          "outcome_counts": {
+            "UNKNOWN_ORACLE": 3
+          },
+          "pass_ratio": 0.0,
+          "preservation_node_ids": [],
+          "unit_count": 3,
+          "unit_ids": [
+            "binding-unit-1032702f9c17c0ce2e766763",
+            "binding-unit-a3aff4ed9065359e55872de0",
+            "binding-unit-bf0c8aab658ab4a226b2c3e4"
+          ]
+        },
+        {
+          "component_id": "repair-component-c8f6d359ae1bb7754dcb76e1",
+          "effective": false,
+          "legal_repair_cut_ids": [
+            "program-node-02345e222f0ed1930d071635"
+          ],
+          "outcome_count": 3,
+          "outcome_counts": {
+            "UNKNOWN_ORACLE": 3
+          },
+          "pass_ratio": 0.0,
+          "preservation_node_ids": [],
+          "unit_count": 3,
+          "unit_ids": [
+            "binding-unit-018c3ceee292f205d3c88c72",
+            "binding-unit-5a51b28d4d773c3d3e8c749b",
+            "binding-unit-f63de15bb3e1aa3b4389f69d"
+          ]
+        },
+        {
+          "component_id": "repair-component-c9537a331134673b7978dd76",
+          "effective": false,
+          "legal_repair_cut_ids": [],
+          "outcome_count": 3,
+          "outcome_counts": {
+            "UNKNOWN_ORACLE": 3
+          },
+          "pass_ratio": 0.0,
+          "preservation_node_ids": [],
+          "unit_count": 3,
+          "unit_ids": [
+            "binding-unit-13a11535898321690bd5e315",
+            "binding-unit-2ddf3110dd8f9ba02724a44e",
+            "binding-unit-64d9506cf90eaf3bd3451914"
+          ]
+        },
+        {
+          "component_id": "repair-component-c97303e35f0ffce19d68af0a",
+          "effective": false,
+          "legal_repair_cut_ids": [],
+          "outcome_count": 3,
+          "outcome_counts": {
+            "UNKNOWN_ORACLE": 3
+          },
+          "pass_ratio": 0.0,
+          "preservation_node_ids": [],
+          "unit_count": 3,
+          "unit_ids": [
+            "binding-unit-075e732fc1a157967658e4ea",
+            "binding-unit-5117fcd4c5ae1f6de4f3c068",
+            "binding-unit-efc1895f41704ee5a66c36ba"
+          ]
+        },
+        {
+          "component_id": "repair-component-cad126640780d1762eaed8be",
+          "effective": false,
+          "legal_repair_cut_ids": [],
+          "outcome_count": 6,
+          "outcome_counts": {
+            "UNKNOWN_ORACLE": 6
+          },
+          "pass_ratio": 0.0,
+          "preservation_node_ids": [],
+          "unit_count": 6,
+          "unit_ids": [
+            "binding-unit-469602a01fbb0c0b0a763b0a",
+            "binding-unit-63251186ab5c6bc2bcd56fde",
+            "binding-unit-a251bf3a58cb552c19c36ca4",
+            "binding-unit-a261bf4379ebebc64f0bd939",
+            "binding-unit-b3f95215733f06081a426399",
+            "binding-unit-c7c42f3de7fea7e13adb3fd7"
+          ]
+        },
+        {
+          "component_id": "repair-component-cb05ee5d65634eeb986618ff",
+          "effective": false,
+          "legal_repair_cut_ids": [
+            "program-node-95ee1175482be369f5653476"
+          ],
+          "outcome_count": 3,
+          "outcome_counts": {
+            "UNKNOWN_ORACLE": 3
+          },
+          "pass_ratio": 0.0,
+          "preservation_node_ids": [],
+          "unit_count": 3,
+          "unit_ids": [
+            "binding-unit-48396f4609f8ffa37ea0c464",
+            "binding-unit-5f9dcf25dcd976173c07cbc1",
+            "binding-unit-fd2f034574f78caf4734d0be"
+          ]
+        },
+        {
+          "component_id": "repair-component-cb065d73708499b1d6c1c9b1",
+          "effective": false,
+          "legal_repair_cut_ids": [],
+          "outcome_count": 15,
+          "outcome_counts": {
+            "UNKNOWN_ORACLE": 15
+          },
+          "pass_ratio": 0.0,
+          "preservation_node_ids": [],
+          "unit_count": 15,
+          "unit_ids": [
+            "binding-unit-12f3b88a4ebf5b500ac4b4da",
+            "binding-unit-3ee80b7ebe6a08f0a84f2b57",
+            "binding-unit-6a5535ea6e33209e8792eaa9",
+            "binding-unit-71090b06d44d92553016eedd",
+            "binding-unit-745de1125a441560ab365521",
+            "binding-unit-74f16a021150a3739025be3c",
+            "binding-unit-77708904d492c02f972e2cfb",
+            "binding-unit-7e46f92df6e3066163051a42",
+            "binding-unit-8d82c6a7ab1651e1dda0c7c9",
+            "binding-unit-9b851124f2ddf821a0395151",
+            "binding-unit-a3e04a32a2ce892bc35b72c9",
+            "binding-unit-ad207aed8730300231367b12",
+            "binding-unit-c123e01812efaaddc916ed9c",
+            "binding-unit-d149b343449d96de8bcb4143",
+            "binding-unit-fec2dfbce52acca30b3567d1"
+          ]
+        },
+        {
+          "component_id": "repair-component-ccadae6f395ecb1e2d4652c0",
+          "effective": false,
+          "legal_repair_cut_ids": [],
+          "outcome_count": 3,
+          "outcome_counts": {
+            "UNKNOWN_ORACLE": 3
+          },
+          "pass_ratio": 0.0,
+          "preservation_node_ids": [],
+          "unit_count": 3,
+          "unit_ids": [
+            "binding-unit-03082c47e2f1888c9d5bfb0a",
+            "binding-unit-9ba54dc41561d6430a1f0466",
+            "binding-unit-eb9efc064e0256d3a465e6d9"
+          ]
+        },
+        {
+          "component_id": "repair-component-ce60a8b9ba8a0b17d7ae5af9",
+          "effective": false,
+          "legal_repair_cut_ids": [],
+          "outcome_count": 6,
+          "outcome_counts": {
+            "UNKNOWN_ORACLE": 6
+          },
+          "pass_ratio": 0.0,
+          "preservation_node_ids": [],
+          "unit_count": 6,
+          "unit_ids": [
+            "binding-unit-0f1c4fd3870ddb6e06aebd8f",
+            "binding-unit-77e81072f4a7873797cfb9e4",
+            "binding-unit-7a7cc318d69970962cda45cd",
+            "binding-unit-9a704e4ee8554e3bc522d6b5",
+            "binding-unit-c9bd7a6f47339c9dc49b9358",
+            "binding-unit-f5844eaceb822667577c8417"
+          ]
+        },
+        {
+          "component_id": "repair-component-cef26332ef159269ff0312ad",
+          "effective": false,
+          "legal_repair_cut_ids": [],
+          "outcome_count": 6,
+          "outcome_counts": {
+            "UNKNOWN_ORACLE": 6
+          },
+          "pass_ratio": 0.0,
+          "preservation_node_ids": [],
+          "unit_count": 6,
+          "unit_ids": [
+            "binding-unit-251f40c8616e84569c526500",
+            "binding-unit-64c60c3035ac36159642750f",
+            "binding-unit-730c765539ea7c29b5b7cc3a",
+            "binding-unit-74d059c13b4b9b5f3887e51d",
+            "binding-unit-9f8486388ac16abb05943c82",
+            "binding-unit-c36518aefc3727e8b33269b8"
+          ]
+        },
+        {
+          "component_id": "repair-component-cefe36144c8f8ce7798ed9e7",
+          "effective": false,
+          "legal_repair_cut_ids": [],
+          "outcome_count": 3,
+          "outcome_counts": {
+            "UNKNOWN_ORACLE": 3
+          },
+          "pass_ratio": 0.0,
+          "preservation_node_ids": [],
+          "unit_count": 3,
+          "unit_ids": [
+            "binding-unit-3843854c5e1affaed33e1f94",
+            "binding-unit-5bc25de3d51ed59a2e4e1d8a",
+            "binding-unit-e807ae63c954396bd17a9d9b"
+          ]
+        },
+        {
+          "component_id": "repair-component-d1f73aa3e027a80cff558658",
+          "effective": false,
+          "legal_repair_cut_ids": [],
+          "outcome_count": 6,
+          "outcome_counts": {
+            "UNKNOWN_ORACLE": 6
+          },
+          "pass_ratio": 0.0,
+          "preservation_node_ids": [],
+          "unit_count": 6,
+          "unit_ids": [
+            "binding-unit-1f321fd5df6aaf83e76510d7",
+            "binding-unit-5d7d3558dcc7c2a72760f04c",
+            "binding-unit-9a2b88fa73c51a290f62f7a1",
+            "binding-unit-a6c454796234cfa7503c57ee",
+            "binding-unit-ea8bbbca6741066446b0e7ab",
+            "binding-unit-f8116aacb0e8893f091f5acd"
+          ]
+        },
+        {
+          "component_id": "repair-component-d2c1a55a8e1fb1280f220a3a",
+          "effective": false,
+          "legal_repair_cut_ids": [
+            "program-node-14476f3a818d3af6eff0bae4"
+          ],
+          "outcome_count": 3,
+          "outcome_counts": {
+            "UNKNOWN_ORACLE": 3
+          },
+          "pass_ratio": 0.0,
+          "preservation_node_ids": [],
+          "unit_count": 3,
+          "unit_ids": [
+            "binding-unit-a95e1319103c2ba931d8efbb",
+            "binding-unit-d2801349842088b66a00d248",
+            "binding-unit-db21167585a31a0651ad5372"
+          ]
+        },
+        {
+          "component_id": "repair-component-d31fe7807cbe468e0d221d1e",
+          "effective": false,
+          "legal_repair_cut_ids": [],
+          "outcome_count": 6,
+          "outcome_counts": {
+            "UNKNOWN_ORACLE": 6
+          },
+          "pass_ratio": 0.0,
+          "preservation_node_ids": [],
+          "unit_count": 6,
+          "unit_ids": [
+            "binding-unit-3ae7bc59cc82526e61d2dda3",
+            "binding-unit-59a71d013a370bd97faa7077",
+            "binding-unit-75aa7cb15b614b802ffb04fd",
+            "binding-unit-8023e4efe8292f22dc218d8f",
+            "binding-unit-c131dbae0f499132ba3dea63",
+            "binding-unit-c78361be23082d8eb501cb76"
+          ]
+        },
+        {
+          "component_id": "repair-component-d3e1d09171c57354f711fa78",
+          "effective": false,
+          "legal_repair_cut_ids": [],
+          "outcome_count": 3,
+          "outcome_counts": {
+            "UNKNOWN_ORACLE": 3
+          },
+          "pass_ratio": 0.0,
+          "preservation_node_ids": [],
+          "unit_count": 3,
+          "unit_ids": [
+            "binding-unit-5253d627fb4d518e2b3d995f",
+            "binding-unit-71918afe43234cba789c0e7f",
+            "binding-unit-d7be1a8223d9c4d66d247394"
+          ]
+        },
+        {
+          "component_id": "repair-component-d5dfbf8418eb9d8487f05685",
+          "effective": false,
+          "legal_repair_cut_ids": [
+            "program-node-7636de3c2476f7de09780102"
+          ],
+          "outcome_count": 3,
+          "outcome_counts": {
+            "UNKNOWN_ORACLE": 3
+          },
+          "pass_ratio": 0.0,
+          "preservation_node_ids": [],
+          "unit_count": 3,
+          "unit_ids": [
+            "binding-unit-78a620a9887ae5b7f85caa11",
+            "binding-unit-7bcc151a0a62044842b9bcd8",
+            "binding-unit-c0e2e34adddf6ec34ae01f18"
+          ]
+        },
+        {
+          "component_id": "repair-component-d5f2a911d7ea780b7aa2f387",
+          "effective": false,
+          "legal_repair_cut_ids": [],
+          "outcome_count": 12,
+          "outcome_counts": {
+            "UNKNOWN_ORACLE": 12
+          },
+          "pass_ratio": 0.0,
+          "preservation_node_ids": [],
+          "unit_count": 12,
+          "unit_ids": [
+            "binding-unit-08502860374c6b7bdb962dd7",
+            "binding-unit-159ecafcfd2d93f696e6534f",
+            "binding-unit-2d0694012f7bd75e110db7e7",
+            "binding-unit-3983e27dca2c035ab1c26728",
+            "binding-unit-55ce824aa3753c37e99e1ede",
+            "binding-unit-577a64c1ac1436f36158903a",
+            "binding-unit-679dfc3787cdf7381fabfa77",
+            "binding-unit-a26148af04cbb9fd74232886",
+            "binding-unit-c2fdf7c0874f627d94239723",
+            "binding-unit-d46a30ecb90fa68a13273dca",
+            "binding-unit-d62a65b381d9e33fc77565a1",
+            "binding-unit-e3ab018fc373b193514b5e2a"
+          ]
+        },
+        {
+          "component_id": "repair-component-d688f1e96c0bf6e03ea8d951",
+          "effective": false,
+          "legal_repair_cut_ids": [],
+          "outcome_count": 3,
+          "outcome_counts": {
+            "UNKNOWN_ORACLE": 3
+          },
+          "pass_ratio": 0.0,
+          "preservation_node_ids": [],
+          "unit_count": 3,
+          "unit_ids": [
+            "binding-unit-6da2b28ec49fa54b5d9d2d39",
+            "binding-unit-ad63cf44a959af0a5b6fd748",
+            "binding-unit-c95a9d334868061baf846360"
+          ]
+        },
+        {
+          "component_id": "repair-component-d6b1e693e96ebd92c24aa004",
+          "effective": false,
+          "legal_repair_cut_ids": [],
+          "outcome_count": 3,
+          "outcome_counts": {
+            "UNKNOWN_ORACLE": 3
+          },
+          "pass_ratio": 0.0,
+          "preservation_node_ids": [],
+          "unit_count": 3,
+          "unit_ids": [
+            "binding-unit-5f10e6f98c9510ec1b9eee44",
+            "binding-unit-5fe4991ed72da393b42bebe3",
+            "binding-unit-e05036041e91494bd0e0149e"
+          ]
+        },
+        {
+          "component_id": "repair-component-d722346b9077733e2a1b9260",
+          "effective": false,
+          "legal_repair_cut_ids": [],
+          "outcome_count": 3,
+          "outcome_counts": {
+            "UNKNOWN_ORACLE": 3
+          },
+          "pass_ratio": 0.0,
+          "preservation_node_ids": [],
+          "unit_count": 3,
+          "unit_ids": [
+            "binding-unit-00bcb2967cab884f68d36d96",
+            "binding-unit-25aa6e02782265a3f9af6e75",
+            "binding-unit-a0c3bce0c34eed6fcde08290"
+          ]
+        },
+        {
+          "component_id": "repair-component-d7bae6b2c8d4ad0591b7ddd8",
+          "effective": false,
+          "legal_repair_cut_ids": [],
+          "outcome_count": 3,
+          "outcome_counts": {
+            "UNKNOWN_ORACLE": 3
+          },
+          "pass_ratio": 0.0,
+          "preservation_node_ids": [],
+          "unit_count": 3,
+          "unit_ids": [
+            "binding-unit-1dc54e0724d9ec04926bef69",
+            "binding-unit-cc3a9723d0b2279854f15938",
+            "binding-unit-d5a39b4c4a99c681057802da"
+          ]
+        },
+        {
+          "component_id": "repair-component-d7de4430b5aa8681a4ec6d01",
+          "effective": false,
+          "legal_repair_cut_ids": [],
+          "outcome_count": 12,
+          "outcome_counts": {
+            "UNKNOWN_ORACLE": 12
+          },
+          "pass_ratio": 0.0,
+          "preservation_node_ids": [],
+          "unit_count": 12,
+          "unit_ids": [
+            "binding-unit-3a3e2de5e5a3d0ab9eb22e51",
+            "binding-unit-6badcaa89cf2dd1c59c85585",
+            "binding-unit-74e83e25011be2b794e64684",
+            "binding-unit-8725048fe1b87b8d8c66dc59",
+            "binding-unit-8b4ebfdb0c21941a9b9ab988",
+            "binding-unit-8e2d75bd7619665204ca7d71",
+            "binding-unit-a963de8fa356e6c20fac8322",
+            "binding-unit-aac76a0e9c3f24ce1cd4daa4",
+            "binding-unit-bb0aded46307e1697954ffea",
+            "binding-unit-c9505298803a2bda54cf8246",
+            "binding-unit-d34b9ce32532029a74df5061",
+            "binding-unit-e63496d7f6a710f0189a1176"
+          ]
+        },
+        {
+          "component_id": "repair-component-d89329f2f55c9f5a9bdd9a94",
+          "effective": false,
+          "legal_repair_cut_ids": [],
+          "outcome_count": 3,
+          "outcome_counts": {
+            "UNKNOWN_ORACLE": 3
+          },
+          "pass_ratio": 0.0,
+          "preservation_node_ids": [],
+          "unit_count": 3,
+          "unit_ids": [
+            "binding-unit-062b578dbff0ad04c9c00048",
+            "binding-unit-30896448c9aa373163407285",
+            "binding-unit-3c4be059dfca37bb9c1d8f2e"
+          ]
+        },
+        {
+          "component_id": "repair-component-da1d4e336300a5a1eb2f0604",
+          "effective": false,
+          "legal_repair_cut_ids": [],
+          "outcome_count": 9,
+          "outcome_counts": {
+            "UNKNOWN_ORACLE": 9
+          },
+          "pass_ratio": 0.0,
+          "preservation_node_ids": [],
+          "unit_count": 9,
+          "unit_ids": [
+            "binding-unit-040f08869dc456d13b393a7c",
+            "binding-unit-08df9e2f511eaebade76c111",
+            "binding-unit-4fe1a16f5048f879511c0fa7",
+            "binding-unit-5ff40d2fdfa8a49f3ec92c24",
+            "binding-unit-b100e502003afe6a4fd1e17c",
+            "binding-unit-bf76baa4de235f0960619e07",
+            "binding-unit-df612ff20fc0eabc60b742f6",
+            "binding-unit-f64148b93b62a0ce9b41350f",
+            "binding-unit-febd83558e8fa78c54aadf05"
+          ]
+        },
+        {
+          "component_id": "repair-component-ddc217689b9f9ab0aacc69d2",
+          "effective": false,
+          "legal_repair_cut_ids": [],
+          "outcome_count": 3,
+          "outcome_counts": {
+            "UNKNOWN_ORACLE": 3
+          },
+          "pass_ratio": 0.0,
+          "preservation_node_ids": [],
+          "unit_count": 3,
+          "unit_ids": [
+            "binding-unit-d9cb0f44746a8628cd2765e7",
+            "binding-unit-df4ae02f42b4d8c2e34af88b",
+            "binding-unit-e049a76e9c5a8d1e16d18dad"
+          ]
+        },
+        {
+          "component_id": "repair-component-df6a85079ea54a90acc87c93",
+          "effective": false,
+          "legal_repair_cut_ids": [],
+          "outcome_count": 3,
+          "outcome_counts": {
+            "UNKNOWN_ORACLE": 3
+          },
+          "pass_ratio": 0.0,
+          "preservation_node_ids": [],
+          "unit_count": 3,
+          "unit_ids": [
+            "binding-unit-c501775935fad3ba74e89da5",
+            "binding-unit-de14a893c3c8886d9c67b56b",
+            "binding-unit-f5e4cee40571028822b66427"
+          ]
+        },
+        {
+          "component_id": "repair-component-e03531103d1f460401e0a6d5",
+          "effective": false,
+          "legal_repair_cut_ids": [
+            "program-node-9c97babc28b3e27bb65831a1"
+          ],
+          "outcome_count": 6,
+          "outcome_counts": {
+            "UNKNOWN_ORACLE": 6
+          },
+          "pass_ratio": 0.0,
+          "preservation_node_ids": [],
+          "unit_count": 6,
+          "unit_ids": [
+            "binding-unit-2e634c2403609bb9449bfacc",
+            "binding-unit-385db32ad2b150e59a52c1c4",
+            "binding-unit-59413dfdb1f88301d5cf7b50",
+            "binding-unit-5e6e6d14fdc76ac1fbbf4676",
+            "binding-unit-c4a21641a8bfe49da9c43754",
+            "binding-unit-d53f9f4bad4acc486d2c7768"
+          ]
+        },
+        {
+          "component_id": "repair-component-e0f18d20b605fb8297bc4a5d",
+          "effective": false,
+          "legal_repair_cut_ids": [],
+          "outcome_count": 6,
+          "outcome_counts": {
+            "UNKNOWN_ORACLE": 6
+          },
+          "pass_ratio": 0.0,
+          "preservation_node_ids": [],
+          "unit_count": 6,
+          "unit_ids": [
+            "binding-unit-053c6de82952e9685ce1abbe",
+            "binding-unit-432b45af27643de0617fdee8",
+            "binding-unit-bfa7fc73b533fc57e5d968fe",
+            "binding-unit-d8bc0efcd7a73f9ed5202631",
+            "binding-unit-f2b51774f839bff4de0b22dc",
+            "binding-unit-fa4719a0bf191ce3e629af78"
+          ]
+        },
+        {
+          "component_id": "repair-component-e36a8333657cc5f5b195dd4f",
+          "effective": false,
+          "legal_repair_cut_ids": [],
+          "outcome_count": 3,
+          "outcome_counts": {
+            "UNKNOWN_ORACLE": 3
+          },
+          "pass_ratio": 0.0,
+          "preservation_node_ids": [],
+          "unit_count": 3,
+          "unit_ids": [
+            "binding-unit-0eaee853040f053704c490a9",
+            "binding-unit-34d139f9d47df8cb7baf4671",
+            "binding-unit-67dd7caa64927f292bf07cb5"
+          ]
+        },
+        {
+          "component_id": "repair-component-e51dcca93a868388b502c2f9",
+          "effective": false,
+          "legal_repair_cut_ids": [],
+          "outcome_count": 3,
+          "outcome_counts": {
+            "UNKNOWN_ORACLE": 3
+          },
+          "pass_ratio": 0.0,
+          "preservation_node_ids": [],
+          "unit_count": 3,
+          "unit_ids": [
+            "binding-unit-0324be15c3bc8a2b2b38ee2b",
+            "binding-unit-63adb97041a1525ead2046a6",
+            "binding-unit-685b6c040481afa5ab182249"
+          ]
+        },
+        {
+          "component_id": "repair-component-e87e68791d3b7a5ee0f95fab",
+          "effective": false,
+          "legal_repair_cut_ids": [],
+          "outcome_count": 6,
+          "outcome_counts": {
+            "UNKNOWN_ORACLE": 6
+          },
+          "pass_ratio": 0.0,
+          "preservation_node_ids": [],
+          "unit_count": 6,
+          "unit_ids": [
+            "binding-unit-627e580eabdd330291b011db",
+            "binding-unit-8abe3b346aa7875461d4fae0",
+            "binding-unit-99a1a6c196291da82dc4ba35",
+            "binding-unit-b90f7decc180605a5a254b9a",
+            "binding-unit-ec973fc04445e9ca728f6028",
+            "binding-unit-f3322318cfe4ed55180c6f95"
+          ]
+        },
+        {
+          "component_id": "repair-component-e8af66e7e2e3515618f66110",
+          "effective": false,
+          "legal_repair_cut_ids": [],
+          "outcome_count": 3,
+          "outcome_counts": {
+            "UNKNOWN_ORACLE": 3
+          },
+          "pass_ratio": 0.0,
+          "preservation_node_ids": [],
+          "unit_count": 3,
+          "unit_ids": [
+            "binding-unit-0e2022e5b1bc66ac4cb30024",
+            "binding-unit-ef6b0ff433250b42e1c50bf8",
+            "binding-unit-f0d5472a4b1ab840b0ad1f21"
+          ]
+        },
+        {
+          "component_id": "repair-component-e8b5e72b529ef5fd081acecf",
+          "effective": false,
+          "legal_repair_cut_ids": [],
+          "outcome_count": 6,
+          "outcome_counts": {
+            "UNKNOWN_ORACLE": 6
+          },
+          "pass_ratio": 0.0,
+          "preservation_node_ids": [],
+          "unit_count": 6,
+          "unit_ids": [
+            "binding-unit-15cddf60a4cb1079e4502de2",
+            "binding-unit-395766ec1ef8d8fd5fbc71d1",
+            "binding-unit-67ac4d4eb0ed82ac2b4d7fa8",
+            "binding-unit-b5d64fd50218ce36c5912dab",
+            "binding-unit-c566a93946681e9b4f80b378",
+            "binding-unit-f8e1fc67807257532458ad65"
+          ]
+        },
+        {
+          "component_id": "repair-component-eac3938493376f8a0a23003a",
+          "effective": false,
+          "legal_repair_cut_ids": [],
+          "outcome_count": 3,
+          "outcome_counts": {
+            "UNKNOWN_ORACLE": 3
+          },
+          "pass_ratio": 0.0,
+          "preservation_node_ids": [],
+          "unit_count": 3,
+          "unit_ids": [
+            "binding-unit-52190a10787010d3407c55b5",
+            "binding-unit-8378d4a2adf5fb83f6400b1d",
+            "binding-unit-d4b03d2be94e5067acd98e42"
+          ]
+        },
+        {
+          "component_id": "repair-component-eafa54e19e0c682d25f1f559",
+          "effective": false,
+          "legal_repair_cut_ids": [],
+          "outcome_count": 15,
+          "outcome_counts": {
+            "UNKNOWN_ORACLE": 15
+          },
+          "pass_ratio": 0.0,
+          "preservation_node_ids": [],
+          "unit_count": 15,
+          "unit_ids": [
+            "binding-unit-0598e54ec982902ad9b02341",
+            "binding-unit-1f334231c247cd45546b0eac",
+            "binding-unit-26b88f2bb466edb8526de73f",
+            "binding-unit-3534216bafd741dcc74dba98",
+            "binding-unit-4714e4c7e9dfc754608c5be1",
+            "binding-unit-53830b3ee0e8d45dc749af27",
+            "binding-unit-6ccfa99e779933b8a3081aaa",
+            "binding-unit-7fb41367654ebfd0ae11d34d",
+            "binding-unit-8c85e1056bbb673550b52e41",
+            "binding-unit-91cb12e763c56dc2806844e1",
+            "binding-unit-98a73ac21263479805c36c1a",
+            "binding-unit-b9109d62ba0b470d1a72abc7",
+            "binding-unit-be5c741607c96d196d21d525",
+            "binding-unit-ecc5fb75d1639c2cafe374f5",
+            "binding-unit-f045ece1f4cd7fd2efb2f6bd"
+          ]
+        },
+        {
+          "component_id": "repair-component-ee12ecaa0e54475777516cf2",
+          "effective": false,
+          "legal_repair_cut_ids": [],
+          "outcome_count": 3,
+          "outcome_counts": {
+            "UNKNOWN_ORACLE": 3
+          },
+          "pass_ratio": 0.0,
+          "preservation_node_ids": [],
+          "unit_count": 3,
+          "unit_ids": [
+            "binding-unit-4b625f9e69445810eb6daa31",
+            "binding-unit-5887e1fa4cb54c74ec062ab1",
+            "binding-unit-ebb8735dee5aaa897127946b"
+          ]
+        },
+        {
+          "component_id": "repair-component-ee17e42170cf0493e4768af9",
+          "effective": false,
+          "legal_repair_cut_ids": [],
+          "outcome_count": 3,
+          "outcome_counts": {
+            "UNKNOWN_ORACLE": 3
+          },
+          "pass_ratio": 0.0,
+          "preservation_node_ids": [],
+          "unit_count": 3,
+          "unit_ids": [
+            "binding-unit-595403cd3ca4258d6b286a38",
+            "binding-unit-8e9c1ea8feff6a011fcfccac",
+            "binding-unit-ab00047efc7d8287ec13ed31"
+          ]
+        },
+        {
+          "component_id": "repair-component-f0120c7b988a1b69209a495e",
+          "effective": false,
+          "legal_repair_cut_ids": [
+            "program-node-592e57bcd73faadceab3e066"
+          ],
+          "outcome_count": 3,
+          "outcome_counts": {
+            "UNKNOWN_ORACLE": 3
+          },
+          "pass_ratio": 0.0,
+          "preservation_node_ids": [],
+          "unit_count": 3,
+          "unit_ids": [
+            "binding-unit-49b75c71a8884ad0f9df9ac3",
+            "binding-unit-9712efa182e1cef812d70cdb",
+            "binding-unit-ca0787a77c46fa2a4845d57f"
+          ]
+        },
+        {
+          "component_id": "repair-component-f054d834ab8d06b7c4cbebec",
+          "effective": false,
+          "legal_repair_cut_ids": [],
+          "outcome_count": 3,
+          "outcome_counts": {
+            "UNKNOWN_ORACLE": 3
+          },
+          "pass_ratio": 0.0,
+          "preservation_node_ids": [],
+          "unit_count": 3,
+          "unit_ids": [
+            "binding-unit-4bba85f3ba9ee50e1195fbf0",
+            "binding-unit-7dedfaca9fe6d756c08a71a0",
+            "binding-unit-c9f00ff0324085d6476ab689"
+          ]
+        },
+        {
+          "component_id": "repair-component-f5527bd421d02b650022a628",
+          "effective": false,
+          "legal_repair_cut_ids": [],
+          "outcome_count": 6,
+          "outcome_counts": {
+            "UNKNOWN_ORACLE": 6
+          },
+          "pass_ratio": 0.0,
+          "preservation_node_ids": [],
+          "unit_count": 6,
+          "unit_ids": [
+            "binding-unit-077840d18d1d37021abd6192",
+            "binding-unit-8760044189647b5655b5d7fb",
+            "binding-unit-aa0c3069815231600b56c10e",
+            "binding-unit-ac85f3fcc02321521414574b",
+            "binding-unit-b5b17ee5eba86a4091439c67",
+            "binding-unit-c1e804c263daee41cd3e59ed"
+          ]
+        },
+        {
+          "component_id": "repair-component-f8f0eb0e8c7ec5fb4fcbeece",
+          "effective": false,
+          "legal_repair_cut_ids": [],
+          "outcome_count": 15,
+          "outcome_counts": {
+            "UNKNOWN_ORACLE": 15
+          },
+          "pass_ratio": 0.0,
+          "preservation_node_ids": [],
+          "unit_count": 15,
+          "unit_ids": [
+            "binding-unit-02d02da0e2af5fd05af9316c",
+            "binding-unit-0df3fb97aa0235f480b97e96",
+            "binding-unit-1365c20d3db26a0258fcbf1c",
+            "binding-unit-1c59da1e8aa72e7f9b6c3fc1",
+            "binding-unit-2e492e7b95c26eaf93cd9318",
+            "binding-unit-45a2ef1d22b73e08be731a3d",
+            "binding-unit-61ffe18baab10d73dcecd241",
+            "binding-unit-7017d18d30643f0dc9efa869",
+            "binding-unit-8240d216dfcd50968d2d4ac2",
+            "binding-unit-9115c04ee57c2ad5ca681ffb",
+            "binding-unit-a46e001dc4262b8d219b76fa",
+            "binding-unit-c6f995812125aad4f020d289",
+            "binding-unit-d88be26409737d4729318887",
+            "binding-unit-e5dab6af613c63ea2465d2d7",
+            "binding-unit-f9529806541eb6c6181b858d"
+          ]
+        },
+        {
+          "component_id": "repair-component-f998f0021abeafaa0fb6b08d",
+          "effective": false,
+          "legal_repair_cut_ids": [],
+          "outcome_count": 6,
+          "outcome_counts": {
+            "UNKNOWN_ORACLE": 6
+          },
+          "pass_ratio": 0.0,
+          "preservation_node_ids": [],
+          "unit_count": 6,
+          "unit_ids": [
+            "binding-unit-1cefc427e59f019704700c75",
+            "binding-unit-2a8ec64f54fda6823a3f662f",
+            "binding-unit-502385b37308a42cc737545e",
+            "binding-unit-5d3d50cf5563e7ef42f890c1",
+            "binding-unit-5df66b8cfcb30e66a5fab172",
+            "binding-unit-7924c9723bf1b5fbd1769f0c"
+          ]
+        },
+        {
+          "component_id": "repair-component-fb0b4c81bfa0d6d9c6de6751",
+          "effective": false,
+          "legal_repair_cut_ids": [],
+          "outcome_count": 15,
+          "outcome_counts": {
+            "UNKNOWN_ORACLE": 15
+          },
+          "pass_ratio": 0.0,
+          "preservation_node_ids": [],
+          "unit_count": 15,
+          "unit_ids": [
+            "binding-unit-009d652ba00aa14717b237c9",
+            "binding-unit-21377d4006cd2b2dcc25eb87",
+            "binding-unit-3c318177b3602d1eeaeceeec",
+            "binding-unit-5212755c3ddfe177fcbf838b",
+            "binding-unit-582c61aa0e63e4cba4a91c9a",
+            "binding-unit-7bd0d4384da1a53c771c64f9",
+            "binding-unit-9ad14fbaada83059059b6d9b",
+            "binding-unit-a9f8a5b9298e9eb01f68e6bd",
+            "binding-unit-ad2b3800c5599921bec9d702",
+            "binding-unit-addd85da1b09ef922c406f8b",
+            "binding-unit-be9abaf66a1daad3099240cd",
+            "binding-unit-d757c37f4b5df0d51cb47285",
+            "binding-unit-e4a2d78675df083e12ae2c6f",
+            "binding-unit-e61580ea6f8895f19fddc295",
+            "binding-unit-fabe62d7ac95bcd4d4d231ac"
+          ]
+        },
+        {
+          "component_id": "repair-component-fb25690eb7eb1be7f3c2bada",
+          "effective": false,
+          "legal_repair_cut_ids": [],
+          "outcome_count": 9,
+          "outcome_counts": {
+            "UNKNOWN_ORACLE": 9
+          },
+          "pass_ratio": 0.0,
+          "preservation_node_ids": [],
+          "unit_count": 9,
+          "unit_ids": [
+            "binding-unit-011eaf3e769f5d598c2deefe",
+            "binding-unit-4e7d5d0bef5598cb16519616",
+            "binding-unit-5bdb2b45505a3bfcf3b06cd6",
+            "binding-unit-838b4e4ca5f61d68298ae580",
+            "binding-unit-96d15c5ec85ef140bb3a9747",
+            "binding-unit-9e400bb0472c2752b98a8049",
+            "binding-unit-a4409243ec8988de757c7b0f",
+            "binding-unit-aa237a057aa2358ea957904f",
+            "binding-unit-fd6f17155559060896794ad3"
+          ]
+        },
+        {
+          "component_id": "repair-component-fb99d3a497fc3a96ade7b673",
+          "effective": false,
+          "legal_repair_cut_ids": [],
+          "outcome_count": 15,
+          "outcome_counts": {
+            "UNKNOWN_ORACLE": 15
+          },
+          "pass_ratio": 0.0,
+          "preservation_node_ids": [],
+          "unit_count": 15,
+          "unit_ids": [
+            "binding-unit-0ade79a037c9bec29c9ca27c",
+            "binding-unit-1a2bbbee60084cf3c34d2926",
+            "binding-unit-2abd878620beeb1900f83264",
+            "binding-unit-342c1ee539dac4702536312c",
+            "binding-unit-3a82405069d07244e38de8a8",
+            "binding-unit-4b68787349ac6b0aa80bf6f7",
+            "binding-unit-5a370ad656e7d316384999ec",
+            "binding-unit-666fc44092cfe31c363c6ff6",
+            "binding-unit-7f0c8e207250209aa912579d",
+            "binding-unit-9f43ddb71c921e537d70cfdc",
+            "binding-unit-b95db2c972ba4125582f792d",
+            "binding-unit-db71d3b8311b0881558a7a5d",
+            "binding-unit-e3f6fc318dbbf456448ed7dd",
+            "binding-unit-e90a3d763c4f93c2b79524bd",
+            "binding-unit-fa8348a54f266861c1590984"
+          ]
+        },
+        {
+          "component_id": "repair-component-fd91e0a809ca8f6f9ee2c472",
+          "effective": false,
+          "legal_repair_cut_ids": [],
+          "outcome_count": 3,
+          "outcome_counts": {
+            "UNKNOWN_ORACLE": 3
+          },
+          "pass_ratio": 0.0,
+          "preservation_node_ids": [],
+          "unit_count": 3,
+          "unit_ids": [
+            "binding-unit-62f0acee57f24a7224f56029",
+            "binding-unit-963313e72179ccc90d74ee57",
+            "binding-unit-add934abc80be0f0a79e9709"
+          ]
+        },
+        {
+          "component_id": "repair-component-fe2fd0ebde8ac76c0eebb56e",
+          "effective": false,
+          "legal_repair_cut_ids": [],
+          "outcome_count": 6,
+          "outcome_counts": {
+            "UNKNOWN_ORACLE": 6
+          },
+          "pass_ratio": 0.0,
+          "preservation_node_ids": [],
+          "unit_count": 6,
+          "unit_ids": [
+            "binding-unit-0b0b7d03debc2121bfa087e7",
+            "binding-unit-3b925b647934260286615054",
+            "binding-unit-4b400296d0f4cdd9718f178c",
+            "binding-unit-7d88f2b69ea8e05f732adf53",
+            "binding-unit-b8e16249f36cdcd857ebe32d",
+            "binding-unit-cb4b08eb56d6626e6cae6108"
+          ]
+        },
+        {
+          "component_id": "repair-component-fedeb86c96ec591d7c7b555a",
+          "effective": false,
+          "legal_repair_cut_ids": [],
+          "outcome_count": 3,
+          "outcome_counts": {
+            "UNKNOWN_ORACLE": 3
+          },
+          "pass_ratio": 0.0,
+          "preservation_node_ids": [],
+          "unit_count": 3,
+          "unit_ids": [
+            "binding-unit-45a0afb06f34063728b25ad1",
+            "binding-unit-48fe3782bc5d05a29da83875",
+            "binding-unit-b02b55a8dfe4e1f3b923c8b2"
+          ]
+        },
+        {
+          "component_id": "repair-component-fee1aba831034816d531aea1",
+          "effective": false,
+          "legal_repair_cut_ids": [],
+          "outcome_count": 6,
+          "outcome_counts": {
+            "UNKNOWN_ORACLE": 6
+          },
+          "pass_ratio": 0.0,
+          "preservation_node_ids": [],
+          "unit_count": 6,
+          "unit_ids": [
+            "binding-unit-07ce0192ef9be2accb92e070",
+            "binding-unit-215e28adb10015468fe15966",
+            "binding-unit-3c53fc4d2b4387363dd6bd48",
+            "binding-unit-3fcc3555c6f06444d447e80e",
+            "binding-unit-dea667d2efbab61307778382",
+            "binding-unit-e64e40d16374baae5453bd6f"
+          ]
+        }
+      ],
+      "deepseek_calls": [
+        {
+          "case_id": "psf__requests-2148",
+          "decision": {
+            "action": null
+          },
+          "duration_seconds": 6.0420839339494705,
+          "intent_id": "repair-intent-73aa7d60ba634d8c5f5d11bb",
+          "mechanism": "return_relation",
+          "status": "NO_ACTION"
+        },
+        {
+          "case_id": "psf__requests-2148",
+          "decision": null,
+          "duration_seconds": 27.930038754828274,
+          "intent_id": "repair-intent-73aa7d60ba634d8c5f5d11bb",
+          "mechanism": "return_relation",
+          "status": "NO_ACTION"
+        },
+        {
+          "case_id": "psf__requests-2148",
+          "decision": {
+            "action": {
+              "operator": "replace_return",
+              "reads": [],
+              "replacement": "return self.status_code < 400",
+              "target_node_id": "program-node-b688739848ff7c51c0697cc3"
+            }
+          },
+          "duration_seconds": 21.05214188620448,
+          "intent_id": "repair-intent-73aa7d60ba634d8c5f5d11bb",
+          "mechanism": "return_relation",
+          "status": "NO_ACTION"
+        }
+      ],
+      "error": null,
+      "error_traceback": null,
+      "fail_to_pass": null,
+      "finished_at": "2026-07-26T01:19:27.352194+00:00",
+      "graph_summary": {
+        "expected_full_closure_graph_count": 5,
+        "full_closure": true,
+        "graph_count": 5,
+        "graph_names": [
+          "semantic_hypothesis_graph",
+          "requirement_graph",
+          "program_graph",
+          "binding_graph",
+          "challenge_graph"
+        ],
+        "graphs": {
+          "binding_graph": {
+            "artifact_ids": [],
+            "hash": "146f20209c63ba7053dbe1f023e75c5dca356656bd12d691859352ebee637b41"
+          },
+          "challenge_graph": {
+            "artifact_ids": [],
+            "hash": "bea0b4815cfe07d41debb8b122a20fcd9734dbe37a4765c72200bb9b4fbe70c8"
+          },
+          "program_graph": {
+            "artifact_ids": [],
+            "hash": "076c613acdcdebc901ac609fb08a7df1cbec17d4a194c423b858f16469613394"
+          },
+          "requirement_graph": {
+            "artifact_ids": [],
+            "hash": "5f5db81e24adaa4a942750c03be4d491505b196e162e480d4623bcf8934fc512"
+          },
+          "semantic_hypothesis_graph": {
+            "artifact_ids": [],
+            "hash": "b80f1b3b651d83d8f79fcb992925da99721e56c2d10458b06dadcfe6908c6e03"
+          }
+        }
+      },
+      "instance_id": "psf__requests-2148",
+      "pass_to_pass": null,
+      "patch_apply": null,
+      "patch_path": "/home/slt/ReachPatch/Code/experiments/swe51/runs/psf__requests-2148/final_patch.diff",
+      "reach_avoid": {
+        "accepted_transition_id": null,
+        "counterexample_count": 0,
+        "fail_pairs": 0,
+        "graph_reached": false,
+        "hard_frontier_count": 1107,
+        "pass_pairs": 0,
+        "phase": "SEALED",
+        "target_deficit": 1107.0,
+        "termination_status": "NO_LEGAL_ACTION",
+        "unknown_pairs": 1107
+      },
+      "result_path": "/home/slt/ReachPatch/Code/experiments/swe51/results/psf__requests-2148.json",
+      "run_root": "/home/slt/ReachPatch/Code/experiments/swe51/runs/psf__requests-2148",
+      "stage": "generation",
+      "started_at": "2026-07-26T00:54:53.045011+00:00",
+      "status": "NO_LEGAL_ACTION",
+      "transition_count": 0,
+      "worker_return_code": 0,
+      "worker_stderr": "",
+      "worker_stdout": "{\"instance_id\": \"psf__requests-2148\", \"status\": \"NO_LEGAL_ACTION\"}\n"
+    },
+    {
+      "analysis_resources": {},
+      "analysis_stats": {},
+      "analysis_timings": {
+        "analysis_total_seconds": 6.669762681238353,
+        "semantic_analysis_seconds": 0.18335729464888573
+      },
+      "component_effectiveness": [],
+      "deepseek_calls": [],
+      "error": "public evidence leaves multiple mutually exclusive semantic assignments",
+      "error_traceback": null,
+      "fail_to_pass": null,
+      "finished_at": "2026-07-26T01:21:16.674662+00:00",
+      "graph_summary": {
+        "expected_full_closure_graph_count": 5,
+        "full_closure": false,
+        "graph_count": 1,
+        "graph_names": [
+          "semantic_hypothesis_graph"
+        ],
+        "graphs": {
+          "semantic_hypothesis_graph": {
+            "artifact_ids": [],
+            "hash": "a764d83483d559642ab850cd9e9e04f3f32cb95d9c140bda3609d1a6fe3e894f"
+          }
+        }
+      },
+      "instance_id": "pytest-dev__pytest-5413",
+      "pass_to_pass": null,
+      "patch_apply": null,
+      "patch_path": null,
+      "reach_avoid": null,
+      "result_path": "/home/slt/ReachPatch/Code/experiments/swe51/results/pytest-dev__pytest-5413.json",
+      "run_root": "/home/slt/ReachPatch/Code/experiments/swe51/runs/pytest-dev__pytest-5413",
+      "stage": "generation",
+      "started_at": "2026-07-26T01:21:09.991780+00:00",
+      "status": "SEMANTIC_BLOCKED",
+      "transition_count": null,
+      "worker_return_code": 0,
+      "worker_stderr": "",
+      "worker_stdout": "{\"instance_id\": \"pytest-dev__pytest-5413\", \"status\": \"SEMANTIC_BLOCKED\"}\n"
+    },
+    {
+      "analysis_resources": {},
+      "analysis_stats": {},
+      "analysis_timings": {
+        "analysis_total_seconds": 4.587007123976946,
+        "semantic_analysis_seconds": 0.008636957965791225
+      },
+      "component_effectiveness": [],
+      "deepseek_calls": [],
+      "error": "public evidence leaves multiple mutually exclusive semantic assignments",
+      "error_traceback": null,
+      "fail_to_pass": null,
+      "finished_at": "2026-07-26T01:21:14.571964+00:00",
+      "graph_summary": {
+        "expected_full_closure_graph_count": 5,
+        "full_closure": false,
+        "graph_count": 1,
+        "graph_names": [
+          "semantic_hypothesis_graph"
+        ],
+        "graphs": {
+          "semantic_hypothesis_graph": {
+            "artifact_ids": [],
+            "hash": "6afafe798544120d2bc678fb8aef3ffacdce5168e4910652ab25c1d0c94683a4"
+          }
+        }
+      },
+      "instance_id": "pytest-dev__pytest-5692",
+      "pass_to_pass": null,
+      "patch_apply": null,
+      "patch_path": null,
+      "reach_avoid": null,
+      "result_path": "/home/slt/ReachPatch/Code/experiments/swe51/results/pytest-dev__pytest-5692.json",
+      "run_root": "/home/slt/ReachPatch/Code/experiments/swe51/runs/pytest-dev__pytest-5692",
+      "stage": "generation",
+      "started_at": "2026-07-26T01:21:09.976689+00:00",
+      "status": "SEMANTIC_BLOCKED",
+      "transition_count": null,
+      "worker_return_code": 0,
+      "worker_stderr": "",
+      "worker_stdout": "{\"instance_id\": \"pytest-dev__pytest-5692\", \"status\": \"SEMANTIC_BLOCKED\"}\n"
+    },
+    {
+      "analysis_resources": {
+        "program_graph_initial": {
+          "complete_peak_rss_mib": 1018.81640625,
+          "in_progress_peak_rss_mib": 31.1015625
+        },
+        "requirement_graph_initial": {
+          "in_progress_peak_rss_mib": 1018.81640625
+        },
+        "semantic_analysis": {
+          "complete_peak_rss_mib": 31.1015625
+        }
+      },
+      "analysis_stats": {},
+      "analysis_timings": {
+        "program_graph_initial_seconds": 79.87587464199896,
+        "semantic_analysis_seconds": 0.015431990001161466
+      },
+      "component_effectiveness": [],
+      "deepseek_calls": [],
+      "error": "SyntaxError: invalid syntax (<unknown>, line 1)",
+      "error_traceback": null,
+      "fail_to_pass": null,
+      "finished_at": "2026-07-26T12:03:00.972637+00:00",
+      "graph_summary": {},
+      "instance_id": "pytest-dev__pytest-7220",
+      "pass_to_pass": null,
+      "patch_apply": null,
+      "patch_path": null,
+      "reach_avoid": null,
+      "result_path": "/home/slt/ReachPatch/Code/experiments/swe51/results/pytest-dev__pytest-7220.json",
+      "run_root": "/home/slt/ReachPatch/Code/experiments/swe51/runs/pytest-dev__pytest-7220",
+      "stage": "generation",
+      "started_at": "2026-07-26T11:14:49.441191+00:00",
+      "status": "ERROR",
+      "transition_count": null,
+      "worker_return_code": null,
+      "worker_stderr": "",
+      "worker_stdout": ""
+    },
+    {
+      "analysis_resources": {},
+      "analysis_stats": {},
+      "analysis_timings": {
+        "analysis_total_seconds": 4.416122045367956,
+        "semantic_analysis_seconds": 0.3807439021766186
+      },
+      "component_effectiveness": [],
+      "deepseek_calls": [],
+      "error": "public evidence leaves multiple mutually exclusive semantic assignments",
+      "error_traceback": null,
+      "fail_to_pass": null,
+      "finished_at": "2026-07-26T01:45:27.790264+00:00",
+      "graph_summary": {
+        "expected_full_closure_graph_count": 5,
+        "full_closure": false,
+        "graph_count": 1,
+        "graph_names": [
+          "semantic_hypothesis_graph"
+        ],
+        "graphs": {
+          "semantic_hypothesis_graph": {
+            "artifact_ids": [],
+            "hash": "c2d7a556f12967bd83b7af4a6f8e73199fc518dcfd422421beeecafcb7af5d42"
+          }
+        }
+      },
+      "instance_id": "sphinx-doc__sphinx-8282",
+      "pass_to_pass": null,
+      "patch_apply": null,
+      "patch_path": null,
+      "reach_avoid": null,
+      "result_path": "/home/slt/ReachPatch/Code/experiments/swe51/results/sphinx-doc__sphinx-8282.json",
+      "run_root": "/home/slt/ReachPatch/Code/experiments/swe51/runs/sphinx-doc__sphinx-8282",
+      "stage": "generation",
+      "started_at": "2026-07-26T01:45:23.363212+00:00",
+      "status": "SEMANTIC_BLOCKED",
+      "transition_count": null,
+      "worker_return_code": 0,
+      "worker_stderr": "",
+      "worker_stdout": "{\"instance_id\": \"sphinx-doc__sphinx-8282\", \"status\": \"SEMANTIC_BLOCKED\"}\n"
+    },
+    {
+      "analysis_resources": {},
+      "analysis_stats": {},
+      "analysis_timings": {
+        "analysis_total_seconds": 4.009572719223797,
+        "semantic_analysis_seconds": 0.09983614273369312
+      },
+      "component_effectiveness": [],
+      "deepseek_calls": [],
+      "error": "public evidence leaves multiple mutually exclusive semantic assignments",
+      "error_traceback": null,
+      "fail_to_pass": null,
+      "finished_at": "2026-07-26T01:50:49.682411+00:00",
+      "graph_summary": {
+        "expected_full_closure_graph_count": 5,
+        "full_closure": false,
+        "graph_count": 1,
+        "graph_names": [
+          "semantic_hypothesis_graph"
+        ],
+        "graphs": {
+          "semantic_hypothesis_graph": {
+            "artifact_ids": [],
+            "hash": "f13e428432942259aa630e348f4fa54ff57c3a7f82aeacfcae2c504091b85a39"
+          }
+        }
+      },
+      "instance_id": "sphinx-doc__sphinx-8721",
+      "pass_to_pass": null,
+      "patch_apply": null,
+      "patch_path": null,
+      "reach_avoid": null,
+      "result_path": "/home/slt/ReachPatch/Code/experiments/swe51/results/sphinx-doc__sphinx-8721.json",
+      "run_root": "/home/slt/ReachPatch/Code/experiments/swe51/runs/sphinx-doc__sphinx-8721",
+      "stage": "generation",
+      "started_at": "2026-07-26T01:50:45.662919+00:00",
+      "status": "SEMANTIC_BLOCKED",
+      "transition_count": null,
+      "worker_return_code": 0,
+      "worker_stderr": "",
+      "worker_stdout": "{\"instance_id\": \"sphinx-doc__sphinx-8721\", \"status\": \"SEMANTIC_BLOCKED\"}\n"
+    }
+  ],
+  "generated_at": "2026-07-26T16:08:01.271694+00:00"
+}

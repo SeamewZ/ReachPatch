@@ -1,0 +1,11 @@
+{
+  "instance_id": "astropy__astropy-14182",
+  "status": "IN_PROGRESS",
+  "phase": "initial_program_graph_or_following_analysis",
+  "started_epoch_seconds": 1785000732,
+  "observed_at_epoch_seconds": 1785019031,
+  "elapsed_lower_bound_seconds": 18299,
+  "result_artifact_present": false,
+  "run_manifest_last_update": "2026-07-26T01:32:12+08:00",
+  "note": "The case was launched with --case-timeout 0. The controller version loaded by this process writes final stage timings only after the initial graph stack completes; therefore this is a lower bound, not a fabricated per-graph duration."
+}

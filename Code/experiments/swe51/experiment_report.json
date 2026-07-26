@@ -1,0 +1,468 @@
+{
+  "case_count": 9,
+  "failure_report": "/home/slt/ReachPatch/Code/experiments/swe51/failure_report.json",
+  "generated_at": "2026-07-26T16:07:09.513030+00:00",
+  "generation_counts": {
+    "ERROR": 2,
+    "NO_LEGAL_ACTION": 1,
+    "SEMANTIC_BLOCKED": 6
+  },
+  "graph_memory_summary": {
+    "program_graph_initial": {
+      "count": 2,
+      "max_peak_rss_mib": 9837.96484375,
+      "mean_peak_rss_mib": 5428.390625,
+      "sum_peak_rss_mib": 10856.78125
+    },
+    "requirement_graph_initial": {
+      "count": 2,
+      "max_peak_rss_mib": 9838.03515625,
+      "mean_peak_rss_mib": 5428.42578125,
+      "sum_peak_rss_mib": 10856.8515625
+    },
+    "semantic_analysis": {
+      "count": 2,
+      "max_peak_rss_mib": 31.1015625,
+      "mean_peak_rss_mib": 31.046875,
+      "sum_peak_rss_mib": 62.09375
+    }
+  },
+  "graph_timing_summary": {
+    "analysis_total_seconds": {
+      "count": 7,
+      "max_seconds": 397.54618411231786,
+      "mean_seconds": 60.511149417608976,
+      "sum_seconds": 423.57804592326283
+    },
+    "baseline_execution_initial_seconds": {
+      "count": 1,
+      "max_seconds": 0.00038877222687005997,
+      "mean_seconds": 0.00038877222687005997,
+      "sum_seconds": 0.00038877222687005997
+    },
+    "baseline_execution_replay_seconds": {
+      "count": 1,
+      "max_seconds": 0.000327051617205143,
+      "mean_seconds": 0.000327051617205143,
+      "sum_seconds": 0.000327051617205143
+    },
+    "binding_graph_dynamic_rebuild_seconds": {
+      "count": 1,
+      "max_seconds": 29.31760357040912,
+      "mean_seconds": 29.31760357040912,
+      "sum_seconds": 29.31760357040912
+    },
+    "binding_graph_initial_seconds": {
+      "count": 1,
+      "max_seconds": 29.191360705532134,
+      "mean_seconds": 29.191360705532134,
+      "sum_seconds": 29.191360705532134
+    },
+    "challenge_graph_dynamic_rebuild_seconds": {
+      "count": 1,
+      "max_seconds": 22.408939834684134,
+      "mean_seconds": 22.408939834684134,
+      "sum_seconds": 22.408939834684134
+    },
+    "challenge_graph_initial_seconds": {
+      "count": 1,
+      "max_seconds": 22.832106362096965,
+      "mean_seconds": 22.832106362096965,
+      "sum_seconds": 22.832106362096965
+    },
+    "program_graph_dynamic_merge_seconds": {
+      "count": 1,
+      "max_seconds": 5.566515028476715e-06,
+      "mean_seconds": 5.566515028476715e-06,
+      "sum_seconds": 5.566515028476715e-06
+    },
+    "program_graph_initial_seconds": {
+      "count": 3,
+      "max_seconds": 2726.916206283,
+      "mean_seconds": 940.6301631086704,
+      "sum_seconds": 2821.8904893260114
+    },
+    "requirement_graph_dynamic_rebuild_seconds": {
+      "count": 1,
+      "max_seconds": 114.79989553336054,
+      "mean_seconds": 114.79989553336054,
+      "sum_seconds": 114.79989553336054
+    },
+    "requirement_graph_initial_seconds": {
+      "count": 1,
+      "max_seconds": 117.13769526965916,
+      "mean_seconds": 117.13769526965916,
+      "sum_seconds": 117.13769526965916
+    },
+    "semantic_analysis_seconds": {
+      "count": 9,
+      "max_seconds": 4.1709298035129905,
+      "mean_seconds": 0.7833812867399198,
+      "sum_seconds": 7.0504315806592786
+    }
+  },
+  "harness_counts": {
+    "PENDING": 9
+  },
+  "results": [
+    {
+      "accepted_transition_id": null,
+      "analysis_resources": {
+        "program_graph_initial": {
+          "complete_peak_rss_mib": 9837.96484375,
+          "in_progress_peak_rss_mib": 30.9921875
+        },
+        "requirement_graph_initial": {
+          "in_progress_peak_rss_mib": 9838.03515625
+        },
+        "semantic_analysis": {
+          "complete_peak_rss_mib": 30.9921875
+        }
+      },
+      "analysis_stats": {},
+      "analysis_timings": {
+        "program_graph_initial_seconds": 2726.916206283,
+        "semantic_analysis_seconds": 0.008541046001482755
+      },
+      "component_count": 0,
+      "effective_component_count": 0,
+      "generation_status": "ERROR",
+      "graph_reached": null,
+      "graph_summary": {},
+      "harness_detail": {
+        "fail_to_pass": null,
+        "pass_to_pass": null,
+        "patch_apply": null
+      },
+      "harness_status": "PENDING",
+      "instance_id": "astropy__astropy-14182",
+      "patch_hash": null,
+      "run_root": "/home/slt/ReachPatch/Code/experiments/swe51/runs/astropy__astropy-14182",
+      "transition_count": 0
+    },
+    {
+      "accepted_transition_id": null,
+      "analysis_resources": {},
+      "analysis_stats": {},
+      "analysis_timings": {
+        "analysis_total_seconds": 2.1784658739343286,
+        "semantic_analysis_seconds": 2.1784644071012735
+      },
+      "component_count": 0,
+      "effective_component_count": 0,
+      "generation_status": "SEMANTIC_BLOCKED",
+      "graph_reached": null,
+      "graph_summary": {
+        "expected_full_closure_graph_count": 5,
+        "full_closure": false,
+        "graph_count": 1,
+        "graph_names": [
+          "semantic_hypothesis_graph"
+        ],
+        "graphs": {
+          "semantic_hypothesis_graph": {
+            "artifact_ids": [],
+            "hash": "1dd7a5c1fb725e767e07d3df0a18080e711b3f2e1d5a67d41381f87e937c7867"
+          }
+        }
+      },
+      "harness_detail": {
+        "fail_to_pass": null,
+        "pass_to_pass": null,
+        "patch_apply": null
+      },
+      "harness_status": "PENDING",
+      "instance_id": "django__django-11905",
+      "patch_hash": null,
+      "run_root": "/home/slt/ReachPatch/Code/experiments/swe51/runs/django__django-11905",
+      "transition_count": 0
+    },
+    {
+      "accepted_transition_id": null,
+      "analysis_resources": {},
+      "analysis_stats": {},
+      "analysis_timings": {
+        "analysis_total_seconds": 4.170931367203593,
+        "semantic_analysis_seconds": 4.1709298035129905
+      },
+      "component_count": 0,
+      "effective_component_count": 0,
+      "generation_status": "SEMANTIC_BLOCKED",
+      "graph_reached": null,
+      "graph_summary": {
+        "expected_full_closure_graph_count": 5,
+        "full_closure": false,
+        "graph_count": 1,
+        "graph_names": [
+          "semantic_hypothesis_graph"
+        ],
+        "graphs": {
+          "semantic_hypothesis_graph": {
+            "artifact_ids": [],
+            "hash": "50787fcce54cff5e78701a73a944679a7da509df609b76a44c95dc85397b59be"
+          }
+        }
+      },
+      "harness_detail": {
+        "fail_to_pass": null,
+        "pass_to_pass": null,
+        "patch_apply": null
+      },
+      "harness_status": "PENDING",
+      "instance_id": "django__django-12308",
+      "patch_hash": null,
+      "run_root": "/home/slt/ReachPatch/Code/experiments/swe51/runs/django__django-12308",
+      "transition_count": 0
+    },
+    {
+      "accepted_transition_id": null,
+      "analysis_resources": {},
+      "analysis_stats": {},
+      "analysis_timings": {
+        "analysis_total_seconds": 397.54618411231786,
+        "baseline_execution_initial_seconds": 0.00038877222687005997,
+        "baseline_execution_replay_seconds": 0.000327051617205143,
+        "binding_graph_dynamic_rebuild_seconds": 29.31760357040912,
+        "binding_graph_initial_seconds": 29.191360705532134,
+        "challenge_graph_dynamic_rebuild_seconds": 22.408939834684134,
+        "challenge_graph_initial_seconds": 22.832106362096965,
+        "program_graph_dynamic_merge_seconds": 5.566515028476715e-06,
+        "program_graph_initial_seconds": 15.09840840101242,
+        "requirement_graph_dynamic_rebuild_seconds": 114.79989553336054,
+        "requirement_graph_initial_seconds": 117.13769526965916,
+        "semantic_analysis_seconds": 0.004490036517381668
+      },
+      "component_count": 184,
+      "effective_component_count": 0,
+      "generation_status": "NO_LEGAL_ACTION",
+      "graph_reached": false,
+      "graph_summary": {
+        "expected_full_closure_graph_count": 5,
+        "full_closure": true,
+        "graph_count": 5,
+        "graph_names": [
+          "semantic_hypothesis_graph",
+          "requirement_graph",
+          "program_graph",
+          "binding_graph",
+          "challenge_graph"
+        ],
+        "graphs": {
+          "binding_graph": {
+            "artifact_ids": [],
+            "hash": "146f20209c63ba7053dbe1f023e75c5dca356656bd12d691859352ebee637b41"
+          },
+          "challenge_graph": {
+            "artifact_ids": [],
+            "hash": "bea0b4815cfe07d41debb8b122a20fcd9734dbe37a4765c72200bb9b4fbe70c8"
+          },
+          "program_graph": {
+            "artifact_ids": [],
+            "hash": "076c613acdcdebc901ac609fb08a7df1cbec17d4a194c423b858f16469613394"
+          },
+          "requirement_graph": {
+            "artifact_ids": [],
+            "hash": "5f5db81e24adaa4a942750c03be4d491505b196e162e480d4623bcf8934fc512"
+          },
+          "semantic_hypothesis_graph": {
+            "artifact_ids": [],
+            "hash": "b80f1b3b651d83d8f79fcb992925da99721e56c2d10458b06dadcfe6908c6e03"
+          }
+        }
+      },
+      "harness_detail": {
+        "fail_to_pass": null,
+        "pass_to_pass": null,
+        "patch_apply": null
+      },
+      "harness_status": "PENDING",
+      "instance_id": "psf__requests-2148",
+      "patch_hash": "12ae32cb1ec02d01eda3581b127c1fee3b0dc53572ed6baf239721a03d82e126",
+      "run_root": "/home/slt/ReachPatch/Code/experiments/swe51/runs/psf__requests-2148",
+      "transition_count": 0
+    },
+    {
+      "accepted_transition_id": null,
+      "analysis_resources": {},
+      "analysis_stats": {},
+      "analysis_timings": {
+        "analysis_total_seconds": 6.669762681238353,
+        "semantic_analysis_seconds": 0.18335729464888573
+      },
+      "component_count": 0,
+      "effective_component_count": 0,
+      "generation_status": "SEMANTIC_BLOCKED",
+      "graph_reached": null,
+      "graph_summary": {
+        "expected_full_closure_graph_count": 5,
+        "full_closure": false,
+        "graph_count": 1,
+        "graph_names": [
+          "semantic_hypothesis_graph"
+        ],
+        "graphs": {
+          "semantic_hypothesis_graph": {
+            "artifact_ids": [],
+            "hash": "a764d83483d559642ab850cd9e9e04f3f32cb95d9c140bda3609d1a6fe3e894f"
+          }
+        }
+      },
+      "harness_detail": {
+        "fail_to_pass": null,
+        "pass_to_pass": null,
+        "patch_apply": null
+      },
+      "harness_status": "PENDING",
+      "instance_id": "pytest-dev__pytest-5413",
+      "patch_hash": null,
+      "run_root": "/home/slt/ReachPatch/Code/experiments/swe51/runs/pytest-dev__pytest-5413",
+      "transition_count": 0
+    },
+    {
+      "accepted_transition_id": null,
+      "analysis_resources": {},
+      "analysis_stats": {},
+      "analysis_timings": {
+        "analysis_total_seconds": 4.587007123976946,
+        "semantic_analysis_seconds": 0.008636957965791225
+      },
+      "component_count": 0,
+      "effective_component_count": 0,
+      "generation_status": "SEMANTIC_BLOCKED",
+      "graph_reached": null,
+      "graph_summary": {
+        "expected_full_closure_graph_count": 5,
+        "full_closure": false,
+        "graph_count": 1,
+        "graph_names": [
+          "semantic_hypothesis_graph"
+        ],
+        "graphs": {
+          "semantic_hypothesis_graph": {
+            "artifact_ids": [],
+            "hash": "6afafe798544120d2bc678fb8aef3ffacdce5168e4910652ab25c1d0c94683a4"
+          }
+        }
+      },
+      "harness_detail": {
+        "fail_to_pass": null,
+        "pass_to_pass": null,
+        "patch_apply": null
+      },
+      "harness_status": "PENDING",
+      "instance_id": "pytest-dev__pytest-5692",
+      "patch_hash": null,
+      "run_root": "/home/slt/ReachPatch/Code/experiments/swe51/runs/pytest-dev__pytest-5692",
+      "transition_count": 0
+    },
+    {
+      "accepted_transition_id": null,
+      "analysis_resources": {
+        "program_graph_initial": {
+          "complete_peak_rss_mib": 1018.81640625,
+          "in_progress_peak_rss_mib": 31.1015625
+        },
+        "requirement_graph_initial": {
+          "in_progress_peak_rss_mib": 1018.81640625
+        },
+        "semantic_analysis": {
+          "complete_peak_rss_mib": 31.1015625
+        }
+      },
+      "analysis_stats": {},
+      "analysis_timings": {
+        "program_graph_initial_seconds": 79.87587464199896,
+        "semantic_analysis_seconds": 0.015431990001161466
+      },
+      "component_count": 0,
+      "effective_component_count": 0,
+      "generation_status": "ERROR",
+      "graph_reached": null,
+      "graph_summary": {},
+      "harness_detail": {
+        "fail_to_pass": null,
+        "pass_to_pass": null,
+        "patch_apply": null
+      },
+      "harness_status": "PENDING",
+      "instance_id": "pytest-dev__pytest-7220",
+      "patch_hash": null,
+      "run_root": "/home/slt/ReachPatch/Code/experiments/swe51/runs/pytest-dev__pytest-7220",
+      "transition_count": 0
+    },
+    {
+      "accepted_transition_id": null,
+      "analysis_resources": {},
+      "analysis_stats": {},
+      "analysis_timings": {
+        "analysis_total_seconds": 4.416122045367956,
+        "semantic_analysis_seconds": 0.3807439021766186
+      },
+      "component_count": 0,
+      "effective_component_count": 0,
+      "generation_status": "SEMANTIC_BLOCKED",
+      "graph_reached": null,
+      "graph_summary": {
+        "expected_full_closure_graph_count": 5,
+        "full_closure": false,
+        "graph_count": 1,
+        "graph_names": [
+          "semantic_hypothesis_graph"
+        ],
+        "graphs": {
+          "semantic_hypothesis_graph": {
+            "artifact_ids": [],
+            "hash": "c2d7a556f12967bd83b7af4a6f8e73199fc518dcfd422421beeecafcb7af5d42"
+          }
+        }
+      },
+      "harness_detail": {
+        "fail_to_pass": null,
+        "pass_to_pass": null,
+        "patch_apply": null
+      },
+      "harness_status": "PENDING",
+      "instance_id": "sphinx-doc__sphinx-8282",
+      "patch_hash": null,
+      "run_root": "/home/slt/ReachPatch/Code/experiments/swe51/runs/sphinx-doc__sphinx-8282",
+      "transition_count": 0
+    },
+    {
+      "accepted_transition_id": null,
+      "analysis_resources": {},
+      "analysis_stats": {},
+      "analysis_timings": {
+        "analysis_total_seconds": 4.009572719223797,
+        "semantic_analysis_seconds": 0.09983614273369312
+      },
+      "component_count": 0,
+      "effective_component_count": 0,
+      "generation_status": "SEMANTIC_BLOCKED",
+      "graph_reached": null,
+      "graph_summary": {
+        "expected_full_closure_graph_count": 5,
+        "full_closure": false,
+        "graph_count": 1,
+        "graph_names": [
+          "semantic_hypothesis_graph"
+        ],
+        "graphs": {
+          "semantic_hypothesis_graph": {
+            "artifact_ids": [],
+            "hash": "f13e428432942259aa630e348f4fa54ff57c3a7f82aeacfcae2c504091b85a39"
+          }
+        }
+      },
+      "harness_detail": {
+        "fail_to_pass": null,
+        "pass_to_pass": null,
+        "patch_apply": null
+      },
+      "harness_status": "PENDING",
+      "instance_id": "sphinx-doc__sphinx-8721",
+      "patch_hash": null,
+      "run_root": "/home/slt/ReachPatch/Code/experiments/swe51/runs/sphinx-doc__sphinx-8721",
+      "transition_count": 0
+    }
+  ]
+}
