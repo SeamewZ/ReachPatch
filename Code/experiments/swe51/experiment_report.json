@@ -1,18 +1,18 @@
 {
-  "case_count": 9,
+  "case_count": 12,
   "failure_report": "/home/slt/ReachPatch/Code/experiments/swe51/failure_report.json",
-  "generated_at": "2026-07-26T16:07:09.513030+00:00",
+  "generated_at": "2026-07-26T16:45:08.693160+00:00",
   "generation_counts": {
-    "ERROR": 2,
+    "ERROR": 5,
     "NO_LEGAL_ACTION": 1,
     "SEMANTIC_BLOCKED": 6
   },
   "graph_memory_summary": {
     "program_graph_initial": {
-      "count": 2,
+      "count": 5,
       "max_peak_rss_mib": 9837.96484375,
-      "mean_peak_rss_mib": 5428.390625,
-      "sum_peak_rss_mib": 10856.78125
+      "mean_peak_rss_mib": 2288.9359375,
+      "sum_peak_rss_mib": 11444.6796875
     },
     "requirement_graph_initial": {
       "count": 2,
@@ -21,10 +21,10 @@
       "sum_peak_rss_mib": 10856.8515625
     },
     "semantic_analysis": {
-      "count": 2,
-      "max_peak_rss_mib": 31.1015625,
-      "mean_peak_rss_mib": 31.046875,
-      "sum_peak_rss_mib": 62.09375
+      "count": 5,
+      "max_peak_rss_mib": 518.25,
+      "mean_peak_rss_mib": 129.9984375,
+      "sum_peak_rss_mib": 649.9921875
     }
   },
   "graph_timing_summary": {
@@ -70,6 +70,12 @@
       "mean_seconds": 22.832106362096965,
       "sum_seconds": 22.832106362096965
     },
+    "program_graph_definition_index_seconds": {
+      "count": 3,
+      "max_seconds": 62.571062274000724,
+      "mean_seconds": 33.9077411936693,
+      "sum_seconds": 101.72322358100791
+    },
     "program_graph_dynamic_merge_seconds": {
       "count": 1,
       "max_seconds": 5.566515028476715e-06,
@@ -95,14 +101,14 @@
       "sum_seconds": 117.13769526965916
     },
     "semantic_analysis_seconds": {
-      "count": 9,
-      "max_seconds": 4.1709298035129905,
-      "mean_seconds": 0.7833812867399198,
-      "sum_seconds": 7.0504315806592786
+      "count": 12,
+      "max_seconds": 28.840674693004985,
+      "mean_seconds": 2.993278964388537,
+      "sum_seconds": 35.919347572662446
     }
   },
   "harness_counts": {
-    "PENDING": 9
+    "PENDING": 12
   },
   "results": [
     {
@@ -392,6 +398,37 @@
     },
     {
       "accepted_transition_id": null,
+      "analysis_resources": {
+        "program_graph_initial": {
+          "in_progress_peak_rss_mib": 518.25
+        },
+        "semantic_analysis": {
+          "complete_peak_rss_mib": 518.25
+        }
+      },
+      "analysis_stats": {},
+      "analysis_timings": {
+        "program_graph_definition_index_seconds": 9.981938669006922,
+        "semantic_analysis_seconds": 28.840674693004985
+      },
+      "component_count": 0,
+      "effective_component_count": 0,
+      "generation_status": "ERROR",
+      "graph_reached": null,
+      "graph_summary": {},
+      "harness_detail": {
+        "fail_to_pass": null,
+        "pass_to_pass": null,
+        "patch_apply": null
+      },
+      "harness_status": "PENDING",
+      "instance_id": "scikit-learn__scikit-learn-14092",
+      "patch_hash": null,
+      "run_root": "/home/slt/ReachPatch/Code/experiments/swe51/runs/scikit-learn__scikit-learn-14092",
+      "transition_count": 0
+    },
+    {
+      "accepted_transition_id": null,
       "analysis_resources": {},
       "analysis_stats": {},
       "analysis_timings": {
@@ -462,6 +499,68 @@
       "instance_id": "sphinx-doc__sphinx-8721",
       "patch_hash": null,
       "run_root": "/home/slt/ReachPatch/Code/experiments/swe51/runs/sphinx-doc__sphinx-8721",
+      "transition_count": 0
+    },
+    {
+      "accepted_transition_id": null,
+      "analysis_resources": {
+        "program_graph_initial": {
+          "in_progress_peak_rss_mib": 34.82421875
+        },
+        "semantic_analysis": {
+          "complete_peak_rss_mib": 34.82421875
+        }
+      },
+      "analysis_stats": {},
+      "analysis_timings": {
+        "program_graph_definition_index_seconds": 62.571062274000724,
+        "semantic_analysis_seconds": 0.01846719899913296
+      },
+      "component_count": 0,
+      "effective_component_count": 0,
+      "generation_status": "ERROR",
+      "graph_reached": null,
+      "graph_summary": {},
+      "harness_detail": {
+        "fail_to_pass": null,
+        "pass_to_pass": null,
+        "patch_apply": null
+      },
+      "harness_status": "PENDING",
+      "instance_id": "sympy__sympy-11870",
+      "patch_hash": null,
+      "run_root": "/home/slt/ReachPatch/Code/experiments/swe51/runs/sympy__sympy-11870",
+      "transition_count": 0
+    },
+    {
+      "accepted_transition_id": null,
+      "analysis_resources": {
+        "program_graph_initial": {
+          "in_progress_peak_rss_mib": 34.82421875
+        },
+        "semantic_analysis": {
+          "complete_peak_rss_mib": 34.82421875
+        }
+      },
+      "analysis_stats": {},
+      "analysis_timings": {
+        "program_graph_definition_index_seconds": 29.17022263800027,
+        "semantic_analysis_seconds": 0.009774099999049213
+      },
+      "component_count": 0,
+      "effective_component_count": 0,
+      "generation_status": "ERROR",
+      "graph_reached": null,
+      "graph_summary": {},
+      "harness_detail": {
+        "fail_to_pass": null,
+        "pass_to_pass": null,
+        "patch_apply": null
+      },
+      "harness_status": "PENDING",
+      "instance_id": "sympy__sympy-12454",
+      "patch_hash": null,
+      "run_root": "/home/slt/ReachPatch/Code/experiments/swe51/runs/sympy__sympy-12454",
       "transition_count": 0
     }
   ]

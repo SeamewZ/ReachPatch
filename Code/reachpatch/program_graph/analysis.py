@@ -186,6 +186,12 @@ class DefinitionScopeAnalyzer(ast.NodeVisitor):
         if self.declarations_only:
             for decorator in node.decorator_list:
                 self._visit_index_symbols(decorator)
+        else:
+            # Class decorators are evaluated in the enclosing scope before
+            # the class name is bound. Keep both analysis passes aligned with
+            # that Python evaluation rule.
+            for decorator in node.decorator_list:
+                self.visit(decorator)
         self.scope_names.append(node.name)
         self.container_ids.append(record.node_id)
         if self.declarations_only:
@@ -195,8 +201,6 @@ class DefinitionScopeAnalyzer(ast.NodeVisitor):
                 else:
                     self._visit_index_symbols(child)
         else:
-            for decorator in node.decorator_list:
-                self.visit(decorator)
             for child in node.body:
                 self.visit(child)
         self.container_ids.pop()

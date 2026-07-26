@@ -341,3 +341,26 @@ def test_path_class_default_budget_covers_long_acyclic_corridor():
     assert not enumeration.capped
     assert len(enumeration.path_classes) == 1
     assert enumeration.path_classes[0].node_ids == tuple(node_ids)
+
+
+def test_two_pass_builder_indexes_class_decorator_in_enclosing_scope(tmp_path):
+    (tmp_path / "module.py").write_text(
+        "def decorate(cls):\n"
+        "    return cls\n"
+        "\n"
+        "@decorate\n"
+        "class Example:\n"
+        "    pass\n",
+        encoding="utf-8",
+    )
+
+    graph = PythonProgramGraphBuilder(tmp_path).build()
+
+    decorator = next(
+        node
+        for node in graph.nodes.values()
+        if node.kind == "local"
+        and node.label == "decorate"
+        and node.attributes.get("line") == 4
+    )
+    assert decorator.attributes["qualified_name"] == "module.decorate"

@@ -1,7 +1,7 @@
 # SWE51 Failure Report
 
 - Cases observed: `51`
-- Failure/unknown rows: `9`
+- Failure/unknown rows: `12`
 
 | Case | Stage | Status | Reason | Run root |
 |---|---|---|---|---|
@@ -12,8 +12,11 @@
 | `pytest-dev__pytest-5413` | `generation` | `SEMANTIC_BLOCKED` | public evidence leaves multiple mutually exclusive semantic assignments | `/home/slt/ReachPatch/Code/experiments/swe51/runs/pytest-dev__pytest-5413` |
 | `pytest-dev__pytest-5692` | `generation` | `SEMANTIC_BLOCKED` | public evidence leaves multiple mutually exclusive semantic assignments | `/home/slt/ReachPatch/Code/experiments/swe51/runs/pytest-dev__pytest-5692` |
 | `pytest-dev__pytest-7220` | `generation` | `ERROR` | SyntaxError: invalid syntax (<unknown>, line 1) | `/home/slt/ReachPatch/Code/experiments/swe51/runs/pytest-dev__pytest-7220` |
+| `scikit-learn__scikit-learn-14092` | `generation` | `ERROR` | ValueError: node id collision: program-node-fc84bcb1989968b0c4ee7faa | `/home/slt/ReachPatch/Code/experiments/swe51/runs/scikit-learn__scikit-learn-14092` |
 | `sphinx-doc__sphinx-8282` | `generation` | `SEMANTIC_BLOCKED` | public evidence leaves multiple mutually exclusive semantic assignments | `/home/slt/ReachPatch/Code/experiments/swe51/runs/sphinx-doc__sphinx-8282` |
 | `sphinx-doc__sphinx-8721` | `generation` | `SEMANTIC_BLOCKED` | public evidence leaves multiple mutually exclusive semantic assignments | `/home/slt/ReachPatch/Code/experiments/swe51/runs/sphinx-doc__sphinx-8721` |
+| `sympy__sympy-11870` | `generation` | `ERROR` | ValueError: node id collision: program-node-9e27ac03dffc7d00d0680ca8 | `/home/slt/ReachPatch/Code/experiments/swe51/runs/sympy__sympy-11870` |
+| `sympy__sympy-12454` | `generation` | `ERROR` | ValueError: node id collision: program-node-85e4b2992d85d28ffda26ab2 | `/home/slt/ReachPatch/Code/experiments/swe51/runs/sympy__sympy-12454` |
 
 ## Per-case diagnostics
 
@@ -98,6 +101,18 @@
 - Result JSON: `/home/slt/ReachPatch/Code/experiments/swe51/results/pytest-dev__pytest-7220.json`
 - Run manifest: `/home/slt/ReachPatch/Code/experiments/swe51/runs/pytest-dev__pytest-7220/run_manifest.json`
 
+### `scikit-learn__scikit-learn-14092`
+
+- Failure point: `program_graph_initial`
+- Status: `ERROR`
+- Reason: ValueError: node id collision: program-node-fc84bcb1989968b0c4ee7faa
+- Graph closure: `0/5`
+- Transitions: `0`
+- Stage timings: `{"program_graph_definition_index_seconds": 9.981938669006922, "semantic_analysis_seconds": 28.840674693004985}`
+- Stage memory: `{"program_graph_initial": {"in_progress_peak_rss_mib": 518.25}, "semantic_analysis": {"complete_peak_rss_mib": 518.25}}`
+- Result JSON: `/home/slt/ReachPatch/Code/experiments/swe51/results/scikit-learn__scikit-learn-14092.json`
+- Run manifest: `/home/slt/ReachPatch/Code/experiments/swe51/runs/scikit-learn__scikit-learn-14092/run_manifest.json`
+
 ### `sphinx-doc__sphinx-8282`
 
 - Failure point: `semantic_analysis`
@@ -119,5 +134,29 @@
 - Stage timings: `{"analysis_total_seconds": 4.009572719223797, "semantic_analysis_seconds": 0.09983614273369312}`
 - Result JSON: `/home/slt/ReachPatch/Code/experiments/swe51/results/sphinx-doc__sphinx-8721.json`
 - Run manifest: `/home/slt/ReachPatch/Code/experiments/swe51/runs/sphinx-doc__sphinx-8721/run_manifest.json`
+
+### `sympy__sympy-11870`
+
+- Failure point: `program_graph_initial`
+- Status: `ERROR`
+- Reason: ValueError: node id collision: program-node-9e27ac03dffc7d00d0680ca8
+- Graph closure: `0/5`
+- Transitions: `0`
+- Stage timings: `{"program_graph_definition_index_seconds": 62.571062274000724, "semantic_analysis_seconds": 0.01846719899913296}`
+- Stage memory: `{"program_graph_initial": {"in_progress_peak_rss_mib": 34.82421875}, "semantic_analysis": {"complete_peak_rss_mib": 34.82421875}}`
+- Result JSON: `/home/slt/ReachPatch/Code/experiments/swe51/results/sympy__sympy-11870.json`
+- Run manifest: `/home/slt/ReachPatch/Code/experiments/swe51/runs/sympy__sympy-11870/run_manifest.json`
+
+### `sympy__sympy-12454`
+
+- Failure point: `program_graph_initial`
+- Status: `ERROR`
+- Reason: ValueError: node id collision: program-node-85e4b2992d85d28ffda26ab2
+- Graph closure: `0/5`
+- Transitions: `0`
+- Stage timings: `{"program_graph_definition_index_seconds": 29.17022263800027, "semantic_analysis_seconds": 0.009774099999049213}`
+- Stage memory: `{"program_graph_initial": {"in_progress_peak_rss_mib": 34.82421875}, "semantic_analysis": {"complete_peak_rss_mib": 34.82421875}}`
+- Result JSON: `/home/slt/ReachPatch/Code/experiments/swe51/results/sympy__sympy-12454.json`
+- Run manifest: `/home/slt/ReachPatch/Code/experiments/swe51/runs/sympy__sympy-12454/run_manifest.json`
 
 Captured traceback/stdout/stderr, patch application results, component outcomes, and DeepSeek call records are in `failure_report.json`; older workers may not have captured a traceback.
