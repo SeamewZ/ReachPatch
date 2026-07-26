@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
 from pathlib import Path
 from typing import Any
@@ -13,6 +14,9 @@ from reachpatch.reach_avoid.controller import (
     ReachPatchController,
 )
 from reachpatch.reporting import build_run_report, export_patch
+from reachpatch.repair.deepseek_agent import (
+    DeepSeekHTTPTransport, PersistentDeepSeekAgent,
+)
 from reachpatch.run import config_from_manifest, load_instance, load_run_manifest
 
 
@@ -29,9 +33,35 @@ def _config(args: argparse.Namespace) -> ReachPatchConfig:
     )
 
 
+def _generator(args: argparse.Namespace, config: ReachPatchConfig):
+    raw_path = getattr(args, "deepseek_key_path", None) or os.environ.get(
+        "REACHPATCH_DEEPSEEK_KEY_PATH"
+    )
+    if not raw_path:
+        return None
+    key_path = Path(raw_path).expanduser().resolve()
+    api_key = key_path.read_text(encoding="utf-8").strip()
+    if not api_key:
+        raise ValueError("DeepSeek API key is empty")
+    transport = DeepSeekHTTPTransport(
+        api_key,
+        model=getattr(args, "deepseek_model", "deepseek-chat"),
+        base_url=getattr(args, "deepseek_base_url", None)
+        or os.environ.get("DEEPSEEK_BASE_URL", "https://api.deepseek.com"),
+        max_concurrency=1,
+    )
+    return PersistentDeepSeekAgent(
+        transport,
+        max_tool_turns=config.max_internal_tool_turns_per_revision,
+    )
+
+
 def _run_controller(args: argparse.Namespace, *, analyze_only: bool) -> int:
     instance = load_instance(args.instance)
-    controller = ReachPatchController(config=_config(args))
+    config = _config(args)
+    controller = ReachPatchController(
+        config=config, generator_agent=_generator(args, config)
+    )
     if analyze_only:
         state = controller.analyze(instance, run_root=args.run_root)
         _json({
@@ -55,7 +85,10 @@ def _build_stage(args: argparse.Namespace, stage: str) -> int:
     """Materialize the complete graph pipeline and expose one named stage."""
 
     instance = load_instance(args.instance)
-    controller = ReachPatchController(config=_config(args))
+    config = _config(args)
+    controller = ReachPatchController(
+        config=config, generator_agent=_generator(args, config)
+    )
     state = controller.analyze(instance, run_root=args.run_root)
     graph_map = {
         "requirements": state.requirement_graph,
@@ -79,7 +112,10 @@ def _build_stage(args: argparse.Namespace, stage: str) -> int:
 
 def _resume(args: argparse.Namespace) -> int:
     manifest = load_run_manifest(args.run_root)
-    controller = ReachPatchController(config=config_from_manifest(manifest))
+    config = config_from_manifest(manifest)
+    controller = ReachPatchController(
+        config=config, generator_agent=_generator(args, config)
+    )
     state, certificate = controller.resume(args.run_root)
     _json({"run_root": state.run_root, "terminal_certificate": certificate.to_dict()})
     return 0
@@ -142,6 +178,22 @@ def _artifacts(args: argparse.Namespace) -> int:
     return 0
 
 
+def _add_generator_arguments(command: argparse.ArgumentParser) -> None:
+    command.add_argument(
+        "--deepseek-key-path",
+        default=os.environ.get("REACHPATCH_DEEPSEEK_KEY_PATH"),
+        help="optional API-key file; omit for offline graph analysis",
+    )
+    command.add_argument(
+        "--deepseek-model",
+        default=os.environ.get("DEEPSEEK_MODEL", "deepseek-chat"),
+    )
+    command.add_argument(
+        "--deepseek-base-url",
+        default=os.environ.get("DEEPSEEK_BASE_URL", "https://api.deepseek.com"),
+    )
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="reachpatch",
@@ -149,7 +201,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     subparsers = parser.add_subparsers(dest="command", required=True)
     for name, help_text, analyze_only in (
-        ("analyze", "build and execute the baseline graph stack", True),
+        ("analyze", "build the patch-first semantic/index/localization state", True),
         ("run", "run repair transitions and seal one patch", False),
         ("repair", "run repair transitions and seal one patch", False),
     ):
@@ -157,9 +209,12 @@ def build_parser() -> argparse.ArgumentParser:
         command.add_argument("--instance", required=True, help="public instance JSON")
         command.add_argument("--run-root", help="new run directory inside the implementation root")
         command.add_argument(
-            "--selection-mode", choices=("certified", "benchmark"), default="certified"
+            "--selection-mode",
+            choices=("hypothesis_set", "certified", "benchmark"),
+            default="hypothesis_set",
         )
         command.add_argument("--max-revisions", type=int, default=10)
+        _add_generator_arguments(command)
         command.set_defaults(handler=lambda args, flag=analyze_only: _run_controller(
             args, analyze_only=flag
         ))
@@ -173,12 +228,16 @@ def build_parser() -> argparse.ArgumentParser:
         command.add_argument("--instance", required=True, help="public instance JSON")
         command.add_argument("--run-root", help="new run directory inside the implementation root")
         command.add_argument(
-            "--selection-mode", choices=("certified", "benchmark"), default="certified"
+            "--selection-mode",
+            choices=("hypothesis_set", "certified", "benchmark"),
+            default="hypothesis_set",
         )
         command.add_argument("--max-revisions", type=int, default=10)
+        _add_generator_arguments(command)
         command.set_defaults(handler=lambda args, selected=stage: _build_stage(args, selected))
     resume = subparsers.add_parser("resume", help="rebuild and continue an interrupted run")
     resume.add_argument("--run-root", required=True)
+    _add_generator_arguments(resume)
     resume.set_defaults(handler=_resume)
     for name, handler, help_text in (
         ("status", _status, "show the latest persisted state"),

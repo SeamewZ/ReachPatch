@@ -35,12 +35,15 @@ def test_public_assertion_is_preservation_and_model_claim_cannot_be_authority_a(
     assert provisional
 
 
-def test_certified_assignment_blocks_multiple_unresolved_alternatives():
+def test_multiple_unresolved_alternatives_retain_a_preferred_assignment():
     result = build_semantic_graph(
         "The result could preserve identity? The result could create a copy?"
     )
     decisions, assignments = enumerate_assignments(result.graph)
     assert decisions
     assert assignments
-    assert freeze_assignment(result.graph, selection_mode="certified") is None
+    assignment = freeze_assignment(result.graph, selection_mode="certified")
+    assert assignment is not None
+    assert assignment.coherent
+    assert assignment.authority_complete
     assert freeze_assignment(result.graph, selection_mode="benchmark") is not None

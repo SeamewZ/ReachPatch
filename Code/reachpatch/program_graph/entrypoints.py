@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from collections import deque
+import time
 from dataclasses import dataclass
 from typing import Iterable
 
@@ -165,6 +166,7 @@ def recover_entrypoints(
     observation_ids: Iterable[str] = (),
     max_slice_states: int | None = None,
     max_paths_per_entry: int = 256,
+    deadline: float | None = None,
 ) -> EntrypointResult:
     seeds = tuple(sorted(set(seeds)))
     missing = [seed for seed in seeds if seed not in graph.nodes]
@@ -177,6 +179,14 @@ def recover_entrypoints(
     bypass_cache: dict[tuple[str, str, str], tuple[list[str], list[str]] | None] = {}
 
     for seed in seeds:
+        if deadline is not None and time.monotonic() >= deadline:
+            frontier = graph.create_frontier(
+                "ANALYSIS_TRUNCATED", seed,
+                "entrypoint recovery deadline reached",
+                "continue the active entrypoint slice on demand", hard=False,
+            )
+            frontier_ids.add(frontier.frontier_id)
+            break
         to_seed_successor = _reverse_path_tree(graph, seed)
         from_seed_predecessor = _forward_path_tree(graph, seed)
         from_seed_paths = {
@@ -198,6 +208,14 @@ def recover_entrypoints(
         )
         found_for_seed = False
         while queue:
+            if deadline is not None and time.monotonic() >= deadline:
+                frontier = graph.create_frontier(
+                    "ANALYSIS_TRUNCATED", seed,
+                    "entrypoint backward-slice deadline reached",
+                    "continue the active entrypoint slice on demand", hard=False,
+                )
+                frontier_ids.add(frontier.frontier_id)
+                break
             state = queue.pop()
             processed += 1
             if processed > slice_state_budget:
@@ -298,12 +316,21 @@ def recover_entrypoints(
         by_entry.setdefault(path.entrypoint_id, set()).add(path.observation_id)
     topology = summarize_path_topology(graph) if by_entry else None
     for entrypoint, entry_observations in sorted(by_entry.items()):
+        if deadline is not None and time.monotonic() >= deadline:
+            frontier = graph.create_frontier(
+                "ANALYSIS_TRUNCATED", entrypoint,
+                "path-class deadline reached",
+                "continue path-class enumeration on demand", hard=False,
+            )
+            frontier_ids.add(frontier.frontier_id)
+            break
         enumeration = summarize_path_classes(
             graph,
             entrypoint,
             entry_observations,
             max_paths=max_paths_per_entry,
             topology=topology,
+            deadline=deadline,
         )
         for path_class in enumeration.path_classes:
             path_classes[path_class.path_class_id] = path_class

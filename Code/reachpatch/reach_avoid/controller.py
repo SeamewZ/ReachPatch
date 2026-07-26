@@ -5,6 +5,7 @@ import json
 import os
 import platform
 import resource
+import re
 import sys
 import time
 from dataclasses import dataclass, replace
@@ -12,14 +13,18 @@ from pathlib import Path
 from typing import Any, Iterable
 
 from reachpatch.adapters import select_adapter
-from reachpatch.binding_graph import build_binding_graph
+from reachpatch.binding_graph import build_active_binding_graph
+from reachpatch.binding_graph.models import BindingGraph
 from reachpatch.challenge_graph.dicc import (
     diff_induced_challenge_plan,
     finalize_diff_induced_challenge_closure,
 )
-from reachpatch.challenge_graph.materialize import execute_challenges, materialize_challenges
-from reachpatch.challenge_graph.models import DiffClosureCertificate
-from reachpatch.evidence import build_semantic_graph, freeze_assignment
+from reachpatch.challenge_graph.materialize import (
+    execute_challenges,
+    materialize_active_challenges,
+)
+from reachpatch.challenge_graph.models import ChallengeGraph, DiffClosureCertificate
+from reachpatch.evidence import build_hypothesis_set, build_semantic_graph
 from reachpatch.evidence.hypotheses import enumerate_assignments
 from reachpatch.execution import TraceExecutor, WorktreeManager
 from reachpatch.execution.reconcile import ActualDiff, reconcile_actual_diff
@@ -38,22 +43,37 @@ from reachpatch.models.controller import (
 )
 from reachpatch.models.core import Instance
 from reachpatch.models.enums import Confidence, ControllerPhase, Decision, OutcomeStatus
-from reachpatch.oracle.discriminator import HypothesisDiscriminator
-from reachpatch.program_graph.builder import build_augmented_program_graph
-from reachpatch.program_graph.tracing import merge_trace_bundles
+from reachpatch.models.isolation import assert_generation_payload
+from reachpatch.oracle.discriminator import DiscriminatorProbe, HypothesisDiscriminator
+from reachpatch.program_graph import (
+    Deadline, GraphBudget, build_active_program_slice, build_repository_index,
+    recover_repair_slice_seeds, update_active_program_slice,
+)
+from reachpatch.program_graph.models import ProgramGraph
 from reachpatch.reach_avoid.gates import in_target_set, terminal_avoid_reason
 from reachpatch.reach_avoid.persistence import RunArtifacts
 from reachpatch.reach_avoid.state import outcomes_from_challenges
-from reachpatch.reach_avoid.transition import evaluate_single_update
+from reachpatch.reach_avoid.transition import evaluate_patch_revision
+from reachpatch.reach_avoid.restore import (
+    binding_graph_from_dict, challenge_graph_from_dict, conversation_from_dict,
+    hypothesis_set_from_dict, outcome_from_dict, program_graph_from_dict,
+    repository_index_from_dict, requirement_graph_from_dict,
+)
 from reachpatch.repair.ablation import (
     AblationValidation,
     EditRetentionAblation,
     edit_retention_ablation,
 )
-from reachpatch.repair.policy import next_untried_repair_intent, select_losing_core
-from reachpatch.repair.recovery import root_recovery
 from reachpatch.repair.session import ActionProvider, PersistentGeneratorSession
-from reachpatch.requirement_graph import compile_assignment_overlay, compile_requirement_paths
+from reachpatch.repair.deepseek_agent import (
+    ActionConversionStatus, GeneratorBlockedExternal, GeneratorConversation,
+    PersistentDeepSeekAgent, convert_revision_action,
+)
+from reachpatch.repair.tools import RepairToolExecutor
+from reachpatch.requirement_graph import (
+    compile_assignment_overlay, compile_requirement_core, compile_requirement_paths,
+    promote_domains_from_diff, refresh_requirement_paths,
+)
 
 
 class AnalysisBlocked(RuntimeError):
@@ -65,24 +85,57 @@ class AnalysisBlocked(RuntimeError):
 
 @dataclass(frozen=True, slots=True)
 class ReachPatchConfig(SerializableRecord):
-    selection_mode: str = "certified"
+    selection_mode: str = "hypothesis_set"
     max_submitted_revisions: int = 10
     max_internal_tool_turns_per_revision: int = 12
     equivalent_failures_before_new_mechanism: int = 2
     nonprogress_before_root_recovery: int = 3
     max_ablation_groups: int = 32
+    enable_ablation: bool = False
+    max_index_files: int = 10_000
+    max_precise_files: int = 40
+    max_precise_functions: int = 200
+    max_program_nodes: int = 50_000
+    max_program_edges: int = 150_000
+    max_protocol_candidates_per_operation: int = 8
+    max_path_classes_per_leaf: int = 24
+    max_active_target_bindings: int = 20
+    max_active_preservation_bindings: int = 20
+    max_active_challenges: int = 40
+    repository_index_deadline_seconds: float = 60.0
+    program_slice_deadline_seconds: float = 90.0
+    requirement_deadline_seconds: float = 30.0
+    binding_deadline_seconds: float = 15.0
+    challenge_deadline_seconds: float = 15.0
+    graph_memory_limit_mib: int = 2048
     forbidden_patterns: tuple[str, ...] = (
         "tests/**", "test/**", "**/test_*.py", "**/*_test.py",
     )
     mechanical_commands: tuple[tuple[str, ...], ...] = ()
 
     def __post_init__(self) -> None:
-        if self.selection_mode not in {"certified", "benchmark"}:
-            raise ValueError("selection_mode must be certified or benchmark")
+        if self.selection_mode not in {"hypothesis_set", "certified", "benchmark"}:
+            raise ValueError("invalid selection_mode")
         if self.max_submitted_revisions < 1:
             raise ValueError("max_submitted_revisions must be positive")
         if self.max_ablation_groups < 1:
             raise ValueError("max_ablation_groups must be positive")
+        positive = (
+            self.max_internal_tool_turns_per_revision,
+            self.equivalent_failures_before_new_mechanism,
+            self.nonprogress_before_root_recovery,
+            self.max_index_files, self.max_precise_files,
+            self.max_precise_functions, self.max_program_nodes,
+            self.max_program_edges, self.max_protocol_candidates_per_operation,
+            self.max_path_classes_per_leaf, self.max_active_target_bindings,
+            self.max_active_preservation_bindings, self.max_active_challenges,
+            self.repository_index_deadline_seconds,
+            self.program_slice_deadline_seconds, self.requirement_deadline_seconds,
+            self.binding_deadline_seconds, self.challenge_deadline_seconds,
+            self.graph_memory_limit_mib,
+        )
+        if any(value <= 0 for value in positive):
+            raise ValueError("graph and agent limits must be positive")
 
 
 def default_budget() -> BudgetVector:
@@ -196,10 +249,17 @@ class ReachPatchController:
         *,
         config: ReachPatchConfig | None = None,
         action_provider: ActionProvider | None = None,
+        generator_agent: PersistentDeepSeekAgent | None = None,
         implementation_root: str | Path | None = None,
     ) -> None:
         self.config = config or ReachPatchConfig()
         self.action_provider = action_provider
+        self.generator_agent = generator_agent
+        if self.generator_agent is not None:
+            self.generator_agent.max_tool_turns = min(
+                self.generator_agent.max_tool_turns,
+                self.config.max_internal_tool_turns_per_revision,
+            )
         self.implementation_root = Path(
             implementation_root or Path(__file__).parents[2]
         ).resolve()
@@ -236,6 +296,367 @@ class ReachPatchController:
         run_root: str | Path | None = None,
         budget: BudgetVector | None = None,
     ) -> ReachAvoidState:
+        """Create and, when configured, immediately revise a patch-first state."""
+
+        repository = self._assert_local(instance.repository_path(), "repository")
+        if not instance.issue.strip():
+            raise AnalysisBlocked("SEMANTIC_BLOCKED", "issue text is empty")
+        assert_generation_payload(
+            instance.public_metadata, path="instance.public_metadata"
+        )
+        assert_generation_payload(
+            instance.environment, path="instance.environment"
+        )
+        root = self._run_root(instance.instance_id, run_root)
+        started = time.perf_counter()
+        visible_tests = tuple(
+            str(self._assert_local(
+                Path(path) if Path(path).is_absolute() else repository / path,
+                "visible test",
+            ))
+            for path in instance.visible_tests
+        )
+        semantic_started = time.perf_counter()
+        semantic_result = build_semantic_graph(
+            instance.issue, visible_test_paths=visible_tests,
+        )
+        hypothesis_set = build_hypothesis_set(semantic_result.graph)
+        if not hypothesis_set.alternatives:
+            raise AnalysisBlocked(
+                "SEMANTIC_BLOCKED", "public evidence produced no coherent authority-complete hypothesis"
+            )
+        assignment = next(
+            item for item in hypothesis_set.alternatives
+            if item.assignment_id == hypothesis_set.preferred_assignment_id
+        )
+        semantic_decisions, _ = enumerate_assignments(semantic_result.graph)
+        discriminator_probes = HypothesisDiscriminator().plan(
+            semantic_decisions, hypothesis_set.alternatives
+        )
+        timings = {"semantic_analysis_seconds": time.perf_counter() - semantic_started}
+        phase_metrics: dict[str, Any] = {
+            "deepseek_initial_generation_count": 0,
+            "deepseek_repair_count": 0,
+            "deepseek_tool_turns": 0,
+            "accepted_transitions": 0,
+            "rolled_back_transitions": 0,
+        }
+        index_started = time.perf_counter()
+        repository_index = build_repository_index(
+            repository,
+            max_files=self.config.max_index_files,
+            deadline=Deadline.after(self.config.repository_index_deadline_seconds),
+        )
+        timings["repository_index_seconds"] = time.perf_counter() - index_started
+        issue_symbols = {
+            token.rsplit(".", 1)[-1].lower()
+            for token in re.findall(r"[A-Za-z_]\w*(?:\.[A-Za-z_]\w*)*", instance.issue)
+        }
+        inferred_public_tests = tuple(
+            str(repository / relative)
+            for relative, references in sorted(repository_index.test_references.items())
+            if issue_symbols & {name.rsplit(".", 1)[-1].lower() for name in references}
+        )[: min(20, self.config.max_precise_files)]
+        selected_visible_tests = tuple(dict.fromkeys(
+            (*visible_tests, *inferred_public_tests)
+        ))
+        if selected_visible_tests != visible_tests:
+            semantic_started = time.perf_counter()
+            semantic_result = build_semantic_graph(
+                instance.issue, visible_test_paths=selected_visible_tests,
+            )
+            hypothesis_set = build_hypothesis_set(semantic_result.graph)
+            if not hypothesis_set.alternatives:
+                raise AnalysisBlocked(
+                    "SEMANTIC_BLOCKED",
+                    "public issue and tests produced no coherent authority-complete hypothesis",
+                )
+            assignment = next(
+                item for item in hypothesis_set.alternatives
+                if item.assignment_id == hypothesis_set.preferred_assignment_id
+            )
+            semantic_decisions, _ = enumerate_assignments(semantic_result.graph)
+            discriminator_probes = HypothesisDiscriminator().plan(
+                semantic_decisions, hypothesis_set.alternatives
+            )
+            timings["semantic_public_test_refinement_seconds"] = (
+                time.perf_counter() - semantic_started
+            )
+            visible_tests = selected_visible_tests
+        requirement_started = time.perf_counter()
+        requirements = compile_requirement_core(
+            semantic_result.graph, hypothesis_set, repository_index,
+        )
+        timings["requirement_core_seconds"] = time.perf_counter() - requirement_started
+        seed_started = time.perf_counter()
+        seeds = recover_repair_slice_seeds(
+            instance.issue, visible_tests, repository_index,
+        )
+        timings["initial_localization_seconds"] = time.perf_counter() - seed_started
+        graph_budget = GraphBudget.from_limits(
+            seconds=self.config.program_slice_deadline_seconds,
+            max_nodes=self.config.max_program_nodes,
+            max_edges=self.config.max_program_edges,
+            max_files=self.config.max_precise_files,
+            max_functions=self.config.max_precise_functions,
+            max_rss_mib=self.config.graph_memory_limit_mib,
+            max_protocol_candidates_per_operation=(
+                self.config.max_protocol_candidates_per_operation
+            ),
+        )
+        slice_result = build_active_program_slice(
+            repository, repository_index, seeds,
+            previous=None, budget=graph_budget,
+        )
+        program = slice_result.graph
+        timings["active_program_slice_seconds"] = slice_result.elapsed_seconds
+        binding = BindingGraph(
+            requirement_graph_hash=requirements.semantic_layer_hash(),
+            program_graph_hash=program.program_hash(),
+            assignment_id=requirements.assignment_id,
+        )
+        challenges = ChallengeGraph(
+            requirement_graph_hash=binding.requirement_graph_hash,
+            program_graph_hash=binding.program_graph_hash,
+            binding_graph_hash=binding.graph_hash(),
+        )
+        episode_id = stable_id(
+            "patch-first-episode", instance.instance_id,
+            hypothesis_set.active_assignment_ids, program.source_hash,
+        )
+        checkpoint_id = stable_id(
+            "checkpoint", episode_id, "base", tree_hash(repository)
+        )
+        manager = WorktreeManager(root / "worktrees")
+        manager.initialize(repository, checkpoint_id)
+        snapshot = manager.checkpoint_tree(checkpoint_id)
+        empty_diff = reconcile_actual_diff(snapshot, snapshot)
+        working_patch = WorkingPatch(
+            version=0, base_commit=instance.base_commit,
+            canonical_diff=empty_diff.canonical_diff,
+            canonical_diff_hash=empty_diff.canonical_diff_hash,
+            base_tree_hash=empty_diff.base_tree_hash,
+            working_tree_hash=empty_diff.trial_tree_hash,
+            parent_patch_hash=None, checkpoint_id=checkpoint_id,
+        )
+        remaining = budget or default_budget()
+        legacy_session = PersistentGeneratorSession(
+            episode_id, checkpoint_id, action_provider=self.action_provider,
+        )
+        checkpoint = IncumbentCheckpoint(
+            checkpoint_id=checkpoint_id, parent_checkpoint_id=None,
+            episode_id=episode_id, assignment_id=assignment.assignment_id,
+            base_commit=instance.base_commit, snapshot_tree=str(snapshot),
+            patch=working_patch, actual_fingerprint=empty_diff.fingerprint,
+            graph_hashes={}, environment_hash=self._environment_hash(),
+            pass_pairs=(), fail_pairs=(), unknown_pairs=(),
+            blocked_path_obligation_ids=(), executed_target_deficit=0.0,
+            accepted_transition_id=None, generator_session_cursor="0",
+            remaining_budget=remaining, safe=True, graph_reached=False,
+        )
+        conversation = GeneratorConversation.create(instance.instance_id)
+        state = ReachAvoidState(
+            state_id=stable_id("state", episode_id, checkpoint_id),
+            instance_id=instance.instance_id, run_id=root.name,
+            episode_id=episode_id, base_repository=str(snapshot),
+            base_commit=instance.base_commit, run_root=str(root),
+            assignment=assignment, semantic_graph=semantic_result.graph,
+            requirement_graph=requirements, program_graph=program,
+            binding_graph=binding, challenge_graph=challenges,
+            checkpoint=checkpoint, outcomes={}, trace_bundles={},
+            counterexamples=[], repair_history=[], mechanism_memory={},
+            root_recoveries=[], diff_closure_certificates=[],
+            generator_session=legacy_session.record, remaining_budget=remaining,
+            phase=ControllerPhase.SEMANTIC, artifact_ids={},
+            hypothesis_set=hypothesis_set, repository_index=repository_index,
+            generator_conversation=conversation,
+            runtime_config={
+                **self.config.to_dict(),
+                "generation_hints": str(
+                    instance.public_metadata.get("hints_text", "")
+                ),
+                "visible_test_paths": [
+                    str(Path(path).resolve().relative_to(repository)).replace("\\", "/")
+                    for path in visible_tests
+                ],
+            }, runtime_metrics={
+                "repository_index_seconds": repository_index.build_seconds,
+                "repository_index_files": repository_index.scanned_files,
+                "active_program_slice_seconds": slice_result.elapsed_seconds,
+                "program_nodes": len(program.nodes),
+                "program_edges": len(program.edges),
+                "precise_files": len(slice_result.analyzed_files),
+                "precise_functions": len(program.cfgs),
+                "peak_rss_mib": slice_result.peak_rss_mib,
+                "requirement_leaves": len(requirements.leaves),
+                "requirement_partitions": len(requirements.partitions),
+                "discriminator_probes": [
+                    item.to_dict() for item in discriminator_probes
+                ],
+                "executed_discriminator_probe_ids": [],
+                **phase_metrics,
+            },
+        )
+        state.transition_phase(ControllerPhase.INDEX, event="semantic_hypothesis_set_built")
+        state.transition_phase(ControllerPhase.INITIAL_LOCALIZATION, event="repository_index_built")
+        state.transition_phase(ControllerPhase.INITIAL_GENERATION, event="active_slice_localized")
+        checkpoint = replace(checkpoint, graph_hashes=state.graph_hashes())
+        state.checkpoint = checkpoint
+        artifacts = RunArtifacts(root, instance.instance_id)
+        adapter_observation = select_adapter(repository).observe(repository)
+        artifacts.put(
+            "adapter_observation", adapter_observation,
+            producer="reachpatch.adapter", confidence=Confidence.CONFIRMED,
+            status=adapter_observation.status,
+        )
+        for evidence in semantic_result.evidence:
+            artifacts.put(
+                "evidence", evidence, producer="reachpatch.evidence",
+                authority=evidence.authority, confidence=evidence.confidence,
+            )
+        artifacts.put(
+            "hypothesis_set", hypothesis_set, producer="reachpatch.evidence",
+            confidence=Confidence.HIGH,
+        )
+        artifacts.put(
+            "repository_index", repository_index,
+            producer="reachpatch.program-index", confidence=Confidence.CONFIRMED,
+            status="ANALYSIS_TRUNCATED" if repository_index.parse_frontiers else "COMPLETE",
+        )
+        for probe in discriminator_probes:
+            artifacts.put(
+                "discriminator_probe", probe,
+                producer="reachpatch.discriminator",
+                confidence=Confidence.UNKNOWN,
+                status=probe.correctness_authority,
+            )
+        artifacts.persist_graph_stack(state)
+        artifacts.put(
+            "working_patch", working_patch, state=state,
+            producer="reachpatch.checkpoint", confidence=Confidence.CONFIRMED,
+        )
+        artifacts.put(
+            "incumbent_checkpoint", checkpoint, state=state,
+            producer="reachpatch.checkpoint", confidence=Confidence.CONFIRMED,
+        )
+        first_patch_started = time.perf_counter()
+        if self.generator_agent is not None:
+            public_checks = {
+                f"public-check-{index}": tuple(command)
+                for index, command in enumerate(self.config.mechanical_commands)
+            }
+            tools = RepairToolExecutor(
+                repository_root=snapshot, repository_index=repository_index,
+                current_diff="", public_checks=public_checks,
+                allowed_test_paths=set(
+                    state.runtime_config.get("visible_test_paths", ())
+                ),
+            )
+            try:
+                revision = self.generator_agent.generate_initial_patch(
+                    state, conversation, tools
+                )
+            except GeneratorBlockedExternal as exc:
+                revision = None
+                self._record_generator_block(state, exc)
+            timings["first_patch_generation_seconds"] = (
+                time.perf_counter() - first_patch_started
+            )
+            state.runtime_metrics["deepseek_initial_generation_count"] = 1
+            if revision is not None:
+                state.runtime_metrics["deepseek_tool_turns"] = revision.tool_turns
+                state.generator_session = replace(
+                    state.generator_session,
+                    cursor=state.generator_session.cursor + 1,
+                    internal_tool_turns=(
+                        state.generator_session.internal_tool_turns
+                        + revision.tool_turns
+                    ),
+                )
+            if revision is not None and revision.edits:
+                validation_started = time.perf_counter()
+                conversion = convert_revision_action(state, revision)
+                if conversion.status in {
+                    ActionConversionStatus.ACCEPTED,
+                    ActionConversionStatus.NEEDS_SLICE_EXPANSION,
+                }:
+                    result = evaluate_patch_revision(state, revision)
+                    timings["initial_revision_validation_seconds"] = (
+                        time.perf_counter() - validation_started
+                    )
+                    if result.accepted:
+                        state.runtime_metrics["accepted_transitions"] = 1
+                    else:
+                        state.runtime_metrics["rolled_back_transitions"] = 1
+                        state.runtime_metrics.setdefault(
+                            "failed_generator_mechanisms", []
+                        ).append(revision.mechanism)
+                    self._persist_transition(state, result)
+                else:
+                    self._record_action_rejection(state, revision, conversion)
+            elif revision is not None and revision.context_requests:
+                state.runtime_metrics["initial_context_only"] = True
+        else:
+            timings["first_patch_generation_seconds"] = 0.0
+        timings["analysis_total_seconds"] = time.perf_counter() - started
+        manifest = {
+            "instance": instance.to_dict(), "config": self.config.to_dict(),
+            "budget": remaining.to_dict(), "repository": str(repository),
+            "created_at": utc_now(), "analysis_timings": timings,
+            "patch_first": True,
+            "graph_summary": {
+                "graph_count": 5,
+                "full_closure": False,
+                "active_stack": True,
+                "graphs": {
+                    "semantic_hypothesis_graph": {"hash": semantic_result.graph.to_dict()["graph_hash"]},
+                    "requirement_graph": {"hash": state.requirement_graph.semantic_layer_hash()},
+                    "program_graph": {"hash": state.program_graph.program_hash()},
+                    "binding_graph": {"hash": state.binding_graph.graph_hash()},
+                    "challenge_graph": {"hash": state.challenge_graph.graph_hash()},
+                },
+            },
+            "acceptance_metrics": state.runtime_metrics,
+            "analysis_stats": dict(state.runtime_metrics),
+            "analysis_resources": {
+                "repository_index": {
+                    "file_count": repository_index.scanned_files,
+                },
+                "active_program_slice": {
+                    "peak_rss_mib": slice_result.peak_rss_mib,
+                    "precise_files": len(slice_result.analyzed_files),
+                    "precise_functions": len(program.cfgs),
+                },
+            },
+        }
+        temporary = root / ".run_manifest.tmp"
+        temporary.write_text(json.dumps(manifest, sort_keys=True, indent=2) + "\n", encoding="utf-8")
+        os.replace(temporary, root / "run_manifest.json")
+        artifacts.put(
+            "generator_conversation", conversation, state=state,
+            producer="reachpatch.deepseek-agent", confidence=Confidence.CONFIRMED,
+        )
+        artifacts.persist_state(state)
+        return state
+
+    def _analyze_full_legacy(
+        self,
+        instance: Instance,
+        *,
+        run_root: str | Path | None = None,
+        budget: BudgetVector | None = None,
+    ) -> ReachAvoidState:
+        if os.environ.get("REACHPATCH_ENABLE_LEGACY_FULL_GRAPH") != "1":
+            raise AnalysisBlocked(
+                "LEGACY_PATH_DISABLED",
+                "full-repository analysis is isolated from patch-first production",
+            )
+        from reachpatch.binding_graph import build_binding_graph
+        from reachpatch.challenge_graph.materialize import materialize_challenges
+        from reachpatch.evidence import freeze_assignment
+        from reachpatch.program_graph.builder import build_augmented_program_graph
+        from reachpatch.program_graph.tracing import merge_trace_bundles
+
         repository = self._assert_local(instance.repository_path(), "repository")
         root = self._run_root(instance.instance_id, run_root)
         visible_tests = tuple(
@@ -636,8 +1057,9 @@ class ReachPatchController:
     def _persist_transition(self, state: ReachAvoidState, result) -> None:
         artifacts = RunArtifacts(state.run_root, state.instance_id)
         artifacts.put(
-            "repair_action", result.action, state=state,
-            producer="reachpatch.repair-policy",
+            "generator_revision" if hasattr(result.action, "revision_id") else "repair_action",
+            result.action, state=state,
+            producer="reachpatch.deepseek-agent" if hasattr(result.action, "revision_id") else "reachpatch.repair-policy",
             confidence=Confidence.HIGH,
         )
         for packet in result.counterexamples:
@@ -669,22 +1091,101 @@ class ReachPatchController:
             producer="reachpatch.checkpoint",
             confidence=Confidence.CONFIRMED,
         )
-        artifacts.put(
-            "mechanism_memory",
-            {key: [item.to_dict() for item in value] for key, value in state.mechanism_memory.items()},
-            state=state,
-            producer="reachpatch.repair-policy",
-            confidence=Confidence.CONFIRMED,
-        )
+        if state.mechanism_memory:
+            artifacts.put(
+                "mechanism_memory",
+                {key: [item.to_dict() for item in value] for key, value in state.mechanism_memory.items()},
+                state=state,
+                producer="reachpatch.repair-policy",
+                confidence=Confidence.CONFIRMED,
+            )
         artifacts.put(
             "generator_session", state.generator_session, state=state,
             producer="reachpatch.generator-session",
             confidence=Confidence.CONFIRMED,
         )
+        if state.generator_conversation is not None:
+            artifacts.put(
+                "generator_conversation", state.generator_conversation,
+                state=state, producer="reachpatch.deepseek-agent",
+                confidence=Confidence.CONFIRMED,
+            )
         if result.accepted:
             artifacts.persist_graph_stack(state)
+            if state.repository_index is not None:
+                artifacts.put(
+                    "repository_index", state.repository_index, state=state,
+                    producer="reachpatch.program-index-incremental",
+                    confidence=Confidence.CONFIRMED,
+                    status=(
+                        "ANALYSIS_TRUNCATED"
+                        if state.repository_index.parse_frontiers else "COMPLETE"
+                    ),
+                )
         self._persist_traces(artifacts, state)
+        executed_probe_ids = set(
+            state.runtime_metrics.get("executed_discriminator_probe_ids", ())
+        )
+        observations = tuple(
+            dict(run.run.channels)
+            for paired in state.trace_bundles.values()
+            for run in paired.patch_bundle.runs
+            if run.run.observation_reached
+        )
+        if observations:
+            for raw in state.runtime_metrics.get("discriminator_probes", ()):
+                probe = DiscriminatorProbe(
+                    probe_id=str(raw["probe_id"]),
+                    decision_id=str(raw["decision_id"]),
+                    alternative_claim_ids=tuple(raw.get("alternative_claim_ids", ())),
+                    observation_channels=tuple(raw.get("observation_channels", ())),
+                    recipe_hint=dict(raw.get("recipe_hint", {})),
+                    correctness_authority=str(raw.get("correctness_authority", "NONE")),
+                )
+                if probe.probe_id in executed_probe_ids:
+                    continue
+                discriminator_result = HypothesisDiscriminator().record(
+                    probe, observations[:20], evidence_ids=(), selected_claim_id=None,
+                )
+                artifacts.put(
+                    "discriminator_result", discriminator_result, state=state,
+                    producer="reachpatch.discriminator-executor",
+                    confidence=Confidence.CONFIRMED,
+                    status=discriminator_result.correctness_status,
+                )
+                executed_probe_ids.add(probe.probe_id)
+            state.runtime_metrics["executed_discriminator_probe_ids"] = sorted(
+                executed_probe_ids
+            )
         artifacts.persist_state(state)
+        self._update_run_manifest(state)
+
+    @staticmethod
+    def _update_run_manifest(state: ReachAvoidState) -> None:
+        path = Path(state.run_root) / "run_manifest.json"
+        if not path.is_file():
+            return
+        manifest = json.loads(path.read_text(encoding="utf-8"))
+        manifest["acceptance_metrics"] = dict(state.runtime_metrics)
+        manifest["analysis_stats"] = dict(state.runtime_metrics)
+        manifest["graph_summary"] = {
+            "graph_count": 5,
+            "full_closure": in_target_set(state),
+            "active_stack": True,
+            "graphs": {
+                "semantic_hypothesis_graph": {"hash": state.graph_hashes()["semantic"]},
+                "requirement_graph": {"hash": state.graph_hashes()["requirement"]},
+                "program_graph": {"hash": state.graph_hashes()["program"]},
+                "binding_graph": {"hash": state.graph_hashes()["binding"]},
+                "challenge_graph": {"hash": state.graph_hashes()["challenge"]},
+            },
+        }
+        temporary = path.with_suffix(".tmp")
+        temporary.write_text(
+            json.dumps(manifest, sort_keys=True, indent=2) + "\n",
+            encoding="utf-8",
+        )
+        os.replace(temporary, path)
 
     def rebuild(self, run_root: str | Path) -> ReachAvoidState:
         root = self._assert_local(Path(run_root), "run root")
@@ -727,6 +1228,7 @@ class ReachPatchController:
                 "RECOVERY_BLOCKED", "base checkpoint for cumulative patch is missing"
             )
 
+        state_raw = state_envelope.payload
         repository = self._assert_local(instance.repository_path(), "repository")
         visible_tests = tuple(
             str(self._assert_local(
@@ -738,33 +1240,61 @@ class ReachPatchController:
         semantic_result = build_semantic_graph(
             instance.issue, visible_test_paths=visible_tests
         )
-        assignment = freeze_assignment(
-            semantic_result.graph, selection_mode=self.config.selection_mode
-        )
-        if assignment is None or assignment.assignment_id != checkpoint.assignment_id:
+        current_hypotheses = build_hypothesis_set(semantic_result.graph)
+        assignment = next((
+            item for item in current_hypotheses.alternatives
+            if item.assignment_id == checkpoint.assignment_id
+        ), None)
+        if assignment is None:
             raise AnalysisBlocked(
                 "SEMANTIC_RESTART",
-                "replayed public evidence no longer produces the checkpoint assignment",
+                "public evidence no longer contains the checkpoint hypothesis",
             )
-        program = build_augmented_program_graph(snapshot)
-        requirements = compile_assignment_overlay(semantic_result.graph, assignment)
-        compile_requirement_paths(requirements, program)
-        binding = build_binding_graph(requirements, program)
-        challenges = materialize_challenges(
-            requirements,
-            program,
-            binding,
-            diff_hash=(
-                checkpoint.patch.canonical_diff_hash
-                if checkpoint.patch.canonical_diff else "BASELINE"
-            ),
+        graph_envelopes = {
+            artifact_type: artifacts.store.latest(instance.instance_id, artifact_type)
+            for artifact_type in (
+                "requirement_graph", "program_graph", "binding_graph",
+                "challenge_graph", "repository_index", "hypothesis_set",
+            )
+        }
+        missing_graphs = [
+            key for key, envelope in graph_envelopes.items() if envelope is None
+        ]
+        if missing_graphs:
+            raise AnalysisBlocked(
+                "RECOVERY_BLOCKED",
+                "active graph artifacts are missing: " + ", ".join(missing_graphs),
+            )
+        requirements = requirement_graph_from_dict(
+            graph_envelopes["requirement_graph"].payload
         )
-        executor = TraceExecutor(temporary_root=root / "tmp")
-        bundles = execute_challenges(
-            challenges, executor, base_snapshot, snapshot
+        program = program_graph_from_dict(graph_envelopes["program_graph"].payload)
+        binding = binding_graph_from_dict(graph_envelopes["binding_graph"].payload)
+        challenges = challenge_graph_from_dict(
+            graph_envelopes["challenge_graph"].payload
         )
-
-        state_raw = state_envelope.payload
+        repository_index = repository_index_from_dict(
+            graph_envelopes["repository_index"].payload
+        )
+        persisted_hypotheses = hypothesis_set_from_dict(
+            graph_envelopes["hypothesis_set"].payload
+        )
+        restored_hashes = {
+            "semantic": semantic_result.graph.to_dict()["graph_hash"],
+            "requirement": requirements.semantic_layer_hash(),
+            "program": program.program_hash(),
+            "binding": binding.graph_hash(),
+            "challenge": challenges.graph_hash(),
+        }
+        stale = {
+            key: (checkpoint.graph_hashes.get(key), digest)
+            for key, digest in restored_hashes.items()
+            if checkpoint.graph_hashes.get(key) not in {None, digest}
+        }
+        if stale:
+            raise AnalysisBlocked(
+                "RECOVERY_BLOCKED", f"persisted active graph hash mismatch: {stale}"
+            )
         session_record = _generator_record(session_envelope.payload)
         mechanism_envelope = artifacts.store.latest(
             instance.instance_id, "mechanism_memory"
@@ -795,20 +1325,14 @@ class ReachPatchController:
         remaining = BudgetVector(**state_raw.get(
             "remaining_budget", checkpoint.remaining_budget.to_dict()
         ))
-        execution_seconds = sum(
-            run.duration_seconds
-            for paired in bundles
-            for trace_bundle in (paired.base_bundle, paired.patch_bundle)
-            for run in trace_bundle.runs
+        conversation_envelope = artifacts.store.latest(
+            instance.instance_id, "generator_conversation"
         )
-        try:
-            remaining = remaining.subtract(BudgetVector(
-                execution_seconds=execution_seconds,
-                wall_seconds=execution_seconds,
-            ))
-        except Exception:
-            remaining.execution_seconds = 0.0
-            remaining.wall_seconds = 0.0
+        conversation = (
+            conversation_from_dict(conversation_envelope.payload)
+            if conversation_envelope is not None
+            else GeneratorConversation.create(instance.instance_id)
+        )
         state = ReachAvoidState(
             state_id=stable_id(
                 "state", instance.instance_id, checkpoint.checkpoint_id,
@@ -827,8 +1351,13 @@ class ReachPatchController:
             binding_graph=binding,
             challenge_graph=challenges,
             checkpoint=checkpoint,
-            outcomes={},
-            trace_bundles={item.paired_bundle_id: item for item in bundles},
+            outcomes={
+                item.outcome_id: item
+                for item in (
+                    outcome_from_dict(raw) for raw in state_raw.get("outcomes", ())
+                )
+            },
+            trace_bundles={},
             counterexamples=counterexamples,
             repair_history=history,
             mechanism_memory={
@@ -839,15 +1368,20 @@ class ReachPatchController:
             diff_closure_certificates=closures,
             generator_session=session_record,
             remaining_budget=remaining,
-            phase=ControllerPhase.INCUMBENT_CLOSE,
+            phase=ControllerPhase(state_raw.get("phase", ControllerPhase.COUNTEREXAMPLE_FEEDBACK.value)),
             artifact_ids={
                 key: list(values)
                 for key, values in state_raw.get("artifact_ids", {}).items()
             },
             transition_index=int(state_raw.get("transition_index", 0)),
             phase_history=list(state_raw.get("phase_history", ())),
+            hypothesis_set=persisted_hypotheses,
+            repository_index=repository_index,
+            generator_conversation=conversation,
+            runtime_config=dict(state_raw.get("runtime_config", manifest.get("config", {}))),
+            runtime_metrics=dict(state_raw.get("runtime_metrics", {})),
+            termination_status=state_raw.get("termination_status"),
         )
-        state.outcomes = outcomes_from_challenges(state, challenges, bundles)
         passed = [item for item in state.outcomes.values() if item.status == OutcomeStatus.PASS]
         failed = [item for item in state.outcomes.values() if item.status == OutcomeStatus.FAIL]
         unknown = [
@@ -885,101 +1419,330 @@ class ReachPatchController:
                 "checkpoint_id": state.checkpoint.checkpoint_id,
                 "transaction_recovery": transaction_recovery,
                 "graph_hashes": state.graph_hashes(),
-                "replayed_bundle_ids": sorted(state.trace_bundles),
+                "replayed_bundle_ids": [],
+                "restored_from_artifacts": True,
             },
             state=state,
             producer="reachpatch.recovery",
             confidence=Confidence.CONFIRMED,
         )
-        artifacts.persist_graph_stack(state)
-        self._persist_traces(artifacts, state)
         artifacts.persist_state(state)
         return state
 
-    def _drive(
+    def _repair_tools(self, state: ReachAvoidState) -> RepairToolExecutor:
+        if state.repository_index is None:
+            raise RuntimeError("patch-first repair requires RepositoryIndex")
+        public_checks = {
+            f"public-check-{index}": tuple(command)
+            for index, command in enumerate(self.config.mechanical_commands)
+        }
+        return RepairToolExecutor(
+            repository_root=Path(state.checkpoint.snapshot_tree),
+            repository_index=state.repository_index,
+            current_diff=state.checkpoint.patch.canonical_diff,
+            public_checks=public_checks,
+            allowed_test_paths=set(
+                state.runtime_config.get("visible_test_paths", ())
+            ),
+        )
+
+    def _expand_generator_context(
+        self,
+        state: ReachAvoidState,
+        requests: tuple[Any, ...],
+    ) -> bool:
+        """Expand only requested active files and reconnect affected products."""
+
+        if not requests or state.repository_index is None:
+            return False
+        snapshot = Path(state.checkpoint.snapshot_tree)
+        empty = reconcile_actual_diff(snapshot, snapshot)
+        budget = GraphBudget.from_limits(
+            seconds=self.config.program_slice_deadline_seconds,
+            max_nodes=self.config.max_program_nodes,
+            max_edges=self.config.max_program_edges,
+            max_files=self.config.max_precise_files,
+            max_functions=self.config.max_precise_functions,
+            max_rss_mib=self.config.graph_memory_limit_mib,
+            max_protocol_candidates_per_operation=(
+                self.config.max_protocol_candidates_per_operation
+            ),
+        )
+        previous_program = state.program_graph
+        delta = update_active_program_slice(
+            previous_program, state.repository_index, snapshot, empty, None,
+            tuple(requests), budget,
+        )
+        if (
+            not delta.added_node_ids and not delta.modified_node_ids
+            and not delta.added_edge_ids
+        ):
+            return False
+        requirements = copy.deepcopy(state.requirement_graph)
+        old_paths = set(requirements.path_obligations)
+        selected_leaves = set(requirements.leaves)
+        if requirements.path_obligations:
+            requirements, removed_paths, added_paths = refresh_requirement_paths(
+                requirements, delta.graph, affected_leaf_ids=selected_leaves,
+                max_path_classes_per_leaf=self.config.max_path_classes_per_leaf,
+                deadline=time.monotonic() + self.config.requirement_deadline_seconds,
+            )
+            affected_paths = set(removed_paths) | set(added_paths)
+        else:
+            compile_requirement_paths(
+                requirements, delta.graph,
+                max_open_world_seeds=min(64, self.config.max_precise_functions),
+                max_observation_nodes=min(128, self.config.max_program_nodes),
+                max_paths_per_entry=self.config.max_path_classes_per_leaf,
+                max_path_classes_per_leaf=self.config.max_path_classes_per_leaf,
+                promote_all_program_predicates=False,
+                deadline=time.monotonic() + self.config.requirement_deadline_seconds,
+            )
+            affected_paths = set(requirements.path_obligations) - old_paths
+        affected_paths.update(
+            obligation.path_obligation_id
+            for obligation in requirements.path_obligations.values()
+            if set(obligation.path_edge_ids) & set(delta.added_edge_ids)
+        )
+        binding = build_active_binding_graph(
+            requirements, delta.graph, previous=state.binding_graph,
+            affected_leaf_ids=selected_leaves,
+            affected_path_ids=affected_paths,
+            max_target_units=self.config.max_active_target_bindings,
+            max_preservation_units=self.config.max_active_preservation_bindings,
+            deadline=time.monotonic() + self.config.binding_deadline_seconds,
+        )
+        cumulative = reconcile_actual_diff(state.base_repository, snapshot)
+        challenges = materialize_active_challenges(
+            requirements, delta.graph, binding, actual_diff=cumulative,
+            previous_outcomes=state.outcomes,
+            max_challenges=self.config.max_active_challenges,
+            deadline=time.monotonic() + self.config.challenge_deadline_seconds,
+        )
+        state.requirement_graph = requirements
+        state.program_graph = delta.graph
+        state.binding_graph = binding
+        state.challenge_graph = challenges
+        state.checkpoint = replace(
+            state.checkpoint, graph_hashes=state.graph_hashes()
+        )
+        state.runtime_metrics["targeted_slice_expansions"] = int(
+            state.runtime_metrics.get("targeted_slice_expansions", 0)
+        ) + 1
+        state.runtime_metrics["last_context_added_nodes"] = len(delta.added_node_ids)
+        state.refresh_id()
+        artifacts = RunArtifacts(state.run_root, state.instance_id)
+        artifacts.persist_graph_stack(state)
+        artifacts.persist_state(state)
+        return True
+
+    def _record_generator_block(
+        self,
+        state: ReachAvoidState,
+        error: GeneratorBlockedExternal,
+    ) -> None:
+        state.termination_status = "GENERATOR_BLOCKED_EXTERNAL"
+        state.runtime_metrics.update({
+            "generator_external_error": str(error),
+            "generator_external_operation": error.operation,
+        })
+        artifacts = RunArtifacts(state.run_root, state.instance_id)
+        artifacts.put(
+            "generator_failure",
+            {
+                "operation": error.operation,
+                "error_type": error.cause_type,
+                "detail": error.detail,
+            },
+            state=state,
+            producer="reachpatch.deepseek-agent",
+            confidence=Confidence.CONFIRMED,
+            status="BLOCKED_EXTERNAL",
+        )
+        if state.generator_conversation is not None:
+            artifacts.put(
+                "generator_conversation", state.generator_conversation,
+                state=state, producer="reachpatch.deepseek-agent",
+                confidence=Confidence.CONFIRMED,
+                status="BLOCKED_EXTERNAL",
+            )
+        artifacts.persist_state(state)
+        self._update_run_manifest(state)
+
+    def _record_action_rejection(
+        self,
+        state: ReachAvoidState,
+        revision,
+        conversion,
+    ) -> None:
+        rejection = {
+            "revision_id": revision.revision_id,
+            "status": conversion.status.value,
+            "reasons": list(conversion.reasons),
+        }
+        state.runtime_metrics.setdefault("rejected_generator_actions", []).append(
+            rejection
+        )
+        state.runtime_metrics.setdefault("failed_generator_mechanisms", []).append(
+            revision.mechanism
+        )
+        artifacts = RunArtifacts(state.run_root, state.instance_id)
+        artifacts.put(
+            "generator_action_rejection", rejection, state=state,
+            producer="reachpatch.action-conversion",
+            confidence=Confidence.CONFIRMED,
+            status=conversion.status.value,
+        )
+        if state.generator_conversation is not None:
+            artifacts.put(
+                "generator_conversation", state.generator_conversation,
+                state=state, producer="reachpatch.deepseek-agent",
+                confidence=Confidence.CONFIRMED,
+            )
+        artifacts.persist_state(state)
+        self._update_run_manifest(state)
+
+    def _drive_patch_first(
         self,
         state: ReachAvoidState,
         session: PersistentGeneratorSession,
     ) -> tuple[ReachAvoidState, TerminalCertificate]:
-        nonprogress_by_core: dict[str, int] = {}
-        while state.transition_index < self.config.max_submitted_revisions:
-            state.transition_phase(
-                ControllerPhase.INCUMBENT_CLOSE, event="close_incumbent"
-            )
+        if self.generator_agent is None or state.generator_conversation is None:
+            raise RuntimeError("patch-first drive requires a persistent generator agent")
+        conversation = state.generator_conversation
+        nonprogress = 0
+        submitted = int(state.runtime_metrics.get(
+            "submitted_generator_revisions",
+            state.runtime_metrics.get("deepseek_initial_generation_count", 0),
+        ))
+        # analyze() owns the initial generation. A context-only initial answer
+        # reaches this loop with transition_index == 0 and is retried after the
+        # requested local slice has been materialized.
+        while submitted < self.config.max_submitted_revisions:
             if in_target_set(state):
                 break
             terminal = terminal_avoid_reason(state)
             if terminal:
                 state.termination_status = terminal
                 break
-            state.transition_phase(
-                ControllerPhase.CORE_SELECT, event="select_losing_core"
+            pending_requests = tuple(conversation.pending_context_requests)
+            if pending_requests:
+                self._expand_generator_context(state, pending_requests)
+                conversation.pending_context_requests.clear()
+            packets = tuple(
+                packet for packet in state.counterexamples
+                if packet.counterexample_id not in conversation.delivered_counterexamples
             )
-            core = select_losing_core(state)
-            if core is None:
-                state.termination_status = "LOCALIZATION_BLOCKED"
-                break
-            if nonprogress_by_core.get(core.core_id, 0) >= self.config.nonprogress_before_root_recovery:
+            if state.phase == ControllerPhase.TRANSITION_GATE:
                 state.transition_phase(
-                    ControllerPhase.ROOT_RECOVERY, event="nonprogress_threshold"
+                    ControllerPhase.COUNTEREXAMPLE_FEEDBACK,
+                    event="revision_requires_further_evidence",
                 )
-                recovery = root_recovery(state, core)
-                RunArtifacts(state.run_root, state.instance_id).put(
-                    "root_recovery", recovery, state=state,
-                    producer="reachpatch.root-recovery",
-                    confidence=Confidence.HIGH,
-                )
-                nonprogress_by_core[core.core_id] = 0
-                if recovery.classification in {
-                    "NO_LEGAL_ACTION", "ENVIRONMENT_BLOCKED", "SEMANTIC_DISPUTE", "ORACLE_DISPUTE",
-                }:
-                    state.termination_status = recovery.classification
-                    break
-                continue
-            state.transition_phase(
-                ControllerPhase.INTENT_SELECT, event="core_selected"
-            )
-            intent = next_untried_repair_intent(state, core)
-            if intent is None:
+            if state.phase == ControllerPhase.INITIAL_GENERATION:
                 state.transition_phase(
-                    ControllerPhase.ROOT_RECOVERY, event="no_legal_intent"
+                    ControllerPhase.ROOT_RECOVERY,
+                    event="initial_generation_requested_context",
                 )
-                recovery = root_recovery(state, core)
-                if recovery.classification != "NEW_CUT":
-                    state.termination_status = recovery.classification
-                    break
-                continue
-            RunArtifacts(state.run_root, state.instance_id).put(
-                "repair_intent", intent, state=state,
-                producer="reachpatch.repair-policy",
-                confidence=Confidence.HIGH,
-            )
-            result = evaluate_single_update(
-                state,
-                session,
-                intent,
-                forbidden_patterns=self.config.forbidden_patterns,
-                mechanical_commands=self.config.mechanical_commands,
-            )
-            if result is None:
-                nonprogress_by_core[core.core_id] = nonprogress_by_core.get(core.core_id, 0) + 1
-                if nonprogress_by_core[core.core_id] >= self.config.nonprogress_before_root_recovery:
-                    state.transition_phase(
-                        ControllerPhase.ROOT_RECOVERY,
-                        event="generator_nonprogress_threshold",
+            if nonprogress >= self.config.nonprogress_before_root_recovery:
+                state.transition_phase(
+                    ControllerPhase.ROOT_RECOVERY, event="patch_first_nonprogress"
+                )
+                tools = self._repair_tools(state)
+                try:
+                    revision = self.generator_agent.root_recovery(
+                        state, conversation, tools
                     )
-                    recovery = root_recovery(state, core)
-                    if recovery.classification != "NEW_CUT":
-                        state.termination_status = recovery.classification
-                        break
-                continue
-            self._persist_transition(state, result)
-            if result.accepted:
-                nonprogress_by_core[core.core_id] = 0
+                except GeneratorBlockedExternal as exc:
+                    self._record_generator_block(state, exc)
+                    break
+                nonprogress = 0
             else:
-                nonprogress_by_core[core.core_id] = nonprogress_by_core.get(core.core_id, 0) + 1
-        if state.transition_index >= self.config.max_submitted_revisions and not in_target_set(state):
+                if state.phase != ControllerPhase.REPAIR_GENERATION:
+                    state.transition_phase(
+                        ControllerPhase.REPAIR_GENERATION,
+                        event="counterexample_repair_requested",
+                    )
+                tools = self._repair_tools(state)
+                try:
+                    if packets:
+                        revision = self.generator_agent.repair_from_counterexamples(
+                            state, conversation, packets, tools
+                        )
+                        state.runtime_metrics["deepseek_repair_count"] = int(
+                            state.runtime_metrics.get("deepseek_repair_count", 0)
+                        ) + 1
+                    else:
+                        revision = self.generator_agent.root_recovery(
+                            state, conversation, tools
+                        )
+                        state.runtime_metrics["deepseek_root_recovery_count"] = int(
+                            state.runtime_metrics.get("deepseek_root_recovery_count", 0)
+                        ) + 1
+                except GeneratorBlockedExternal as exc:
+                    self._record_generator_block(state, exc)
+                    break
+            submitted += 1
+            state.runtime_metrics["submitted_generator_revisions"] = submitted
+            state.runtime_metrics["deepseek_tool_turns"] = int(
+                state.runtime_metrics.get("deepseek_tool_turns", 0)
+            ) + revision.tool_turns
+            state.generator_session = replace(
+                state.generator_session,
+                cursor=state.generator_session.cursor + 1,
+                internal_tool_turns=(
+                    state.generator_session.internal_tool_turns
+                    + revision.tool_turns
+                ),
+            )
+            if not revision.edits:
+                conversation.pending_context_requests.extend(
+                    request for request in revision.context_requests
+                    if request not in conversation.pending_context_requests
+                )
+                nonprogress += 1
+                if not revision.context_requests:
+                    state.runtime_metrics["generator_contextless_revisions"] = int(
+                        state.runtime_metrics.get("generator_contextless_revisions", 0)
+                    ) + 1
+                continue
+            conversion = convert_revision_action(state, revision)
+            if conversion.status not in {
+                ActionConversionStatus.ACCEPTED,
+                ActionConversionStatus.NEEDS_SLICE_EXPANSION,
+            }:
+                self._record_action_rejection(state, revision, conversion)
+                nonprogress += 1
+                continue
+            result = evaluate_patch_revision(state, revision)
+            if result.accepted:
+                state.runtime_metrics["accepted_transitions"] = int(
+                    state.runtime_metrics.get("accepted_transitions", 0)
+                ) + 1
+                nonprogress = 0
+            else:
+                state.runtime_metrics["rolled_back_transitions"] = int(
+                    state.runtime_metrics.get("rolled_back_transitions", 0)
+                ) + 1
+                state.runtime_metrics.setdefault(
+                    "failed_generator_mechanisms", []
+                ).append(revision.mechanism)
+                nonprogress += 1
+            self._persist_transition(state, result)
+        if submitted >= self.config.max_submitted_revisions and not in_target_set(state):
             state.termination_status = "BUDGET_EXHAUSTED"
+        elif not in_target_set(state) and state.termination_status is None:
+            state.termination_status = "GENERATOR_NONPROGRESS"
+        return state, self.seal(state, session)
+
+    def _drive(
+        self,
+        state: ReachAvoidState,
+        session: PersistentGeneratorSession,
+    ) -> tuple[ReachAvoidState, TerminalCertificate]:
+        if self.generator_agent is not None:
+            return self._drive_patch_first(state, session)
+        state.termination_status = "GENERATOR_UNAVAILABLE"
+        state.runtime_metrics["generator_unavailable"] = True
         return state, self.seal(state, session)
 
     def run(
@@ -1051,37 +1814,94 @@ class ReachPatchController:
         ) -> AblationValidation:
             nonlocal attempt_number
             attempt_number += 1
-            current_program = build_augmented_program_graph(current_tree)
-            current_requirements = compile_assignment_overlay(
-                state.semantic_graph, state.assignment
+            previous_evaluation = evaluations.get(tree_hash(current_tree))
+            current_program = (
+                previous_evaluation.program_graph
+                if previous_evaluation else state.program_graph
             )
-            compile_requirement_paths(current_requirements, current_program)
-            current_binding = build_binding_graph(current_requirements, current_program)
-            dicc_challenges = materialize_challenges(
-                current_requirements, current_program, current_binding
+            current_requirements = (
+                previous_evaluation.requirement_graph
+                if previous_evaluation else state.requirement_graph
             )
-
-            candidate_program = build_augmented_program_graph(trial_tree)
-            candidate_requirements = compile_assignment_overlay(
-                state.semantic_graph, state.assignment
+            current_binding = (
+                previous_evaluation.binding_graph
+                if previous_evaluation else state.binding_graph
             )
-            compile_requirement_paths(candidate_requirements, candidate_program)
-            candidate_binding = build_binding_graph(
-                candidate_requirements, candidate_program
+            incremental = reconcile_actual_diff(
+                current_tree,
+                trial_tree,
+                forbidden_patterns=self.config.forbidden_patterns,
+            )
+            if state.repository_index is None:
+                raise RuntimeError("ablation requires the persisted RepositoryIndex")
+            graph_budget = GraphBudget.from_limits(
+                seconds=self.config.program_slice_deadline_seconds,
+                max_nodes=self.config.max_program_nodes,
+                max_edges=self.config.max_program_edges,
+                max_files=self.config.max_precise_files,
+                max_functions=self.config.max_precise_functions,
+                max_rss_mib=self.config.graph_memory_limit_mib,
+                max_protocol_candidates_per_operation=(
+                    self.config.max_protocol_candidates_per_operation
+                ),
+            )
+            program_delta = update_active_program_slice(
+                current_program, state.repository_index, trial_tree,
+                incremental, None, (), graph_budget,
+            )
+            candidate_program = program_delta.graph
+            candidate_requirements = copy.deepcopy(current_requirements)
+            requirement_delta = promote_domains_from_diff(
+                candidate_requirements, candidate_program, incremental, None,
+                deadline=(
+                    time.monotonic() + self.config.requirement_deadline_seconds
+                ),
+            )
+            changed_nodes = set(
+                program_delta.added_node_ids + program_delta.removed_node_ids
+                + program_delta.modified_node_ids
+            )
+            affected_paths = {
+                unit.path_obligation_id
+                for unit in current_binding.units.values()
+                if changed_nodes & set(unit.interaction_path_ids)
+            }
+            affected_leaves = set(requirement_delta.affected_leaf_ids)
+            affected_leaves.update(
+                current_requirements.path_obligations[path_id].leaf_id
+                for path_id in affected_paths
+                if path_id in current_requirements.path_obligations
+            )
+            if affected_leaves:
+                candidate_requirements, removed_paths, added_paths = refresh_requirement_paths(
+                    candidate_requirements, candidate_program,
+                    affected_leaf_ids=affected_leaves,
+                    max_path_classes_per_leaf=self.config.max_path_classes_per_leaf,
+                    deadline=time.monotonic() + self.config.requirement_deadline_seconds,
+                )
+                affected_paths.update(removed_paths)
+                affected_paths.update(added_paths)
+            candidate_binding = build_active_binding_graph(
+                candidate_requirements, candidate_program,
+                previous=current_binding, affected_leaf_ids=affected_leaves,
+                affected_path_ids=affected_paths,
+                max_target_units=self.config.max_active_target_bindings,
+                max_preservation_units=self.config.max_active_preservation_bindings,
+                deadline=time.monotonic() + self.config.binding_deadline_seconds,
             )
             cumulative = reconcile_actual_diff(
                 state.base_repository,
                 trial_tree,
                 forbidden_patterns=self.config.forbidden_patterns,
             )
-            candidate_challenges = materialize_challenges(
+            candidate_challenges = materialize_active_challenges(
                 candidate_requirements,
                 candidate_program,
                 candidate_binding,
-                diff_hash=(
-                    cumulative.canonical_diff_hash
-                    if cumulative.canonical_diff else "BASELINE"
-                ),
+                actual_diff=cumulative,
+                previous_outcomes=state.outcomes,
+                max_challenges=self.config.max_active_challenges,
+                deadline=time.monotonic() + self.config.challenge_deadline_seconds,
             )
             candidate_bundles = execute_challenges(
                 candidate_challenges,
@@ -1090,10 +1910,11 @@ class ReachPatchController:
                 trial_tree,
             )
 
-            incremental = reconcile_actual_diff(
-                current_tree,
-                trial_tree,
-                forbidden_patterns=self.config.forbidden_patterns,
+            dicc_challenges = materialize_active_challenges(
+                current_requirements, current_program, current_binding,
+                actual_diff=incremental, previous_outcomes=state.outcomes,
+                max_challenges=self.config.max_active_challenges,
+                deadline=time.monotonic() + self.config.challenge_deadline_seconds,
             )
             update_id = stable_id(
                 "ablation-update",
@@ -1109,6 +1930,7 @@ class ReachPatchController:
                 dicc_challenges,
                 incremental,
                 update_id=update_id,
+                trial_requirement_graph=candidate_requirements,
             )
             dicc_bundles = execute_challenges(
                 dicc_challenges,
@@ -1328,7 +2150,11 @@ class ReachPatchController:
         session: PersistentGeneratorSession | None = None,
     ) -> TerminalCertificate:
         reached = in_target_set(state)
-        if reached and state.checkpoint.patch.canonical_diff:
+        if (
+            reached and state.checkpoint.patch.canonical_diff
+            and self.config.enable_ablation
+            and state.remaining_budget.available()
+        ):
             if state.phase != ControllerPhase.INCUMBENT_CLOSE:
                 state.transition_phase(
                     ControllerPhase.INCUMBENT_CLOSE,
@@ -1348,10 +2174,30 @@ class ReachPatchController:
             state.checkpoint,
             graph_reached=reached,
         )
+        state.runtime_metrics.update({
+            "candidate_binding_count": sum(
+                unit.status == "CANDIDATE"
+                for unit in state.binding_graph.units.values()
+            ),
+            "active_binding_count": sum(
+                unit.status in {"ACTIVE", "READY"}
+                for unit in state.binding_graph.units.values()
+            ),
+            "deferred_binding_count": sum(
+                unit.status == "DEFERRED"
+                for unit in state.binding_graph.units.values()
+            ),
+            "active_challenge_count": len(state.challenge_graph.cells),
+            "final_patch_nonempty": bool(state.checkpoint.patch.canonical_diff),
+            "final_patch_hash": state.checkpoint.patch.canonical_diff_hash,
+            "final_status": status,
+            "transition_count": state.transition_index,
+        })
         final_patch = Path(state.run_root) / "final_patch.diff"
         final_patch.write_text(state.checkpoint.patch.canonical_diff, encoding="utf-8")
         artifacts = RunArtifacts(state.run_root, state.instance_id)
         artifacts.persist_state(state)
+        self._update_run_manifest(state)
         verification = artifacts.store.verify()
         if not verification["valid"]:
             raise RuntimeError(

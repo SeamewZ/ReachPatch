@@ -6,7 +6,13 @@ import time
 from typing import Callable, Iterable
 
 from reachpatch.binding_graph.compatibility import bind_compatibility
-from reachpatch.binding_graph.models import BindingGraph, BindingUnit, RepairComponent
+from reachpatch.binding_graph.models import (
+    BindingGraph,
+    BindingStatus,
+    BindingUnit,
+    OracleFrontier,
+    RepairComponent,
+)
 from reachpatch.models.base import stable_id
 from reachpatch.models.core import Frontier
 from reachpatch.oracle.authority import observation_contract_from_leaf, resolve_oracle
@@ -297,7 +303,12 @@ def _build_components(
     program_graph: ProgramGraph,
     cuts_by_unit: dict[str, CausalRepairCut],
 ) -> None:
-    units = sorted(binding_graph.units.values(), key=lambda item: item.unit_id)
+    units = sorted(
+        (item for item in binding_graph.units.values() if item.status in {"ACTIVE", "READY"}),
+        key=lambda item: item.unit_id,
+    )
+    if not units:
+        return
     parent = {unit.unit_id: unit.unit_id for unit in units}
 
     def find(unit_id: str) -> str:
@@ -532,6 +543,152 @@ def build_binding_graph(
         "bypass_path_cache_count": len(bypass_path_cache),
     }
     return binding_graph
+
+
+def build_active_binding_graph(
+    requirement_graph: RequirementGraph,
+    program_graph: ProgramGraph,
+    *,
+    previous: BindingGraph | None,
+    affected_leaf_ids: set[str],
+    affected_path_ids: set[str],
+    max_target_units: int,
+    max_preservation_units: int,
+    deadline: float | None = None,
+) -> BindingGraph:
+    """Build the bounded executable part of the Requirement x Program product."""
+
+    if max_target_units < 1 or max_preservation_units < 1:
+        raise ValueError("active binding limits must be positive")
+    requirement_hash = requirement_graph.semantic_layer_hash()
+    program_hash = program_graph.program_hash()
+    result = BindingGraph(
+        requirement_graph_hash=requirement_hash,
+        program_graph_hash=program_hash,
+        assignment_id=requirement_graph.assignment_id,
+        version=(previous.version + 1) if previous else 1,
+    )
+    current_paths = requirement_graph.path_obligations
+    cuts_by_unit: dict[str, CausalRepairCut] = {}
+    if previous is not None:
+        for unit in previous.units.values():
+            if (
+                unit.leaf_id in affected_leaf_ids
+                or unit.path_obligation_id in affected_path_ids
+                or unit.path_obligation_id not in current_paths
+                or unit.path_class_id not in program_graph.path_classes
+            ):
+                continue
+            reused = replace(
+                unit,
+                requirement_graph_hash=requirement_hash,
+                program_graph_hash=program_hash,
+            )
+            result.add_unit(reused)
+            if unit.oracle_id in previous.oracles:
+                result.oracles[unit.oracle_id] = previous.oracles[unit.oracle_id]
+            for scenario_id in unit.scenario_ids:
+                if scenario_id in previous.scenarios:
+                    result.scenarios[scenario_id] = previous.scenarios[scenario_id]
+    bound_paths = set(result.by_path_obligation)
+    obligations = [
+        item for item in requirement_graph.feasible_path_obligations()
+        if item.path_obligation_id not in bound_paths
+        and (
+            previous is None
+            or not affected_leaf_ids and not affected_path_ids
+            or item.leaf_id in affected_leaf_ids
+            or item.path_obligation_id in affected_path_ids
+        )
+    ]
+    obligations.sort(key=lambda item: (
+        requirement_graph.leaves[item.leaf_id].authority_class.value == "PRESERVATION",
+        -requirement_graph.leaves[item.leaf_id].weight,
+        item.path_obligation_id,
+    ))
+    target_count = sum(
+        requirement_graph.leaves[item.leaf_id].authority_class.value != "PRESERVATION"
+        for item in result.units.values()
+    )
+    preservation_count = len(result.units) - target_count
+    deferred_groups: dict[tuple[tuple[str, ...], str, bool], list[BindingUnit]] = {}
+    deadline_truncated = False
+    for obligation in obligations:
+        if deadline is not None and time.monotonic() >= deadline:
+            deadline_truncated = True
+            break
+        leaf = requirement_graph.leaves[obligation.leaf_id]
+        preservation = leaf.authority_class.value == "PRESERVATION"
+        if preservation and preservation_count >= max_preservation_units:
+            continue
+        if not preservation and target_count >= max_target_units:
+            continue
+        unit, oracle, scenario, frontiers = bind_path_obligation(
+            obligation, requirement_graph, program_graph,
+            cut_results=cuts_by_unit,
+        )
+        if not obligation.base_feasible:
+            status = BindingStatus.INFEASIBLE
+        elif unit.projection_witness.compatible and oracle.active_and_trusted and scenario:
+            status = BindingStatus.ACTIVE
+        elif scenario and oracle.active_and_trusted:
+            status = BindingStatus.CANDIDATE
+        else:
+            status = BindingStatus.DEFERRED
+        unit = replace(unit, status=status.value)
+        result.add_unit(unit)
+        result.oracles[oracle.oracle_id] = oracle
+        if scenario:
+            result.scenarios[scenario.scenario_id] = scenario
+        if status == BindingStatus.DEFERRED:
+            channels = tuple(sorted(map(str, leaf.observation_contract.get("channels", ()))))
+            key = (channels, unit.projection_witness.reason, leaf.mandatory)
+            deferred_groups.setdefault(key, []).append(unit)
+            for frontier in frontiers:
+                if frontier.kind not in {"ORACLE_FRONTIER", "SCENARIO_MATERIALIZATION"}:
+                    result.add_frontier(replace(frontier, hard=False))
+        else:
+            for frontier in frontiers:
+                result.add_frontier(frontier)
+        if preservation:
+            preservation_count += 1
+        else:
+            target_count += 1
+    for (channels, reason, mandatory), units in deferred_groups.items():
+        leaf_ids = tuple(sorted({item.leaf_id for item in units}))
+        unit_ids = tuple(sorted(item.unit_id for item in units))
+        frontier_id = stable_id("oracle-frontier", channels, reason, leaf_ids)
+        result.oracle_frontiers[frontier_id] = OracleFrontier(
+            frontier_id=frontier_id, leaf_ids=leaf_ids, unit_ids=unit_ids,
+            observation_channels=channels, reason=reason,
+            hard=bool(mandatory and any(
+                requirement_graph.leaves[leaf_id].authority.value in {"A", "B"}
+                for leaf_id in leaf_ids
+            )),
+        )
+    if deadline_truncated:
+        result.add_frontier(Frontier(
+            frontier_id=stable_id(
+                "binding-frontier", "ANALYSIS_TRUNCATED", requirement_hash,
+                program_hash,
+            ),
+            kind="ANALYSIS_TRUNCATED",
+            owner_id=requirement_graph.assignment_id,
+            reason="active binding deadline reached",
+            resolution_action="resume affected binding join on demand",
+            hard=False,
+            evidence_ids=(),
+        ))
+    _build_components(result, program_graph, cuts_by_unit)
+    result.build_stats = {
+        "candidate_count": sum(item.status == BindingStatus.CANDIDATE for item in result.units.values()),
+        "active_count": sum(item.status == BindingStatus.ACTIVE for item in result.units.values()),
+        "deferred_count": sum(item.status == BindingStatus.DEFERRED for item in result.units.values()),
+        "infeasible_count": sum(item.status == BindingStatus.INFEASIBLE for item in result.units.values()),
+        "oracle_frontier_count": len(result.oracle_frontiers),
+        "deadline_truncated": int(deadline_truncated),
+    }
+    return result
 
 
 def incremental_rebind(

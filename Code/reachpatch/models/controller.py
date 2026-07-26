@@ -328,6 +328,11 @@ class ReachAvoidState:
     remaining_budget: BudgetVector
     phase: ControllerPhase
     artifact_ids: dict[str, list[str]]
+    hypothesis_set: Any | None = None
+    repository_index: Any | None = None
+    generator_conversation: Any | None = None
+    runtime_config: dict[str, Any] = field(default_factory=dict)
+    runtime_metrics: dict[str, Any] = field(default_factory=dict)
     termination_status: str | None = None
     transition_index: int = 0
     phase_history: list[dict[str, Any]] = field(default_factory=list)
@@ -380,6 +385,22 @@ class ReachAvoidState:
             "base_commit": self.base_commit,
             "run_root": self.run_root,
             "assignment": self.assignment.to_dict(),
+            "hypothesis_set": self.hypothesis_set.to_dict() if self.hypothesis_set is not None else None,
+            "repository_index": (
+                {
+                    "repository_root": self.repository_index.repository_root,
+                    "scanned_files": self.repository_index.scanned_files,
+                    "build_seconds": self.repository_index.build_seconds,
+                    "source_hashes": self.repository_index.source_hashes,
+                }
+                if self.repository_index is not None else None
+            ),
+            "generator_conversation": (
+                self.generator_conversation.to_dict()
+                if self.generator_conversation is not None else None
+            ),
+            "runtime_config": self.runtime_config,
+            "runtime_metrics": self.runtime_metrics,
             "graph_hashes": self.graph_hashes(),
             "checkpoint": self.checkpoint.to_dict(),
             "working_patch_hash": self.checkpoint.patch.canonical_diff_hash,

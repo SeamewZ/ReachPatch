@@ -8,7 +8,42 @@ from reachpatch.models.enums import ControllerPhase
 
 
 _ALLOWED = {
-    ControllerPhase.SEMANTIC: {ControllerPhase.GRAPH_BUILD, ControllerPhase.SEALED},
+    ControllerPhase.SEMANTIC: {
+        ControllerPhase.INDEX, ControllerPhase.GRAPH_BUILD, ControllerPhase.SEALED,
+    },
+    ControllerPhase.INDEX: {
+        ControllerPhase.INITIAL_LOCALIZATION, ControllerPhase.SEALED,
+    },
+    ControllerPhase.INITIAL_LOCALIZATION: {
+        ControllerPhase.INITIAL_GENERATION, ControllerPhase.SEALED,
+    },
+    ControllerPhase.INITIAL_GENERATION: {
+        ControllerPhase.MECHANICAL_VALIDATE,
+        ControllerPhase.ACTIVE_GRAPH_BUILD,
+        ControllerPhase.ROOT_RECOVERY,
+        ControllerPhase.SEALED,
+    },
+    ControllerPhase.MECHANICAL_VALIDATE: {
+        ControllerPhase.ACTIVE_GRAPH_BUILD,
+        ControllerPhase.COUNTEREXAMPLE_FEEDBACK,
+        ControllerPhase.TRANSITION_GATE,
+        ControllerPhase.SEALED,
+    },
+    ControllerPhase.ACTIVE_GRAPH_BUILD: {
+        ControllerPhase.CHALLENGE_EXECUTE,
+        ControllerPhase.COUNTEREXAMPLE_FEEDBACK,
+        ControllerPhase.SEALED,
+    },
+    ControllerPhase.CHALLENGE_EXECUTE: {
+        ControllerPhase.TRANSITION_GATE,
+        ControllerPhase.COUNTEREXAMPLE_FEEDBACK,
+        ControllerPhase.SEALED,
+    },
+    ControllerPhase.REPAIR_GENERATION: {
+        ControllerPhase.MECHANICAL_VALIDATE,
+        ControllerPhase.ROOT_RECOVERY,
+        ControllerPhase.SEALED,
+    },
     ControllerPhase.GRAPH_BUILD: {ControllerPhase.INCUMBENT_CLOSE, ControllerPhase.SEALED},
     ControllerPhase.INCUMBENT_CLOSE: {
         ControllerPhase.CORE_SELECT,
@@ -43,16 +78,21 @@ _ALLOWED = {
     },
     ControllerPhase.TRANSITION_GATE: {
         ControllerPhase.COUNTEREXAMPLE_FEEDBACK,
+        ControllerPhase.REPAIR_GENERATION,
+        ControllerPhase.MECHANICAL_VALIDATE,
         ControllerPhase.SEALED,
     },
     ControllerPhase.COUNTEREXAMPLE_FEEDBACK: {
         ControllerPhase.INCUMBENT_CLOSE,
+        ControllerPhase.REPAIR_GENERATION,
         ControllerPhase.ROOT_RECOVERY,
         ControllerPhase.SEALED,
     },
     ControllerPhase.ROOT_RECOVERY: {
         ControllerPhase.INCUMBENT_CLOSE,
         ControllerPhase.CORE_SELECT,
+        ControllerPhase.REPAIR_GENERATION,
+        ControllerPhase.MECHANICAL_VALIDATE,
         ControllerPhase.SEALED,
     },
     ControllerPhase.ABLATE: {

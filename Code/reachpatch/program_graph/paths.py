@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import ast
 import re
+import time
 from dataclasses import dataclass
 from functools import lru_cache
 from typing import Iterable
@@ -164,6 +165,7 @@ def summarize_path_classes(
     max_paths: int = 256,
     max_states: int | None = None,
     topology: PathTopology | None = None,
+    deadline: float | None = None,
 ) -> PathEnumeration:
     observations = set(observation_ids)
     if entrypoint_id not in graph.nodes:
@@ -184,6 +186,9 @@ def summarize_path_classes(
     # long acyclic corridor to reach its observation.
     state_budget = max_states if max_states is not None else max(20000, len(graph.nodes))
     while stack:
+        if deadline is not None and time.monotonic() >= deadline:
+            capped = True
+            break
         path_link, guards, scc_counts = stack.pop()
         node_id = path_link.node_id
         explored += 1
@@ -241,6 +246,9 @@ def summarize_path_classes(
             )
             continue
         for edge in reversed(graph.outgoing(node_id)):
+            if deadline is not None and time.monotonic() >= deadline:
+                capped = True
+                break
             if edge.kind not in PATH_RELATIONS:
                 continue
             next_guards = guards

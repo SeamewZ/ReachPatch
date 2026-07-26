@@ -349,13 +349,17 @@ def diff_induced_challenge_plan(
     *,
     update_id: str,
     registry: DiffOperatorRegistry | None = None,
+    trial_requirement_graph: RequirementGraph | None = None,
 ) -> DiffChallengePlan:
     if challenge_graph.diff_hash not in {"BASELINE", actual_diff.canonical_diff_hash}:
         raise ValueError("challenge graph is tied to a different actual diff")
     challenge_graph.diff_hash = actual_diff.canonical_diff_hash
     registry = registry or DiffOperatorRegistry.default()
-    trial_requirements = _semantic_clone(requirement_graph)
-    compile_requirement_paths(trial_requirements, trial_program_graph)
+    if trial_requirement_graph is None:
+        trial_requirements = _semantic_clone(requirement_graph)
+        compile_requirement_paths(trial_requirements, trial_program_graph)
+    else:
+        trial_requirements = trial_requirement_graph
     baseline_by_key = {
         _path_key(item, base_program_graph): item
         for item in requirement_graph.feasible_path_obligations()

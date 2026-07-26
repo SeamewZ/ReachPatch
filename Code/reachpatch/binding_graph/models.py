@@ -1,11 +1,29 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field, replace
+from enum import StrEnum
 from typing import Any, Iterable
 
 from reachpatch.models.base import SerializableRecord, content_hash
 from reachpatch.models.core import Frontier
 from reachpatch.oracle.models import ExecutableScenario, Oracle
+
+
+class BindingStatus(StrEnum):
+    CANDIDATE = "CANDIDATE"
+    ACTIVE = "ACTIVE"
+    DEFERRED = "DEFERRED"
+    INFEASIBLE = "INFEASIBLE"
+
+
+@dataclass(frozen=True, slots=True)
+class OracleFrontier(SerializableRecord):
+    frontier_id: str
+    leaf_ids: tuple[str, ...]
+    unit_ids: tuple[str, ...]
+    observation_channels: tuple[str, ...]
+    reason: str
+    hard: bool
 
 
 @dataclass(frozen=True, slots=True)
@@ -89,6 +107,7 @@ class BindingGraph(SerializableRecord):
         self.oracles: dict[str, Oracle] = {}
         self.scenarios: dict[str, ExecutableScenario] = {}
         self.frontiers: dict[str, Frontier] = {}
+        self.oracle_frontiers: dict[str, OracleFrontier] = {}
         self.by_leaf: dict[str, set[str]] = {}
         self.by_program_node: dict[str, set[str]] = {}
         self.by_path_obligation: dict[str, set[str]] = {}
@@ -129,6 +148,9 @@ class BindingGraph(SerializableRecord):
             "oracles": [self.oracles[key].to_dict() for key in sorted(self.oracles)],
             "scenarios": [self.scenarios[key].to_dict() for key in sorted(self.scenarios)],
             "frontiers": [self.frontiers[key].to_dict() for key in sorted(self.frontiers)],
+            "oracle_frontiers": [
+                self.oracle_frontiers[key].to_dict() for key in sorted(self.oracle_frontiers)
+            ],
             "by_leaf": {key: sorted(value) for key, value in sorted(self.by_leaf.items())},
             "by_program_node": {key: sorted(value) for key, value in sorted(self.by_program_node.items())},
             "by_path_obligation": {

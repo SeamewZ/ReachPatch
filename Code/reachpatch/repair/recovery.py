@@ -1,15 +1,22 @@
 from __future__ import annotations
 
-from reachpatch.binding_graph import build_binding_graph
-from reachpatch.challenge_graph.materialize import materialize_challenges
+import os
+
 from reachpatch.models.base import stable_id
 from reachpatch.models.controller import LosingCore, ReachAvoidState, RootRecoveryRecord
 from reachpatch.models.enums import OracleLifecycle, OutcomeStatus
-from reachpatch.program_graph.builder import build_augmented_program_graph
-from reachpatch.requirement_graph import compile_assignment_overlay, compile_requirement_paths
 
 
 def root_recovery(state: ReachAvoidState, core: LosingCore) -> RootRecoveryRecord:
+    if os.environ.get("REACHPATCH_ENABLE_LEGACY_FULL_GRAPH") != "1":
+        raise RuntimeError("legacy full-graph root recovery is disabled")
+    from reachpatch.binding_graph import build_binding_graph
+    from reachpatch.challenge_graph.materialize import materialize_challenges
+    from reachpatch.program_graph.builder import build_augmented_program_graph
+    from reachpatch.requirement_graph import (
+        compile_assignment_overlay, compile_requirement_paths,
+    )
+
     old_hashes = state.graph_hashes()
     repository = state.checkpoint.snapshot_tree
     program = build_augmented_program_graph(repository)

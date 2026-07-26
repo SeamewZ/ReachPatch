@@ -11,6 +11,22 @@ from reachpatch.oracle.models import ExecutableScenario
 
 
 @dataclass(frozen=True, slots=True)
+class ChallengePriority(SerializableRecord):
+    authority: float
+    failure_risk: float
+    diff_relevance: float
+    information_gain: float
+    execution_cost: float
+
+    @property
+    def score(self) -> float:
+        return (
+            self.authority * self.failure_risk * self.diff_relevance
+            * self.information_gain / max(self.execution_cost, 0.1)
+        )
+
+
+@dataclass(frozen=True, slots=True)
 class ChallengeCell(SerializableRecord):
     challenge_id: str
     binding_unit_id: str
@@ -153,6 +169,7 @@ class ChallengeGraph(SerializableRecord):
         self.by_binding_unit: dict[str, set[str]] = {}
         self.by_partition: dict[str, set[str]] = {}
         self.by_path_class: dict[str, set[str]] = {}
+        self.priorities: dict[str, ChallengePriority] = {}
 
     def add_cell(
         self,
@@ -196,6 +213,9 @@ class ChallengeGraph(SerializableRecord):
             "by_binding_unit": {key: sorted(value) for key, value in sorted(self.by_binding_unit.items())},
             "by_partition": {key: sorted(value) for key, value in sorted(self.by_partition.items())},
             "by_path_class": {key: sorted(value) for key, value in sorted(self.by_path_class.items())},
+            "priorities": {
+                key: value.to_dict() for key, value in sorted(self.priorities.items())
+            },
         }
         body["graph_hash"] = content_hash(body)
         return body

@@ -7,7 +7,7 @@ from collections import defaultdict
 from dataclasses import replace
 from typing import Any, Callable, Iterable
 
-from reachpatch.evidence.hypotheses import HypothesisAssignment
+from reachpatch.evidence.hypotheses import HypothesisAssignment, HypothesisSet
 from reachpatch.evidence.semantic_graph import SemanticGraph
 from reachpatch.models.base import stable_id
 from reachpatch.models.core import Frontier
@@ -15,6 +15,9 @@ from reachpatch.models.enums import Authority, LedgerStatus, RequirementAuthorit
 from reachpatch.models.graph import GraphNode
 from reachpatch.program_graph.entrypoints import recover_entrypoints
 from reachpatch.program_graph.models import EntrypointPath, EntrypointResult, PathClass, ProgramGraph
+from reachpatch.program_graph.index import RepositoryIndex
+from reachpatch.execution.reconcile import ActualDiff
+from dataclasses import dataclass
 from reachpatch.program_graph.paths import PATH_RELATIONS, guard_feasibility
 from reachpatch.requirement_graph.domains import (
     infer_domains,
@@ -297,6 +300,204 @@ def compile_assignment_overlay(
     return requirement_graph
 
 
+def compile_requirement_core(
+    semantic_graph: SemanticGraph,
+    hypothesis_set: HypothesisSet,
+    repository_index: RepositoryIndex,
+) -> RequirementGraph:
+    """Compile only authoritative issue/test obligations needed before generation."""
+
+    if not hypothesis_set.alternatives or hypothesis_set.preferred_assignment_id is None:
+        raise ValueError("no coherent authority-complete semantic hypothesis")
+    preferred = next(
+        item for item in hypothesis_set.alternatives
+        if item.assignment_id == hypothesis_set.preferred_assignment_id
+    )
+    high_confidence = tuple(sorted(
+        claim_id for claim_id in preferred.assignment_node_ids
+        if claim_id in semantic_graph.claims
+        and semantic_graph.claims[claim_id].authority.trusted
+    ))
+    core_assignment = HypothesisAssignment(
+        assignment_id=stable_id(
+            "requirement-core-assignment", hypothesis_set.active_assignment_ids,
+            hypothesis_set.common_hard_node_ids, high_confidence,
+        ),
+        choice_by_decision=dict(preferred.choice_by_decision),
+        common_hard_node_ids=hypothesis_set.common_hard_node_ids,
+        assignment_node_ids=high_confidence,
+        preservation_node_ids=preferred.preservation_node_ids,
+        contradiction_ids=preferred.contradiction_ids,
+        coherent=True, authority_complete=True,
+        selection_mode="hypothesis_set", score=preferred.score,
+    )
+    graph = compile_assignment_overlay(semantic_graph, core_assignment)
+    graph.build_stats.update({
+        "core_leaf_count": len(graph.leaves),
+        "repository_index_symbol_count": len(repository_index.symbols),
+        "unresolved_semantic_decision_count": len(hypothesis_set.unresolved_decision_ids),
+    })
+    return graph
+
+
+def _predicate_names(predicates: Iterable[str]) -> set[str]:
+    names: set[str] = set()
+    for predicate in predicates:
+        try:
+            names.update(
+                item.id for item in ast.walk(ast.parse(predicate, mode="eval"))
+                if isinstance(item, ast.Name)
+            )
+        except SyntaxError:
+            continue
+    return names
+
+
+def join_requirement_to_paths(
+    leaf: RequirementLeaf,
+    candidate_paths: Iterable[PathClass],
+    partitions: Iterable[DomainPartition],
+    *,
+    max_results: int,
+    deadline: float | None = None,
+) -> tuple[RequirementPathObligation, ...]:
+    if max_results < 1:
+        raise ValueError("max_results must be positive")
+    satisfiable = [item for item in partitions if item.satisfiable]
+    candidates: dict[tuple[str, str, tuple[str, ...]], RequirementPathObligation] = {}
+    for path in candidate_paths:
+        if deadline is not None and time.monotonic() >= deadline:
+            break
+        if not path.feasible or not path.observation_ids:
+            continue
+        channels = set(map(str, leaf.observation_contract.get("channels", ("return",))))
+        if "exception" in channels and path.exit_kind not in {"exception", "raise"}:
+            continue
+        if channels == {"return"} and path.exit_kind in {"exception", "raise"}:
+            continue
+        path_names = _predicate_names(path.critical_predicates)
+        linked = [
+            partition for partition in satisfiable
+            if path_names & set(partition.variable_names)
+        ]
+        if not linked and satisfiable:
+            # No quantified variable is connected to this path predicate. One
+            # representative partition is sufficient; copying every partition
+            # would be the old Cartesian-product bug.
+            linked = [min(
+                satisfiable,
+                key=lambda item: (item.constraints != ("True",), len(item.constraints), item.partition_id),
+            )]
+        for partition in linked:
+            if deadline is not None and time.monotonic() >= deadline:
+                break
+            combined = _combined_partition(leaf, partition, path)
+            if not combined.satisfiable:
+                continue
+            key = (path.accumulated_guard, path.exit_kind, path.observation_ids)
+            obligation = RequirementPathObligation(
+                path_obligation_id=stable_id(
+                    "active-path-obligation", leaf.leaf_id,
+                    combined.partition_id, path.path_class_id,
+                ),
+                leaf_id=leaf.leaf_id, authority=leaf.authority.value,
+                scenario_partition_id=combined.partition_id,
+                public_trigger_id=path.entrypoint_id,
+                entrypoint_id=path.entrypoint_id,
+                path_class_id=path.path_class_id, path_edge_ids=path.edge_ids,
+                accumulated_guard=path.accumulated_guard,
+                exit_kind=path.exit_kind, observation_id=path.observation_ids[0],
+                predicate_oracle_id=None, preservation_caller_ids=(),
+                dependence_slice_ids=path.node_ids, base_feasible=True,
+                frontier_ids=(), requirement_graph_hash="", program_graph_hash="",
+                partition=combined,
+                trigger_recipe={"entrypoint_id": path.entrypoint_id,
+                                "bindings": combined.candidate_bindings[0] if combined.candidate_bindings else {}},
+            )
+            previous = candidates.get(key)
+            if previous is None or len(obligation.path_edge_ids) < len(previous.path_edge_ids):
+                candidates[key] = obligation
+    return tuple(sorted(
+        candidates.values(),
+        key=lambda item: (len(item.path_edge_ids), item.path_obligation_id),
+    )[:max_results])
+
+
+@dataclass(frozen=True, slots=True)
+class RequirementDelta:
+    affected_leaf_ids: tuple[str, ...]
+    added_partition_ids: tuple[str, ...]
+    reused: bool
+    reasons: tuple[str, ...]
+
+
+def promote_domains_from_diff(
+    graph: RequirementGraph,
+    program_graph: ProgramGraph,
+    actual_diff: ActualDiff,
+    trace_delta: dict[str, Any] | None,
+    *,
+    deadline: float | None = None,
+) -> RequirementDelta:
+    if actual_diff.empty and not trace_delta:
+        return RequirementDelta((), (), True, ("NO_NEW_INFORMATION",))
+    predicates: list[str] = []
+    reasons: set[str] = set()
+    for relation in actual_diff.changed_relations:
+        if deadline is not None and time.monotonic() >= deadline:
+            reasons.add("ANALYSIS_TRUNCATED")
+            break
+        base_kind = relation.kind.split("_", 1)[0]
+        if base_kind == "guard":
+            source = relation.new_source or relation.old_source
+            if source:
+                predicates.append(source)
+                reasons.add("DIFF_GUARD")
+        elif base_kind in {"dispatch", "return", "exception", "state", "resource"}:
+            source = relation.new_source or relation.old_source
+            if source:
+                predicates.append(source)
+            reasons.add(f"DIFF_{base_kind.upper()}")
+    affected: set[str] = set()
+    added: set[str] = set()
+    for leaf in graph.leaves.values():
+        if deadline is not None and time.monotonic() >= deadline:
+            reasons.add("ANALYSIS_TRUNCATED")
+            break
+        variable_names = {item.name for item in leaf.quantified_variables}
+        relevant = [
+            predicate for predicate in predicates
+            if not variable_names or _predicate_names((predicate,)) & variable_names
+        ]
+        if not relevant:
+            continue
+        affected.add(leaf.leaf_id)
+        for partition in promote_program_predicates(leaf, relevant):
+            if deadline is not None and time.monotonic() >= deadline:
+                reasons.add("ANALYSIS_TRUNCATED")
+                break
+            if partition.partition_id not in graph.partitions:
+                graph.add_partition(partition)
+                added.add(partition.partition_id)
+    if "ANALYSIS_TRUNCATED" in reasons:
+        graph.add_frontier(Frontier(
+            frontier_id=stable_id(
+                "req-frontier", graph.assignment_id,
+                "DIFF_PROMOTION_ANALYSIS_TRUNCATED",
+            ),
+            kind="ANALYSIS_TRUNCATED",
+            owner_id=graph.assignment_id,
+            reason="diff-driven domain promotion deadline reached",
+            resolution_action="continue affected leaf promotion on demand",
+            hard=False,
+            evidence_ids=(),
+        ))
+    return RequirementDelta(
+        tuple(sorted(affected)), tuple(sorted(added)), False,
+        tuple(sorted(reasons or {"TRACE_DELTA"})),
+    )
+
+
 def apply_domain_promotions(
     graph: RequirementGraph,
     promotions_by_leaf: dict[str, Iterable[Any]],
@@ -427,6 +628,8 @@ def _edge_frontier(
     kind: str,
     reason: str,
     action: str,
+    *,
+    hard: bool | None = None,
 ) -> Frontier:
     frontier = Frontier(
         frontier_id=stable_id("req-frontier", leaf.leaf_id, kind, reason),
@@ -434,7 +637,7 @@ def _edge_frontier(
         owner_id=leaf.leaf_id,
         reason=reason,
         resolution_action=action,
-        hard=leaf.mandatory,
+        hard=leaf.mandatory if hard is None else hard,
         evidence_ids=leaf.supporting_evidence,
     )
     graph.add_frontier(frontier)
@@ -561,11 +764,18 @@ def compile_requirement_paths(
     max_open_world_seeds: int = 64,
     max_observation_nodes: int = 256,
     max_paths_per_entry: int = 256,
+    max_path_classes_per_leaf: int = 24,
+    promote_all_program_predicates: bool = False,
+    deadline: float | None = None,
+    leaf_ids: set[str] | None = None,
     progress_callback: Callable[[str, str, float | None], None] | None = None,
 ) -> RequirementGraph:
     total_started = time.perf_counter()
     timings: dict[str, float] = defaultdict(float)
-    if requirement_graph.path_obligations or requirement_graph.edge_ledger:
+    if (
+        (requirement_graph.path_obligations or requirement_graph.edge_ledger)
+        and leaf_ids is None
+    ):
         raise ValueError("path compilation requires an unmaterialized requirement graph version")
     semantic_hash = requirement_graph.semantic_layer_hash()
     program_hash = program_graph.program_hash()
@@ -585,8 +795,18 @@ def compile_requirement_paths(
         EntrypointPath | None,
     ] = {}
     preservation_callers_cache: dict[str, tuple[str, ...]] = {}
-    leaves = requirement_graph.hard_and_preservation_leaves()
+    leaves = [
+        leaf for leaf in requirement_graph.hard_and_preservation_leaves()
+        if leaf_ids is None or leaf.leaf_id in leaf_ids
+    ]
     for leaf in leaves:
+        if deadline is not None and time.monotonic() >= deadline:
+            _edge_frontier(
+                requirement_graph, leaf, "ANALYSIS_TRUNCATED",
+                "requirement path deadline reached", "continue with active obligations",
+                hard=False,
+            )
+            break
         recovery_started = time.perf_counter()
         if progress_callback is not None:
             progress_callback("seed_observation_recovery", "in_progress", None)
@@ -659,6 +879,7 @@ def compile_requirement_paths(
                 program_graph,
                 observation_ids=observations,
                 max_paths_per_entry=max_paths_per_entry,
+                deadline=deadline,
             )
             recovery_cache[recovery_key] = recovery
         for frontier_id in recovery.frontier_ids:
@@ -669,7 +890,7 @@ def compile_requirement_paths(
                 owner_id=leaf.leaf_id,
                 reason=source.reason,
                 resolution_action=source.resolution_action,
-                hard=leaf.mandatory,
+                hard=(leaf.mandatory and source.kind != "ANALYSIS_TRUNCATED"),
                 evidence_ids=leaf.supporting_evidence,
                 status=source.status,
             ))
@@ -704,7 +925,7 @@ def compile_requirement_paths(
             and program_graph.nodes[node_id].attributes.get("predicate")
             and not str(program_graph.nodes[node_id].attributes["predicate"]).startswith(("for ", "async for "))
         }
-        promoted = promote_program_predicates(leaf, branch_predicates)
+        promoted = promote_program_predicates(leaf, branch_predicates) if promote_all_program_predicates else ()
         for partition in promoted:
             requirement_graph.add_partition(partition)
             _record_partition_frontier(requirement_graph, leaf, partition)
@@ -723,12 +944,22 @@ def compile_requirement_paths(
         product_started = time.perf_counter()
         if progress_callback is not None:
             progress_callback("path_partition_product", "in_progress", None)
-        for base_partition in base_partitions:
-            if not base_partition.satisfiable:
-                _record_partition_frontier(requirement_graph, leaf, base_partition)
-                continue
-            for path_class in relevant_path_classes:
-                partition = _combined_partition(leaf, base_partition, path_class)
+        templates = join_requirement_to_paths(
+            leaf, relevant_path_classes, base_partitions,
+            max_results=max_path_classes_per_leaf,
+            deadline=deadline,
+        )
+        for template in templates:
+                if deadline is not None and time.monotonic() >= deadline:
+                    _edge_frontier(
+                        requirement_graph, leaf, "ANALYSIS_TRUNCATED",
+                        "requirement path product deadline reached",
+                        "continue active path obligations on demand",
+                        hard=False,
+                    )
+                    break
+                path_class = program_graph.path_classes[template.path_class_id]
+                partition = template.partition
                 requirement_graph.add_partition(partition)
                 if not partition.satisfiable:
                     _record_partition_frontier(requirement_graph, leaf, partition)
@@ -762,30 +993,18 @@ def compile_requirement_paths(
                     preservation_callers_cache[
                         path_class.path_class_id
                     ] = preservation_callers
-                obligation = RequirementPathObligation(
+                obligation = replace(
+                    template,
                     path_obligation_id=stable_id(
                         "path-obligation", leaf.leaf_id, partition.partition_id,
                         entry_path.trigger_id, path_class.path_class_id,
                         path_class.exit_kind, path_class.observation_ids,
                     ),
-                    leaf_id=leaf.leaf_id,
-                    authority=leaf.authority.value,
-                    scenario_partition_id=partition.partition_id,
                     public_trigger_id=entry_path.trigger_id,
                     entrypoint_id=entry_path.entrypoint_id,
-                    path_class_id=path_class.path_class_id,
-                    path_edge_ids=path_class.edge_ids,
-                    accumulated_guard=path_class.accumulated_guard,
-                    exit_kind=path_class.exit_kind,
-                    observation_id=path_class.observation_ids[0],
-                    predicate_oracle_id=None,
                     preservation_caller_ids=preservation_callers,
-                    dependence_slice_ids=tuple(path_class.node_ids),
-                    base_feasible=True,
-                    frontier_ids=(),
                     requirement_graph_hash=semantic_hash,
                     program_graph_hash=program_hash,
-                    partition=partition,
                     trigger_recipe={
                         "entrypoint": program_graph.nodes[entry_path.entrypoint_id].attributes.get("qualified_name"),
                         "bindings": partition.candidate_bindings[0] if partition.candidate_bindings else {},
@@ -843,3 +1062,50 @@ def compile_requirement_paths(
     if progress_callback is not None:
         progress_callback("hash_finalization", "complete", finalization_seconds)
     return requirement_graph
+
+
+def refresh_requirement_paths(
+    requirement_graph: RequirementGraph,
+    program_graph: ProgramGraph,
+    *,
+    affected_leaf_ids: set[str],
+    max_path_classes_per_leaf: int = 24,
+    deadline: float | None = None,
+) -> tuple[RequirementGraph, tuple[str, ...], tuple[str, ...]]:
+    """Invalidate and recompute only obligations owned by affected leaves."""
+
+    selected = set(affected_leaf_ids) & set(requirement_graph.leaves)
+    if not selected:
+        return requirement_graph, (), ()
+    removed = {
+        path_id for path_id, obligation in requirement_graph.path_obligations.items()
+        if obligation.leaf_id in selected
+    }
+    for path_id in removed:
+        requirement_graph.path_obligations.pop(path_id, None)
+    requirement_graph.edge_ledger = {
+        ledger_id: record
+        for ledger_id, record in requirement_graph.edge_ledger.items()
+        if record.path_state_id not in removed
+    }
+    requirement_graph.frontiers = {
+        frontier_id: frontier
+        for frontier_id, frontier in requirement_graph.frontiers.items()
+        if frontier.owner_id not in selected
+    }
+    compile_requirement_paths(
+        requirement_graph,
+        program_graph,
+        max_open_world_seeds=64,
+        max_observation_nodes=128,
+        max_paths_per_entry=max_path_classes_per_leaf,
+        max_path_classes_per_leaf=max_path_classes_per_leaf,
+        promote_all_program_predicates=False,
+        deadline=deadline,
+        leaf_ids=selected,
+    )
+    added = {
+        path_id for path_id, obligation in requirement_graph.path_obligations.items()
+        if obligation.leaf_id in selected
+    } - removed
+    return requirement_graph, tuple(sorted(removed)), tuple(sorted(added))

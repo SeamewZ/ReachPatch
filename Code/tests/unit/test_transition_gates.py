@@ -4,7 +4,7 @@ from types import SimpleNamespace
 
 from reachpatch.models.controller import UnitOutcome
 from reachpatch.models.enums import OutcomeStatus
-from reachpatch.reach_avoid.gates import raw_avoid_reasons
+from reachpatch.reach_avoid.gates import in_target_set, raw_avoid_reasons
 
 
 def _outcome(identifier: str, status: OutcomeStatus, *, kind: str = "TARGET") -> UnitOutcome:
@@ -45,10 +45,33 @@ def test_raw_avoid_gate_keeps_failures_independent_and_never_treats_unknown_as_p
     )
 
     assert reasons == (
-        "DIFF_SAFETY_NOT_CLOSED",
         "ESTABLISHED_SUCCESS_LOST",
         "FORBIDDEN_EDIT",
         "MECHANICAL_FAILURE",
         "ORACLE_CONTAMINATION",
         "PRESERVATION_FAILURE",
     )
+
+
+def test_reach_requires_at_least_one_executable_active_target():
+    requirement = SimpleNamespace(
+        leaves={}, semantic_layer_hash=lambda: "requirements"
+    )
+    program = SimpleNamespace(program_hash=lambda: "program")
+    binding = SimpleNamespace(
+        units={}, oracle_frontiers={},
+        requirement_graph_hash="requirements", program_graph_hash="program",
+    )
+    state = SimpleNamespace(
+        checkpoint=SimpleNamespace(
+            safe=True, patch=SimpleNamespace(canonical_diff="diff --git a/x b/x")
+        ),
+        requirement_graph=requirement, program_graph=program,
+        binding_graph=binding, outcomes={},
+        runtime_metrics={
+            "diff_adequacy_closed": True,
+            "high_value_pending_challenge_ids": (),
+        },
+    )
+
+    assert not in_target_set(state)

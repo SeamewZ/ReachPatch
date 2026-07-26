@@ -17,7 +17,9 @@ from reachpatch.program_graph.analysis import (
     DefUseAnalyzer,
     DefinitionScopeAnalyzer,
     ModuleAnalysis,
+    GraphBudgetReached,
 )
+from reachpatch.program_graph.budget import GraphBudget
 from reachpatch.program_graph.models import ProgramGraph
 from reachpatch.program_graph.protocols import ProtocolAnalyzer, ProtocolFact
 
@@ -97,12 +99,22 @@ class PythonProgramGraphBuilder:
         *,
         exclude_directories: Iterable[str] = (),
         max_files: int = 10000,
+        include_files: Iterable[str] | None = None,
+        active_callable_ids: Iterable[str] | None = None,
+        budget: GraphBudget | None = None,
+        max_protocol_candidates_per_operation: int = 8,
     ) -> None:
         self.root = Path(repository_root).resolve()
         if not self.root.is_dir():
             raise FileNotFoundError(self.root)
         self.excludes = _DEFAULT_EXCLUDES | set(exclude_directories)
         self.max_files = max_files
+        self.include_files = {
+            str(Path(item)).replace(os.sep, "/") for item in include_files or ()
+        } or None
+        self.active_callable_ids = set(active_callable_ids) if active_callable_ids is not None else None
+        self.budget = budget
+        self.max_protocol_candidates_per_operation = max_protocol_candidates_per_operation
         self.analyses: list[ModuleAnalysis] = []
         self.import_aliases: dict[str, dict[str, str]] = defaultdict(dict)
         self.points_to: dict[str, set[str]] = defaultdict(set)
@@ -144,6 +156,11 @@ class PythonProgramGraphBuilder:
 
         discovery_started = time.perf_counter()
         paths = _iter_python_files(self.root, self.excludes)
+        if self.include_files is not None:
+            paths = [
+                path for path in paths
+                if str(path.relative_to(self.root)).replace(os.sep, "/") in self.include_files
+            ]
         if len(paths) > self.max_files:
             paths = paths[: self.max_files]
             capped = True
@@ -154,38 +171,37 @@ class PythonProgramGraphBuilder:
         source_hash = _repository_source_hash(self.root, paths)
         timings["source_hash_seconds"] = time.perf_counter() - hash_started
         graph = ProgramGraph(repository_root=str(self.root), source_hash=source_hash)
-        measured(
-            "definition_index_seconds",
-            lambda: self._definition_index_pass(graph, paths),
-        )
-        measured(
-            "behavior_stream_seconds",
-            lambda: self._behavior_stream_pass(
-                graph, paths, progress_callback=progress_callback
-            ),
-        )
+        try:
+            measured(
+                "definition_index_seconds",
+                lambda: self._definition_index_pass(graph, paths),
+            )
+            measured(
+                "behavior_stream_seconds",
+                lambda: self._behavior_stream_pass(
+                    graph, paths, progress_callback=progress_callback
+                ),
+            )
+        except GraphBudgetReached:
+            capped = True
         timings.update(self._stream_timings)
-        measured("call_flow_seconds", lambda: self._materialize_call_flows(graph))
-        measured(
-            "inheritance_dispatch_seconds",
-            lambda: self._materialize_inheritance_facts(graph),
-        )
-        measured(
-            "registration_external_seconds",
-            lambda: self._materialize_registration_facts(graph),
-        )
-        measured("protocol_ir_seconds", lambda: self._materialize_protocol_facts(graph))
-        measured("property_descriptor_seconds", lambda: self._property_descriptor_pass(graph))
-        measured("test_observation_seconds", lambda: self._mark_test_observations(graph))
-        measured("package_entrypoint_seconds", lambda: self._load_package_entrypoints(graph))
+        if self.budget is None or self.budget.check(nodes=len(graph.nodes), edges=len(graph.edges)):
+            measured("call_flow_seconds", lambda: self._materialize_call_flows(graph))
+        if self.budget is None or self.budget.check(nodes=len(graph.nodes), edges=len(graph.edges)):
+            measured("inheritance_dispatch_seconds", lambda: self._materialize_inheritance_facts(graph))
+            measured("registration_external_seconds", lambda: self._materialize_registration_facts(graph))
+            measured("protocol_ir_seconds", lambda: self._materialize_protocol_facts(graph))
+            measured("property_descriptor_seconds", lambda: self._property_descriptor_pass(graph))
+            measured("test_observation_seconds", lambda: self._mark_test_observations(graph))
+            measured("package_entrypoint_seconds", lambda: self._load_package_entrypoints(graph))
         if capped:
             owner = next(iter(graph.nodes), stable_id("repository", self.root))
             graph.create_frontier(
-                "ANALYSIS_FILE_CAP",
+                "ANALYSIS_TRUNCATED",
                 owner,
-                f"Python file count exceeded cap {self.max_files}",
-                "raise the file cap or provide demand-driven seed paths",
-                hard=True,
+                self.budget.truncated_reason if self.budget and self.budget.truncated_reason else f"Python file count exceeded cap {self.max_files}",
+                "continue generation with the partial slice or request targeted context",
+                hard=False,
             )
         graph.build_timings = timings
         graph.build_stats = {
@@ -197,6 +213,8 @@ class PythonProgramGraphBuilder:
             "test_node_count": len(graph.test_node_ids),
             "observation_node_count": len(graph.observation_node_ids),
             "frontier_count": len(graph.frontiers),
+            "precise_file_count": len(paths),
+            "precise_function_count": self.budget.functions if self.budget else len(graph.cfgs),
         }
         return graph
 
@@ -239,6 +257,9 @@ class PythonProgramGraphBuilder:
             tree=tree,
             is_test=_is_test_path(relative),
             declarations_only=declarations_only,
+            active_callable_ids=self.active_callable_ids,
+            precise=not declarations_only,
+            budget=self.budget,
         )
         analyzer.visit(tree)
         analysis = analyzer.result()
@@ -250,6 +271,10 @@ class PythonProgramGraphBuilder:
     def _definition_index_pass(self, graph: ProgramGraph, paths: list[Path]) -> None:
         self.analyses.clear()
         for path in paths:
+            if self.budget is not None and not self.budget.consume_file(
+                nodes=len(graph.nodes), edges=len(graph.edges)
+            ):
+                raise GraphBudgetReached(self.budget.truncated_reason or "FILE_LIMIT")
             self._analyze_path(graph, path, declarations_only=True)
 
     def _behavior_stream_pass(
@@ -265,6 +290,10 @@ class PythonProgramGraphBuilder:
         )
         stream_started = time.perf_counter()
         for index, path in enumerate(paths, start=1):
+            if self.budget is not None and not self.budget.check(
+                nodes=len(graph.nodes), edges=len(graph.edges)
+            ):
+                raise GraphBudgetReached(self.budget.truncated_reason or "GRAPH_LIMIT")
             parse_started = time.perf_counter()
             analysis = self._analyze_path(graph, path, declarations_only=False)
             self._stream_timings["behavior_reparse_seconds"] += (
@@ -272,13 +301,20 @@ class PythonProgramGraphBuilder:
             )
             if analysis is None:
                 continue
+            if self.budget is not None:
+                new_functions = len(analysis.active_callable_ast_ids)
+                for _ in range(new_functions):
+                    if not self.budget.consume_function(
+                        nodes=len(graph.nodes), edges=len(graph.edges)
+                    ):
+                        raise GraphBudgetReached(self.budget.truncated_reason or "FUNCTION_LIMIT")
             for timing_name, operation in operations:
                 started = time.perf_counter()
                 operation(graph, (analysis,))
                 self._stream_timings[timing_name] += time.perf_counter() - started
             started = time.perf_counter()
-            CFGBuilder(graph, analysis).build()
-            DefUseAnalyzer(graph, analysis).run()
+            CFGBuilder(graph, analysis, budget=self.budget).build()
+            DefUseAnalyzer(graph, analysis, budget=self.budget).run()
             self._stream_timings["cfg_def_use_seconds"] += time.perf_counter() - started
             started = time.perf_counter()
             self._collect_call_facts(graph, analysis)
@@ -764,7 +800,14 @@ class PythonProgramGraphBuilder:
 
     def _materialize_protocol_facts(self, graph: ProgramGraph) -> None:
         for fact in self.protocol_facts:
-            ProtocolAnalyzer.materialize_fact(graph, fact)
+            if self.budget is not None and not self.budget.check(
+                nodes=len(graph.nodes), edges=len(graph.edges)
+            ):
+                break
+            ProtocolAnalyzer.materialize_fact(
+                graph, fact,
+                max_candidates=self.max_protocol_candidates_per_operation,
+            )
         self.protocol_facts.clear()
 
     def _property_descriptor_pass(self, graph: ProgramGraph) -> None:

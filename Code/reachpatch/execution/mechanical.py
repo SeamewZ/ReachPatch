@@ -4,6 +4,7 @@ import ast
 import hashlib
 import os
 import subprocess
+import sys
 import time
 from pathlib import Path
 from typing import Iterable
@@ -76,6 +77,84 @@ def _scope_check(actual_diff: ActualDiff, source_hash: str) -> MechanicalCheck:
     )
 
 
+def _import_check(
+    root: Path,
+    actual_diff: ActualDiff,
+    source_hash: str,
+    timeout: float,
+    baseline_root: Path | None,
+) -> MechanicalCheck:
+    modules = []
+    for relative in actual_diff.changed_files:
+        path = Path(relative)
+        if (
+            path.suffix != ".py" or relative in actual_diff.deleted_files
+            or "tests" in path.parts or path.name.startswith("test_")
+        ):
+            continue
+        parts = list(path.with_suffix("").parts)
+        if parts and parts[-1] == "__init__":
+            parts.pop()
+        if parts and all(part.isidentifier() for part in parts):
+            modules.append(".".join(parts))
+    started = time.monotonic()
+    if not modules:
+        return MechanicalCheck(
+            check_id=stable_id("mechanical", "import", actual_diff.diff_id, ()),
+            kind="IMPORT",
+            command=("internal:no-importable-changed-module",),
+            status=OutcomeStatus.PASS,
+            return_code=0,
+            stdout="",
+            stderr="",
+            duration_seconds=time.monotonic() - started,
+            source_hash=source_hash,
+        )
+    code = (
+        "import importlib\n"
+        + "\n".join(f"importlib.import_module({module!r})" for module in sorted(set(modules)))
+    )
+    def execute_import(check_root: Path):
+        return subprocess.run(
+            (sys.executable, "-c", code), cwd=check_root,
+            env={
+                **os.environ,
+                "PYTHONDONTWRITEBYTECODE": "1",
+                "PYTHONHASHSEED": "0",
+            },
+            capture_output=True, text=True, timeout=min(timeout, 60.0),
+            check=False,
+        )
+
+    kind = "IMPORT"
+    try:
+        process = execute_import(root)
+        status = OutcomeStatus.PASS if process.returncode == 0 else OutcomeStatus.FAIL
+        return_code = process.returncode
+        stdout, stderr = process.stdout, process.stderr
+        if status == OutcomeStatus.FAIL and baseline_root is not None:
+            baseline = execute_import(baseline_root)
+            if baseline.returncode != 0:
+                kind = "IMPORT_BASELINE_BLOCKED"
+                status = OutcomeStatus.PASS
+                return_code = 0
+                stderr = (
+                    "baseline import was already blocked; no confirmed import regression\n"
+                    f"BASELINE:\n{baseline.stderr}\nTRIAL:\n{process.stderr}"
+                )
+    except subprocess.TimeoutExpired as exc:
+        status = OutcomeStatus.UNKNOWN_EXECUTION
+        return_code = None
+        stdout, stderr = str(exc.stdout or ""), str(exc.stderr or "")
+    return MechanicalCheck(
+        check_id=stable_id("mechanical", "import", modules, source_hash, status),
+        kind=kind,
+        command=(sys.executable, "-c", code), status=status,
+        return_code=return_code, stdout=stdout, stderr=stderr,
+        duration_seconds=time.monotonic() - started, source_hash=source_hash,
+    )
+
+
 def _command_check(root: Path, command: tuple[str, ...], source_hash: str, timeout: float) -> MechanicalCheck:
     started = time.monotonic()
     environment = {
@@ -121,10 +200,18 @@ def run_mechanical_checks(
     *,
     commands: Iterable[Iterable[str]] = (),
     timeout_seconds: float = 300.0,
+    baseline_root: str | Path | None = None,
 ) -> tuple[MechanicalCheck, ...]:
     root = Path(trial_root).resolve()
     source_hash = _source_hash(root)
-    checks = [_syntax_check(root, actual_diff, source_hash), _scope_check(actual_diff, source_hash)]
+    checks = [
+        _syntax_check(root, actual_diff, source_hash),
+        _scope_check(actual_diff, source_hash),
+        _import_check(
+            root, actual_diff, source_hash, timeout_seconds,
+            Path(baseline_root).resolve() if baseline_root is not None else None,
+        ),
+    ]
     checks.extend(
         _command_check(root, tuple(command), source_hash, timeout_seconds)
         for command in commands

@@ -24,6 +24,15 @@ class HypothesisAssignment(SerializableRecord):
     score: float
 
 
+@dataclass(frozen=True, slots=True)
+class HypothesisSet(SerializableRecord):
+    common_hard_node_ids: tuple[str, ...]
+    alternatives: tuple[HypothesisAssignment, ...]
+    unresolved_decision_ids: tuple[str, ...]
+    active_assignment_ids: tuple[str, ...]
+    preferred_assignment_id: str | None
+
+
 def factor_semantic_decisions(graph: SemanticGraph) -> list[SemanticDecision]:
     by_subject: dict[str, list[str]] = {}
     for claim in graph.claims.values():
@@ -145,19 +154,18 @@ def freeze_assignment(
     selection_mode: str = "certified",
     max_assignments: int = 32,
 ) -> HypothesisAssignment | None:
-    if selection_mode not in {"certified", "benchmark"}:
-        raise ValueError("selection_mode must be certified or benchmark")
-    _, assignments = enumerate_assignments(graph, max_assignments=max_assignments)
-    if not assignments:
+    if selection_mode not in {"hypothesis_set", "certified", "benchmark"}:
+        raise ValueError("selection_mode must be hypothesis_set, certified, or benchmark")
+    hypothesis_set = build_hypothesis_set(graph, max_active_hypotheses=max_assignments)
+    if not hypothesis_set.alternatives:
         return None
-    complete = [assignment for assignment in assignments if assignment.authority_complete]
-    if selection_mode == "certified":
-        unique_choices = {tuple(sorted(item.choice_by_decision.items())) for item in complete}
-        if len(unique_choices) != 1:
-            return None
-        chosen = complete[0]
-    else:
-        chosen = assignments[0]
+    chosen = next(
+        (
+            item for item in hypothesis_set.alternatives
+            if item.assignment_id == hypothesis_set.preferred_assignment_id
+        ),
+        hypothesis_set.alternatives[0],
+    )
     data: dict[str, Any] = chosen.to_dict()
     data["selection_mode"] = selection_mode
     return HypothesisAssignment(
@@ -171,4 +179,90 @@ def freeze_assignment(
         authority_complete=bool(data["authority_complete"]),
         selection_mode=selection_mode,
         score=float(data["score"]),
+    )
+
+
+def _evidence_dimensions(
+    graph: SemanticGraph,
+    assignment: HypothesisAssignment,
+) -> tuple[float, frozenset[str], int]:
+    clusters: set[str] = set()
+    explicit = 0
+    for claim_id in assignment.assignment_node_ids:
+        claim = graph.claims.get(claim_id)
+        if claim is None:
+            continue
+        if claim.authority.trusted:
+            explicit += 1
+        clusters.update(
+            graph.evidence[evidence_id].independence_cluster
+            for evidence_id in claim.evidence_ids
+            if evidence_id in graph.evidence
+        )
+    return assignment.score, frozenset(clusters), explicit
+
+
+def build_hypothesis_set(
+    graph: SemanticGraph,
+    *,
+    max_active_hypotheses: int = 4,
+) -> HypothesisSet:
+    """Retain a bounded, non-dominated set of executable interpretations."""
+
+    if max_active_hypotheses < 1:
+        raise ValueError("max_active_hypotheses must be positive")
+    decisions, assignments = enumerate_assignments(
+        graph, max_assignments=max(32, max_active_hypotheses * 8)
+    )
+    coherent = [
+        item for item in assignments if item.coherent and item.authority_complete
+    ]
+    dimensions = {
+        item.assignment_id: _evidence_dimensions(graph, item) for item in coherent
+    }
+    retained: list[HypothesisAssignment] = []
+    for candidate in coherent:
+        score, clusters, explicit = dimensions[candidate.assignment_id]
+        dominated = False
+        for other in coherent:
+            if other.assignment_id == candidate.assignment_id:
+                continue
+            other_score, other_clusters, other_explicit = dimensions[other.assignment_id]
+            if (
+                other_score >= score
+                and other_clusters.issuperset(clusters)
+                and other_explicit >= explicit
+                and (
+                    other_score > score
+                    or other_clusters != clusters
+                    or other_explicit > explicit
+                )
+            ):
+                dominated = True
+                break
+        if not dominated:
+            retained.append(candidate)
+    retained.sort(key=lambda item: (
+        -dimensions[item.assignment_id][0],
+        -len(dimensions[item.assignment_id][1]),
+        -dimensions[item.assignment_id][2],
+        item.assignment_id,
+    ))
+    retained = retained[:max_active_hypotheses]
+    common = set(retained[0].common_hard_node_ids) if retained else set()
+    for item in retained[1:]:
+        common &= set(item.common_hard_node_ids)
+    unresolved = tuple(sorted(
+        decision.decision_id
+        for decision in decisions
+        if len({
+            item.choice_by_decision.get(decision.decision_id) for item in retained
+        }) > 1
+    ))
+    return HypothesisSet(
+        common_hard_node_ids=tuple(sorted(common)),
+        alternatives=tuple(retained),
+        unresolved_decision_ids=unresolved,
+        active_assignment_ids=tuple(item.assignment_id for item in retained),
+        preferred_assignment_id=retained[0].assignment_id if retained else None,
     )

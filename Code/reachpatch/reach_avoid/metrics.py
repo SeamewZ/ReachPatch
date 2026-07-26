@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from dataclasses import dataclass
+
 from reachpatch.models.controller import ReachAvoidState, UnitOutcome
 from reachpatch.models.enums import OutcomeStatus
 
@@ -46,7 +48,7 @@ def repaired_losing_paths(
     return tuple(sorted(repaired))
 
 
-def progress_metrics(
+def _legacy_progress_metrics(
     state: ReachAvoidState,
     new_outcomes: dict[str, UnitOutcome],
     causal_touch: dict[str, list[str]],
@@ -123,6 +125,88 @@ def progress_metrics(
             and new_path_coverage >= old_path_coverage
         ),
     }
+
+
+@dataclass(frozen=True, slots=True)
+class ProgressMetrics:
+    new_target_passes: int
+    eliminated_stable_failures: int
+    eliminated_counterexamples: int
+    new_diff_adequacy_coverage: int
+    new_preservation_failures: int
+    new_high_risk_unknowns: int
+    impact_risk_delta: float
+
+    @property
+    def has_confirmed_regression(self) -> bool:
+        return self.new_preservation_failures > 0 or self.impact_risk_delta > 0
+
+    @property
+    def meaningful_progress(self) -> bool:
+        return (
+            self.new_target_passes > 0
+            or self.eliminated_stable_failures > 0
+            or self.eliminated_counterexamples > 0
+            or self.new_diff_adequacy_coverage > 0
+        ) and not self.has_confirmed_regression
+
+
+def progress_metrics(old_state, trial_state, causal_touch=None, **legacy_graphs):
+    """Compare two states; retain compatibility with pre-refactor transition calls."""
+
+    if not hasattr(trial_state, "outcomes"):
+        return _legacy_progress_metrics(
+            old_state, trial_state, causal_touch or {}, **legacy_graphs
+        )
+    old_pass = {
+        item.unit_id for item in old_state.outcomes.values()
+        if item.kind == "TARGET" and item.status == OutcomeStatus.PASS
+    }
+    new_pass = {
+        item.unit_id for item in trial_state.outcomes.values()
+        if item.kind == "TARGET" and item.status == OutcomeStatus.PASS
+    }
+    old_fail = {
+        item.unit_id for item in old_state.outcomes.values()
+        if item.status == OutcomeStatus.FAIL and item.stable
+    }
+    new_fail = {
+        item.unit_id for item in trial_state.outcomes.values()
+        if item.status == OutcomeStatus.FAIL and item.stable
+    }
+    old_counterexamples = {item.counterexample_id for item in old_state.counterexamples}
+    passing_units = {
+        item.unit_id for item in trial_state.outcomes.values()
+        if item.status == OutcomeStatus.PASS
+    }
+    eliminated_counterexample_ids = {
+        item.counterexample_id for item in old_state.counterexamples
+        if item.binding_unit_id is not None and item.binding_unit_id in passing_units
+    }
+    old_preservation_fail = {
+        item.unit_id for item in old_state.outcomes.values()
+        if item.kind == "PRESERVATION" and item.status == OutcomeStatus.FAIL and item.stable
+    }
+    new_preservation_fail = {
+        item.unit_id for item in trial_state.outcomes.values()
+        if item.kind == "PRESERVATION" and item.status == OutcomeStatus.FAIL and item.stable
+    }
+    old_unknown = int(old_state.runtime_metrics.get("high_risk_unknowns", 0))
+    new_unknown = int(trial_state.runtime_metrics.get("high_risk_unknowns", 0))
+    old_coverage = set(old_state.runtime_metrics.get("diff_adequacy_keys", ()))
+    new_coverage = set(trial_state.runtime_metrics.get("diff_adequacy_keys", ()))
+    return ProgressMetrics(
+        new_target_passes=len(new_pass - old_pass),
+        eliminated_stable_failures=len(old_fail - new_fail),
+        eliminated_counterexamples=len(
+            eliminated_counterexample_ids & old_counterexamples
+        ),
+        new_diff_adequacy_coverage=len(new_coverage - old_coverage),
+        new_preservation_failures=len(new_preservation_fail - old_preservation_fail),
+        new_high_risk_unknowns=max(0, new_unknown - old_unknown),
+        impact_risk_delta=float(trial_state.runtime_metrics.get("impact_risk", 0.0))
+        - float(old_state.runtime_metrics.get("impact_risk", 0.0)),
+    )
 
 
 def component_shadow_pass(intent, outcomes: dict[str, UnitOutcome]) -> bool:

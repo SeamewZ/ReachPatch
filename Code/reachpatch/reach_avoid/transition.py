@@ -1,18 +1,23 @@
 from __future__ import annotations
 
 import copy
+import os
 import platform
 import sys
+import time
+from dataclasses import asdict
 from dataclasses import replace
 from pathlib import Path
 from typing import Iterable
 
-from reachpatch.binding_graph import build_binding_graph
+from reachpatch.binding_graph import build_active_binding_graph
 from reachpatch.challenge_graph.dicc import (
     diff_induced_challenge_plan,
     finalize_diff_induced_challenge_closure,
 )
-from reachpatch.challenge_graph.materialize import execute_challenges, materialize_challenges
+from reachpatch.challenge_graph.materialize import (
+    execute_challenges, materialize_active_challenges,
+)
 from reachpatch.challenge_graph.models import ChallengeGraph
 from reachpatch.execution import TraceExecutor, WorktreeManager
 from reachpatch.execution.mechanical import mechanical_pass, run_mechanical_checks
@@ -30,8 +35,11 @@ from reachpatch.models.controller import (
     TransitionResult,
     WorkingPatch,
 )
+from reachpatch.models.core import Frontier
 from reachpatch.models.enums import ChallengeTerminalStatus, ControllerPhase, Decision, OutcomeStatus
-from reachpatch.program_graph.builder import build_augmented_program_graph
+from reachpatch.program_graph.budget import Deadline, GraphBudget
+from reachpatch.program_graph.incremental import update_active_program_slice
+from reachpatch.program_graph.index import update_repository_index
 from reachpatch.program_graph.tracing import merge_trace_bundles
 from reachpatch.program_graph.impact import guarded_diff_influence_cone
 from reachpatch.reach_avoid.certificates import finalize_certificate
@@ -42,7 +50,11 @@ from reachpatch.repair.counterexamples import packets_for_nonpass_challenges
 from reachpatch.repair.diagnosis import mechanism_fingerprint
 from reachpatch.repair.operators import apply_registered_operator
 from reachpatch.repair.session import PersistentGeneratorSession
-from reachpatch.requirement_graph import compile_assignment_overlay, compile_requirement_paths
+from reachpatch.repair.deepseek_agent import GeneratorRevision, convert_revision_action, ActionConversionStatus
+from reachpatch.requirement_graph import (
+    compile_requirement_paths, promote_domains_from_diff,
+    refresh_requirement_paths,
+)
 
 
 def _reset_for_trial(graph: ChallengeGraph) -> ChallengeGraph:
@@ -215,7 +227,7 @@ def _build_checkpoint(
     )
 
 
-def evaluate_single_update(
+def _legacy_evaluate_single_update(
     state: ReachAvoidState,
     session: PersistentGeneratorSession,
     intent,
@@ -223,6 +235,14 @@ def evaluate_single_update(
     forbidden_patterns: Iterable[str] = (),
     mechanical_commands: Iterable[Iterable[str]] = (),
 ) -> TransitionResult | None:
+    """Read old repair-intent artifacts; patch-first production never calls this."""
+
+    if os.environ.get("REACHPATCH_ENABLE_LEGACY_FULL_GRAPH") != "1":
+        raise RuntimeError("legacy full-graph transition is disabled")
+    from reachpatch.binding_graph import build_binding_graph
+    from reachpatch.challenge_graph.materialize import materialize_challenges
+    from reachpatch.program_graph.builder import build_augmented_program_graph
+    from reachpatch.requirement_graph import compile_assignment_overlay
     state.transition_phase(
         ControllerPhase.GENERATOR_REVISE, event="repair_intent_submitted"
     )
@@ -309,6 +329,7 @@ def evaluate_single_update(
         trial.tree,
         incremental,
         commands=mechanical_commands,
+        baseline_root=checkpoint_tree,
     )
     state.transition_phase(
         ControllerPhase.DICC_VALIDATE, event="actual_diff_reconciled"
@@ -608,4 +629,547 @@ def evaluate_single_update(
         checkpoint=state.checkpoint,
         action=action,
         reason=reason,
+    )
+
+
+def _apply_revision_edits(tree: Path, revision: GeneratorRevision) -> None:
+    by_file: dict[str, list] = {}
+    prepared: dict[str, list[str]] = {}
+    for edit in revision.edits:
+        path = (tree / edit.relative_path).resolve()
+        if not path.is_relative_to(tree.resolve()) or not path.is_file():
+            raise ValueError(f"invalid revision path: {edit.relative_path}")
+        lines = prepared.setdefault(
+            edit.relative_path,
+            path.read_text(encoding="utf-8", errors="strict").splitlines(),
+        )
+        actual = "\n".join(lines[edit.start_line - 1:edit.end_line])
+        if actual != edit.expected_source.rstrip("\n"):
+            raise ValueError(
+                f"expected source mismatch: {edit.relative_path}:{edit.start_line}"
+            )
+        by_file.setdefault(edit.relative_path, []).append(edit)
+    for relative, edits in by_file.items():
+        ordered = sorted(edits, key=lambda item: (item.start_line, item.end_line), reverse=True)
+        previous_start = len(prepared[relative]) + 1
+        for edit in ordered:
+            if edit.end_line >= previous_start:
+                raise ValueError(f"overlapping edits in {relative}")
+            previous_start = edit.start_line
+            replacement = edit.replacement.splitlines()
+            prepared[relative][edit.start_line - 1:edit.end_line] = replacement
+        original = (tree / relative).read_text(encoding="utf-8", errors="strict")
+        trailing = "\n" if original.endswith("\n") else ""
+        (tree / relative).write_text(
+            "\n".join(prepared[relative]) + trailing, encoding="utf-8"
+        )
+
+
+def _revision_certificate(
+    state: ReachAvoidState,
+    revision: GeneratorRevision,
+    transition_id: str,
+    incremental: ActualDiff,
+    checks,
+    *,
+    decision: Decision,
+    receipt_id: str,
+    result_checkpoint_id: str | None,
+    graph_delta: dict,
+    outcomes: dict,
+    packets: tuple[CounterexamplePacket, ...],
+    safe: bool,
+    progress: bool,
+    reach: bool,
+    avoid_reasons: tuple[str, ...],
+) -> TransitionCertificate:
+    failed = [item for item in outcomes.values() if item.status == OutcomeStatus.FAIL]
+    preservation_pass = not any(
+        item.kind == "PRESERVATION" and item.status == OutcomeStatus.FAIL and item.stable
+        for item in outcomes.values()
+    )
+    established_pass = not any(
+        old.status == OutcomeStatus.PASS
+        and any(
+            current.unit_id == old.unit_id and current.status == OutcomeStatus.FAIL
+            for current in outcomes.values()
+        )
+        for old in state.outcomes.values()
+    )
+    return finalize_certificate(TransitionCertificate(
+        transition_id=transition_id, update_id=incremental.diff_id,
+        source_checkpoint_id=state.checkpoint.checkpoint_id,
+        result_checkpoint_id=result_checkpoint_id,
+        incremental_diff_hash=incremental.canonical_diff_hash,
+        cumulative_diff_hash=(
+            graph_delta.get("cumulative_diff_hash")
+            or state.checkpoint.patch.canonical_diff_hash
+        ),
+        actual_edit_ids=tuple(stable_id("proposed-edit", asdict(item)) for item in revision.edits),
+        causal_cut_ids=tuple(sorted({
+            node_id for unit in state.binding_graph.units.values()
+            for node_id in unit.repair_cut_node_ids
+            if any(
+                state.program_graph.nodes.get(node_id)
+                and state.program_graph.nodes[node_id].attributes.get("file") == edit.relative_path
+                for edit in revision.edits
+            )
+        })),
+        graph_delta=graph_delta,
+        mechanical_check_ids=tuple(item.check_id for item in checks),
+        outcome_ids=tuple(sorted(outcomes)),
+        new_counterexample_ids=tuple(item.counterexample_id for item in packets),
+        eliminated_counterexample_ids=(),
+        impact_regression_ids=tuple(item.outcome_id for item in failed if item.kind == "PRESERVATION"),
+        adjacent_partition_obligation_ids=tuple(graph_delta.get("active_challenge_ids", ())),
+        hard_frontier_ids=tuple(graph_delta.get("hard_frontier_ids", ())),
+        old_target_deficit=state.target_deficit(),
+        new_target_deficit=float(graph_delta.get("new_target_deficit", state.target_deficit())),
+        repaired_losing_path_ids=tuple(graph_delta.get("repaired_path_ids", ())),
+        mechanical_pass=mechanical_pass(checks),
+        forbidden_edit=bool(incremental.forbidden_paths),
+        oracle_contamination=bool(incremental.oracle_contamination_paths),
+        established_successes_pass=established_pass,
+        preservation_pass=preservation_pass,
+        component_shadow_pass=True,
+        diff_safety_pass=bool(graph_delta.get("diff_adequacy_closed", False)),
+        safe=safe, strict_target_progress=progress,
+        reach=reach, avoid=bool(avoid_reasons), progress=progress,
+        decision=decision,
+        restoration_or_commit_receipt=receipt_id,
+        input_artifact_ids=tuple(
+            values[-1] for values in state.artifact_ids.values() if values
+        ),
+        recomputation_hash="",
+    ))
+
+
+def evaluate_patch_revision(
+    state: ReachAvoidState,
+    revision: GeneratorRevision,
+) -> TransitionResult:
+    """Validate one incremental revision against the sole incumbent lineage."""
+
+    conversion = convert_revision_action(state, revision)
+    if conversion.status not in {
+        ActionConversionStatus.ACCEPTED,
+        ActionConversionStatus.NEEDS_SLICE_EXPANSION,
+    }:
+        raise ValueError(
+            f"revision conversion {conversion.status.value}: {'; '.join(conversion.reasons)}"
+        )
+    state.transition_phase(ControllerPhase.MECHANICAL_VALIDATE, event="generator_revision_submitted")
+    transition_id = stable_id(
+        "patch-revision-transition", state.checkpoint.checkpoint_id,
+        revision.revision_id, state.transition_index + 1,
+    )
+    manager = WorktreeManager(Path(state.run_root) / "worktrees")
+    trial = manager.begin_trial(state.checkpoint.checkpoint_id)
+    trial_tree = Path(trial.tree)
+    checkpoint_tree = Path(state.checkpoint.snapshot_tree)
+    config = state.runtime_config
+    forbidden = tuple(config.get("forbidden_patterns", ()))
+    commands = tuple(tuple(item) for item in config.get("mechanical_commands", ()))
+    try:
+        _apply_revision_edits(trial_tree, revision)
+        incremental = reconcile_actual_diff(
+            checkpoint_tree, trial_tree, forbidden_patterns=forbidden
+        )
+    except Exception as exc:
+        incremental = reconcile_actual_diff(
+            checkpoint_tree, trial_tree, forbidden_patterns=forbidden
+        )
+        receipt = manager.rollback(trial)
+        packet = _mechanical_packet(
+            state, transition_id, incremental, f"EDIT_APPLY:{type(exc).__name__}:{exc}"
+        )
+        certificate = _revision_certificate(
+            state, revision, transition_id, incremental, (),
+            decision=Decision.ROLLBACK, receipt_id=receipt.receipt_id,
+            result_checkpoint_id=None, graph_delta={
+                "edit_error": str(exc),
+                "actual_diff": incremental.to_dict(),
+            },
+            outcomes=state.outcomes, packets=(packet,), safe=False,
+            progress=False, reach=False, avoid_reasons=("EDIT_APPLY_FAILURE",),
+        )
+        state.counterexamples.append(packet)
+        state.repair_history.append(certificate)
+        state.transition_index += 1
+        if state.generator_conversation is not None:
+            state.generator_conversation.rejected_patch_hashes.append(
+                incremental.canonical_diff_hash
+            )
+        state.transition_phase(ControllerPhase.COUNTEREXAMPLE_FEEDBACK, event="edit_apply_failed")
+        return TransitionResult(
+            transition_id, False, Decision.ROLLBACK, certificate,
+            (packet,), state.checkpoint, revision, "EDIT_APPLY_FAILURE",
+        )
+    checks = run_mechanical_checks(
+        trial_tree, incremental, commands=commands,
+        baseline_root=checkpoint_tree,
+    )
+    mechanical_ok = mechanical_pass(checks)
+    avoid_reasons: set[str] = set()
+    if incremental.empty:
+        avoid_reasons.add("EMPTY_REVISION")
+    if not mechanical_ok:
+        avoid_reasons.add("MECHANICAL_FAILURE")
+    if incremental.forbidden_paths:
+        avoid_reasons.add("FORBIDDEN_EDIT")
+    if incremental.oracle_contamination_paths:
+        avoid_reasons.add("ORACLE_CONTAMINATION")
+    if avoid_reasons:
+        receipt = manager.rollback(trial)
+        packet = _mechanical_packet(
+            state, transition_id, incremental, ",".join(sorted(avoid_reasons))
+        )
+        certificate = _revision_certificate(
+            state, revision, transition_id, incremental, checks,
+            decision=Decision.ROLLBACK, receipt_id=receipt.receipt_id,
+            result_checkpoint_id=None,
+            graph_delta={"actual_diff": incremental.to_dict()},
+            outcomes=state.outcomes,
+            packets=(packet,), safe=False, progress=False, reach=False,
+            avoid_reasons=tuple(sorted(avoid_reasons)),
+        )
+        state.counterexamples.append(packet)
+        state.repair_history.append(certificate)
+        state.transition_index += 1
+        if state.generator_conversation is not None:
+            state.generator_conversation.rejected_patch_hashes.append(
+                incremental.canonical_diff_hash
+            )
+        state.transition_phase(ControllerPhase.COUNTEREXAMPLE_FEEDBACK, event="mechanical_rollback")
+        return TransitionResult(
+            transition_id, False, Decision.ROLLBACK, certificate,
+            (packet,), state.checkpoint, revision, ",".join(sorted(avoid_reasons)),
+        )
+    if state.repository_index is None:
+        manager.rollback(trial)
+        raise RuntimeError("patch-first transition requires a persisted RepositoryIndex")
+    graph_budget = GraphBudget.from_limits(
+        seconds=float(config.get("program_slice_deadline_seconds", 90.0)),
+        max_nodes=int(config.get("max_program_nodes", 50_000)),
+        max_edges=int(config.get("max_program_edges", 150_000)),
+        max_files=int(config.get("max_precise_files", 40)),
+        max_functions=int(config.get("max_precise_functions", 200)),
+        max_rss_mib=int(config.get("graph_memory_limit_mib", 2048)),
+        max_protocol_candidates_per_operation=int(
+            config.get("max_protocol_candidates_per_operation", 8)
+        ),
+    )
+    state.transition_phase(ControllerPhase.ACTIVE_GRAPH_BUILD, event="mechanical_checks_passed")
+    trial_repository_index = update_repository_index(
+        state.repository_index, trial_tree, tuple(incremental.changed_files),
+        deadline=Deadline.after(float(
+            config.get("repository_index_deadline_seconds", 60.0)
+        )),
+    )
+    graph_delta_result = update_active_program_slice(
+        state.program_graph, trial_repository_index, trial_tree,
+        incremental, None, tuple(revision.context_requests), graph_budget,
+    )
+    trial_program = graph_delta_result.graph
+    trial_requirements = copy.deepcopy(state.requirement_graph)
+    requirement_delta = promote_domains_from_diff(
+        trial_requirements, trial_program, incremental, None,
+        deadline=time.monotonic() + float(
+            config.get("requirement_deadline_seconds", 30.0)
+        ),
+    )
+    changed_program_nodes = set(
+        graph_delta_result.added_node_ids
+        + graph_delta_result.removed_node_ids
+        + graph_delta_result.modified_node_ids
+    )
+    affected_leaf_ids = set(requirement_delta.affected_leaf_ids)
+    affected_path_ids = {
+        unit.path_obligation_id
+        for unit in state.binding_graph.units.values()
+        if changed_program_nodes & set(unit.interaction_path_ids)
+    }
+    affected_leaf_ids.update(
+        state.requirement_graph.path_obligations[path_id].leaf_id
+        for path_id in affected_path_ids
+        if path_id in state.requirement_graph.path_obligations
+    )
+    if not trial_requirements.path_obligations:
+        compile_requirement_paths(
+            trial_requirements, trial_program,
+            max_open_world_seeds=min(64, int(config.get("max_precise_functions", 200))),
+            max_observation_nodes=min(128, int(config.get("max_program_nodes", 50_000))),
+            max_paths_per_entry=int(config.get("max_path_classes_per_leaf", 24)),
+            max_path_classes_per_leaf=int(config.get("max_path_classes_per_leaf", 24)),
+            promote_all_program_predicates=False,
+            deadline=time.monotonic() + float(config.get("requirement_deadline_seconds", 30.0)),
+        )
+        affected_leaf_ids.update(trial_requirements.leaves)
+        affected_path_ids.update(trial_requirements.path_obligations)
+    elif affected_leaf_ids:
+        trial_requirements, removed_paths, added_paths = refresh_requirement_paths(
+            trial_requirements, trial_program,
+            affected_leaf_ids=affected_leaf_ids,
+            max_path_classes_per_leaf=int(
+                config.get("max_path_classes_per_leaf", 24)
+            ),
+            deadline=time.monotonic() + float(
+                config.get("requirement_deadline_seconds", 30.0)
+            ),
+        )
+        affected_path_ids.update(removed_paths)
+        affected_path_ids.update(added_paths)
+    affected_path_ids.update({
+        obligation.path_obligation_id
+        for obligation in trial_requirements.path_obligations.values()
+        if obligation.leaf_id in set(requirement_delta.affected_leaf_ids)
+        or set(obligation.path_edge_ids) & set(graph_delta_result.added_edge_ids + graph_delta_result.removed_edge_ids)
+    })
+    trial_binding = build_active_binding_graph(
+        trial_requirements, trial_program, previous=state.binding_graph,
+        affected_leaf_ids=affected_leaf_ids,
+        affected_path_ids=affected_path_ids,
+        max_target_units=int(config.get("max_active_target_bindings", 20)),
+        max_preservation_units=int(config.get("max_active_preservation_bindings", 20)),
+        deadline=time.monotonic() + float(config.get("binding_deadline_seconds", 15.0)),
+    )
+    trial_challenges = materialize_active_challenges(
+        trial_requirements, trial_program, trial_binding,
+        actual_diff=incremental, previous_outcomes=state.outcomes,
+        max_challenges=int(config.get("max_active_challenges", 40)),
+        deadline=time.monotonic() + float(config.get("challenge_deadline_seconds", 15.0)),
+    )
+    state.transition_phase(ControllerPhase.CHALLENGE_EXECUTE, event="active_graph_stack_updated")
+    executor = TraceExecutor(temporary_root=Path(state.run_root) / "tmp")
+    execution = execute_challenges(
+        trial_challenges, executor, state.base_repository, trial_tree
+    )
+    targeted_expansion = False
+    if execution.real_execution_count == 0:
+        trial_challenges.add_frontier(Frontier(
+            frontier_id=stable_id(
+                "challenge-frontier", "NO_EXECUTABLE_CHALLENGE",
+                incremental.canonical_diff_hash,
+            ),
+            kind="NO_EXECUTABLE_CHALLENGE",
+            owner_id=trial_binding.assignment_id,
+            reason="no active challenge had both an executable recipe and trusted oracle",
+            resolution_action="request a targeted slice or executable public oracle",
+            hard=False,
+            evidence_ids=(),
+        ))
+    # A pure-UNKNOWN first pass gets one bounded information-gain expansion
+    # while the trial worktree is still alive.  Only after this second pass is
+    # the revision committed or rolled back.
+    probe_state = copy.copy(state)
+    probe_state.requirement_graph = trial_requirements
+    probe_state.binding_graph = trial_binding
+    first_outcomes = outcomes_from_challenges(
+        probe_state, trial_challenges, execution
+    )
+    pure_unknown = (
+        not first_outcomes
+        or all(
+            item.status not in {OutcomeStatus.PASS, OutcomeStatus.FAIL}
+            for item in first_outcomes.values()
+        )
+    )
+    if pure_unknown:
+        expanded_challenges = materialize_active_challenges(
+            trial_requirements, trial_program, trial_binding,
+            actual_diff=incremental, previous_outcomes=state.outcomes,
+            max_challenges=min(
+                int(config.get("max_active_challenges", 40)) * 2,
+                int(config.get("max_active_challenges", 40)) + 40,
+            ),
+            deadline=time.monotonic() + float(
+                config.get("challenge_deadline_seconds", 15.0)
+            ),
+        )
+        if set(expanded_challenges.cells) - set(trial_challenges.cells):
+            trial_challenges = expanded_challenges
+            execution = execute_challenges(
+                trial_challenges, executor, state.base_repository, trial_tree
+            )
+            targeted_expansion = True
+    if execution.real_execution_count > 0 and execution.trace_delta.get("nonempty"):
+        merge_trace_bundles(trial_program, execution, role="PATCH")
+        trial_binding = build_active_binding_graph(
+            trial_requirements, trial_program, previous=trial_binding,
+            affected_leaf_ids=set(), affected_path_ids=set(),
+            max_target_units=int(config.get("max_active_target_bindings", 20)),
+            max_preservation_units=int(
+                config.get("max_active_preservation_bindings", 20)
+            ),
+            deadline=time.monotonic() + float(
+                config.get("binding_deadline_seconds", 15.0)
+            ),
+        )
+        trial_challenges.program_graph_hash = trial_program.program_hash()
+        trial_challenges.binding_graph_hash = trial_binding.graph_hash()
+        for challenge_id, cell in tuple(trial_challenges.cells.items()):
+            trial_challenges.cells[challenge_id] = replace(
+                cell,
+                graph_hashes={
+                    **cell.graph_hashes,
+                    "program": trial_challenges.program_graph_hash,
+                    "binding": trial_challenges.binding_graph_hash,
+                },
+            )
+    trial_state = copy.copy(state)
+    trial_state.requirement_graph = trial_requirements
+    trial_state.program_graph = trial_program
+    trial_state.binding_graph = trial_binding
+    trial_state.challenge_graph = trial_challenges
+    trial_state.outcomes = outcomes_from_challenges(
+        trial_state, trial_challenges, execution
+    )
+    trial_state.trace_bundles = {
+        **state.trace_bundles,
+        **{item.paired_bundle_id: item for item in execution},
+    }
+    coverage_keys = tuple(sorted({
+        relation.kind for relation in incremental.changed_relations
+        if any(
+            node.attributes.get("file") == relation.file
+            for node in trial_program.nodes.values()
+        )
+    } | set(execution.executed_challenge_ids)))
+    high_pending = tuple(sorted(
+        challenge_id for challenge_id, cell in trial_challenges.cells.items()
+        if cell.hard and cell.terminal_status not in {
+            ChallengeTerminalStatus.PASS, ChallengeTerminalStatus.INFEASIBLE_PROVED,
+        }
+    ))
+    trial_state.runtime_metrics = {
+        **state.runtime_metrics,
+        "active_program_slice_seconds": graph_delta_result.build.elapsed_seconds,
+        "program_nodes": len(trial_program.nodes),
+        "program_edges": len(trial_program.edges),
+        "precise_files": len(graph_delta_result.build.analyzed_files),
+        "precise_functions": len(trial_program.cfgs),
+        "peak_rss_mib": max(
+            float(state.runtime_metrics.get("peak_rss_mib", 0.0)),
+            graph_delta_result.build.peak_rss_mib,
+        ),
+        "requirement_leaves": len(trial_requirements.leaves),
+        "requirement_partitions": len(trial_requirements.partitions),
+        "candidate_binding_count": trial_binding.build_stats.get("candidate_count", 0),
+        "active_binding_count": trial_binding.build_stats.get("active_count", 0),
+        "deferred_binding_count": trial_binding.build_stats.get("deferred_count", 0),
+        "active_challenge_count": len(trial_challenges.cells),
+        "diff_adequacy_keys": coverage_keys,
+        "diff_adequacy_closed": bool(coverage_keys) and not high_pending,
+        "high_value_pending_challenge_ids": high_pending,
+        "high_risk_unknowns": len(high_pending),
+        "real_execution_challenge_count": execution.real_execution_count,
+        "targeted_challenge_expansion": targeted_expansion,
+    }
+    packets = packets_for_nonpass_challenges(
+        trial_state, trial_challenges, incremental,
+        transition_id=transition_id, executor=executor,
+        base_repository=state.base_repository, patch_repository=trial_tree,
+    )
+    trial_state.counterexamples = state.counterexamples + list(packets)
+    metrics = progress_metrics(state, trial_state)
+    established_regression = any(
+        old.status == OutcomeStatus.PASS
+        and any(
+            new.unit_id == old.unit_id and new.status == OutcomeStatus.FAIL and new.stable
+            for new in trial_state.outcomes.values()
+        )
+        for old in state.outcomes.values()
+    )
+    if established_regression:
+        avoid_reasons.add("ESTABLISHED_SUCCESS_LOST")
+    if metrics.new_preservation_failures:
+        avoid_reasons.add("PRESERVATION_FAILURE")
+    if any(item.kind == "external_effect_added" for item in incremental.changed_relations):
+        avoid_reasons.add("NEW_HIGH_RISK_SIDE_EFFECT")
+    initial_revision = not state.checkpoint.patch.canonical_diff
+    accepted = not avoid_reasons and (
+        metrics.meaningful_progress or (initial_revision and not incremental.empty)
+    )
+    cumulative = reconcile_actual_diff(
+        state.base_repository, trial_tree, forbidden_patterns=forbidden
+    )
+    result_checkpoint_id = None
+    if accepted:
+        result_checkpoint_id = stable_id(
+            "checkpoint", state.episode_id, cumulative.canonical_diff_hash,
+            state.transition_index + 1,
+        )
+        receipt = manager.commit(trial, result_checkpoint_id)
+        snapshot = manager.checkpoint_tree(result_checkpoint_id)
+        checkpoint = _build_checkpoint(
+            state, result_checkpoint_id, str(snapshot), cumulative,
+            trial_state.outcomes, transition_id, state.generator_session.cursor,
+        )
+        state.requirement_graph = trial_requirements
+        state.program_graph = trial_program
+        state.binding_graph = trial_binding
+        state.challenge_graph = trial_challenges
+        state.outcomes = trial_state.outcomes
+        state.trace_bundles = trial_state.trace_bundles
+        state.runtime_metrics = trial_state.runtime_metrics
+        state.repository_index = trial_repository_index
+        state.checkpoint = replace(
+            checkpoint, graph_hashes=state.graph_hashes(),
+            graph_reached=False, safe=True,
+        )
+        if state.generator_conversation is not None:
+            state.generator_conversation.accepted_patch_hashes.append(
+                cumulative.canonical_diff_hash
+            )
+    else:
+        receipt = manager.rollback(trial)
+        if state.generator_conversation is not None:
+            state.generator_conversation.rejected_patch_hashes.append(
+                incremental.canonical_diff_hash
+            )
+    graph_delta = {
+        "actual_diff": incremental.to_dict(),
+        "program": {
+            "added_nodes": list(graph_delta_result.added_node_ids),
+            "removed_nodes": list(graph_delta_result.removed_node_ids),
+            "modified_nodes": list(graph_delta_result.modified_node_ids),
+            "added_edges": list(graph_delta_result.added_edge_ids),
+            "removed_edges": list(graph_delta_result.removed_edge_ids),
+            "rebuilt_files": list(graph_delta_result.rebuilt_files),
+            "updated_index_files": list(incremental.changed_files),
+        },
+        "requirement": asdict(requirement_delta),
+        "binding_stats": trial_binding.build_stats,
+        "active_challenge_ids": list(trial_challenges.cells),
+        "executed_challenge_ids": list(execution.executed_challenge_ids),
+        "real_execution_count": execution.real_execution_count,
+        "diff_adequacy_closed": bool(trial_state.runtime_metrics["diff_adequacy_closed"]),
+        "hard_frontier_ids": list(high_pending),
+        "cumulative_diff_hash": cumulative.canonical_diff_hash if accepted else state.checkpoint.patch.canonical_diff_hash,
+        "progress_metrics": asdict(metrics),
+    }
+    reach = accepted and in_target_set(state)
+    certificate = _revision_certificate(
+        state, revision, transition_id, incremental, checks,
+        decision=Decision.COMMIT if accepted else Decision.ROLLBACK,
+        receipt_id=receipt.receipt_id, result_checkpoint_id=result_checkpoint_id,
+        graph_delta=graph_delta, outcomes=trial_state.outcomes,
+        packets=packets, safe=not avoid_reasons,
+        progress=accepted, reach=reach,
+        avoid_reasons=tuple(sorted(avoid_reasons)),
+    )
+    state.counterexamples.extend(packets)
+    state.repair_history.append(certificate)
+    state.transition_index += 1
+    state.transition_phase(
+        ControllerPhase.TRANSITION_GATE,
+        event="revision_committed" if accepted else "revision_rolled_back",
+    )
+    state.refresh_id()
+    return TransitionResult(
+        transition_id=transition_id, accepted=accepted,
+        decision=Decision.COMMIT if accepted else Decision.ROLLBACK,
+        certificate=certificate, counterexamples=packets,
+        checkpoint=state.checkpoint, action=revision,
+        reason=("SAFE_PROGRESS" if accepted else ",".join(sorted(avoid_reasons)) or "NO_CONFIRMED_PROGRESS"),
     )

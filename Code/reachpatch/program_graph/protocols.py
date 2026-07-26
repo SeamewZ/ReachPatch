@@ -142,15 +142,23 @@ class ProtocolAnalyzer:
     def materialize_fact(
         graph: ProgramGraph,
         fact: ProtocolFact,
+        *,
+        max_candidates: int | None = None,
     ) -> ProtocolOperation:
         method_names = fact.method_names
         targets_by_method = {
             method: tuple(graph.resolve_symbol(method))
             for method in method_names
         }
-        candidates = graph.intern_target_ids({
+        all_candidates = sorted({
             target for targets in targets_by_method.values() for target in targets
         })
+        truncated_candidates = (
+            max_candidates is not None and len(all_candidates) > max_candidates
+        )
+        candidates = graph.intern_target_ids(
+            all_candidates[:max_candidates] if max_candidates is not None else all_candidates
+        )
         selected: str | None = None
         status = "candidate"
         if fact.definitely_builtin and method_names:
@@ -256,6 +264,14 @@ class ProtocolAnalyzer:
             not_implemented_fallback=fact.not_implemented,
         )
         graph.add_protocol_operation(operation)
+        if truncated_candidates:
+            graph.create_frontier(
+                "ANALYSIS_TRUNCATED",
+                fact.operation_id,
+                f"protocol candidate set compressed from {len(all_candidates)} to {max_candidates}",
+                "request targeted dispatch tracing if this operation enters a failing path",
+                hard=False,
+            )
         return operation
 
     def run(self) -> dict[str, ProtocolOperation]:

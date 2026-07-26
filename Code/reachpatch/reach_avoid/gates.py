@@ -38,8 +38,6 @@ def raw_avoid_reasons(
         reasons.append("FORBIDDEN_EDIT")
     if oracle_contamination:
         reasons.append("ORACLE_CONTAMINATION")
-    if not diff_safety_pass:
-        reasons.append("DIFF_SAFETY_NOT_CLOSED")
     old_pass_challenges = {
         item.challenge_id for item in state.outcomes.values()
         if item.status == OutcomeStatus.PASS and item.challenge_id
@@ -55,7 +53,7 @@ def raw_avoid_reasons(
     if lost:
         reasons.append("ESTABLISHED_SUCCESS_LOST")
     if any(
-        item.kind == "PRESERVATION" and item.status != OutcomeStatus.PASS
+        item.kind == "PRESERVATION" and item.status == OutcomeStatus.FAIL and item.stable
         for item in new_outcomes.values()
     ):
         reasons.append("PRESERVATION_FAILURE")
@@ -63,39 +61,58 @@ def raw_avoid_reasons(
 
 
 def in_safe_set(state: ReachAvoidState) -> bool:
-    return state.checkpoint.safe and not _hard_frontiers(state)
+    return state.checkpoint.safe
 
 
 def in_target_set(state: ReachAvoidState) -> bool:
-    requirement_closed = requirement_path_closure(state.requirement_graph).closed
-    binding_closed = compute_binding_path_closure(
-        state.requirement_graph, state.binding_graph
-    ).closed
-    all_hard_pass = all(
-        not cell.hard or cell.terminal_status.value == "PASS"
-        for cell in state.challenge_graph.cells.values()
+    if not state.checkpoint.patch.canonical_diff:
+        return False
+    active_target_ids = {
+        unit.unit_id for unit in state.binding_graph.units.values()
+        if unit.status in {"ACTIVE", "READY"}
+        and state.requirement_graph.leaves[unit.leaf_id].authority_class.value != "PRESERVATION"
+    }
+    active_preservation_ids = {
+        unit.unit_id for unit in state.binding_graph.units.values()
+        if unit.status in {"ACTIVE", "READY"}
+        and state.requirement_graph.leaves[unit.leaf_id].authority_class.value == "PRESERVATION"
+    }
+    by_unit = {
+        unit_id: [item for item in state.outcomes.values() if item.unit_id == unit_id]
+        for unit_id in active_target_ids | active_preservation_ids
+    }
+    active_targets_pass = all(
+        by_unit[unit_id]
+        and all(item.status == OutcomeStatus.PASS for item in by_unit[unit_id])
+        for unit_id in active_target_ids
     )
-    outcomes_complete = bool(state.outcomes) and all(
-        item.status == OutcomeStatus.PASS for item in state.outcomes.values()
+    preservation_pass = all(
+        by_unit[unit_id]
+        and all(item.status == OutcomeStatus.PASS for item in by_unit[unit_id])
+        for unit_id in active_preservation_ids
     )
-    diff_closed = (
-        state.checkpoint.patch.canonical_diff == ""
-        or bool(state.diff_closure_certificates)
-        and state.diff_closure_certificates[-1].diff_challenge_closed
+    stable_counterexamples_pass = not any(
+        item.status == OutcomeStatus.FAIL and item.stable
+        for item in state.outcomes.values()
     )
+    diff_closed = bool(state.runtime_metrics.get("diff_adequacy_closed", False))
     hashes_current = (
         state.binding_graph.requirement_graph_hash == state.requirement_graph.semantic_layer_hash()
         and state.binding_graph.program_graph_hash == state.program_graph.program_hash()
     )
     return all((
         state.checkpoint.safe,
-        requirement_closed,
-        binding_closed,
-        all_hard_pass,
-        outcomes_complete,
+        bool(active_target_ids),
+        active_targets_pass,
+        preservation_pass,
+        stable_counterexamples_pass,
         diff_closed,
         hashes_current,
-        not _hard_frontiers(state),
+        not any(
+            frontier.hard
+            for frontier in state.binding_graph.oracle_frontiers.values()
+        ),
+        not state.runtime_metrics.get("high_value_pending_challenge_ids", ()),
     ))
 
 
@@ -104,7 +121,7 @@ def terminal_avoid_reason(state: ReachAvoidState) -> str | None:
         return "BUDGET_EXHAUSTED"
     if state.termination_status in {
         "NO_LEGAL_ACTION", "ENVIRONMENT_BLOCKED", "SEMANTIC_BLOCKED",
-        "ORACLE_BLOCKED", "LOCALIZATION_BLOCKED",
+        "ORACLE_BLOCKED", "LOCALIZATION_BLOCKED", "GENERATOR_BLOCKED_EXTERNAL",
     }:
         return state.termination_status
     return None

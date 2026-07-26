@@ -3,33 +3,26 @@ from __future__ import annotations
 import argparse
 import json
 import os
-import re
 import shutil
 import subprocess
 import sys
-import threading
 import time
 import traceback
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from dataclasses import replace
 from pathlib import Path
 from typing import Any
-from urllib.error import HTTPError, URLError
-from urllib.request import Request, urlopen
 
-from reachpatch.models.base import stable_id, utc_now
-from reachpatch.models.controller import (
-    RepairAction,
-    RepairPlan,
-    StructuredEditIntent,
-)
-from reachpatch.models.core import Instance
+from reachpatch.models.base import utc_now
+from reachpatch.models.isolation import GenerationInstance, HarnessEvaluationInstance
 from reachpatch.reach_avoid.controller import (
     AnalysisBlocked,
     ReachPatchConfig,
     ReachPatchController,
 )
-from reachpatch.repair.operators import registered_operator
+from reachpatch.repair.deepseek_agent import (
+    DeepSeekHTTPTransport,
+    PersistentDeepSeekAgent,
+)
 
 
 CODE_ROOT = Path(__file__).resolve().parents[2]
@@ -322,275 +315,8 @@ def write_experiment_report(
     return report
 
 
-def _extract_json(text: str) -> dict[str, Any] | None:
-    cleaned = text.strip()
-    if cleaned.startswith("```"):
-        cleaned = re.sub(r"^```(?:json)?\s*", "", cleaned)
-        cleaned = re.sub(r"\s*```$", "", cleaned)
-    try:
-        value = json.loads(cleaned)
-        return value if isinstance(value, dict) else None
-    except json.JSONDecodeError:
-        match = re.search(r"\{.*\}", cleaned, flags=re.DOTALL)
-        if not match:
-            return None
-        try:
-            value = json.loads(match.group(0))
-            return value if isinstance(value, dict) else None
-        except json.JSONDecodeError:
-            return None
-
-
-class DeepSeekActionProvider:
-    """OpenAI-compatible DeepSeek provider constrained to graph edit intents."""
-
-    def __init__(self, key_path: Path, *, model: str, max_concurrency: int = 10) -> None:
-        self.key_path = key_path
-        self.api_key = key_path.read_text(encoding="utf-8").strip()
-        self.base_url = os.environ.get("DEEPSEEK_BASE_URL", "https://api.deepseek.com").rstrip("/")
-        self.model = model
-        self._semaphore = threading.BoundedSemaphore(max_concurrency)
-        self._lock = threading.Lock()
-        self.calls: list[dict[str, Any]] = []
-
-    def __call__(self, state, intent, session):
-        if not self.api_key:
-            return None
-        prompt = self._prompt(state, intent)
-        started = time.monotonic()
-        record: dict[str, Any] = {
-            "case_id": state.instance_id,
-            "intent_id": intent.intent_id,
-            "mechanism": intent.root_mechanism_class,
-            "status": "REQUESTED",
-        }
-        try:
-            with self._semaphore:
-                payload = {
-                    "model": self.model,
-                    "temperature": 0,
-                    "max_tokens": 1800,
-                    "messages": [
-                        {
-                            "role": "system",
-                            "content": (
-                                "You are a constrained program-repair planner. "
-                                "Return JSON only. You may select exactly one listed AST node "
-                                "and one registered operator. Never invent node ids or file paths. "
-                                "If no safe edit is justified, return {\"action\":null}."
-                            ),
-                        },
-                        {"role": "user", "content": prompt},
-                    ],
-                }
-                request = Request(
-                    f"{self.base_url}/chat/completions",
-                    data=json.dumps(payload).encode("utf-8"),
-                    headers={
-                        "Authorization": f"Bearer {self.api_key}",
-                        "Content-Type": "application/json",
-                    },
-                    method="POST",
-                )
-                with urlopen(request, timeout=180) as response:
-                    raw = json.loads(response.read().decode("utf-8"))
-            content = raw["choices"][0]["message"]["content"]
-            decision = _extract_json(str(content))
-            action = self._action_from_decision(state, intent, decision)
-            record.update({"status": "ACTION" if action else "NO_ACTION", "decision": decision})
-            return action
-        except HTTPError as exc:
-            try:
-                body = exc.read().decode("utf-8", errors="replace")[:4000]
-            except OSError:
-                body = ""
-            record.update({
-                "status": "ERROR",
-                "error": f"HTTPError {exc.code}: {body or exc.reason}",
-            })
-            return None
-        except (URLError, TimeoutError, KeyError, TypeError, ValueError, OSError) as exc:
-            record.update({"status": "ERROR", "error": f"{type(exc).__name__}: {exc}"})
-            return None
-        finally:
-            record["duration_seconds"] = time.monotonic() - started
-            with self._lock:
-                self.calls.append(record)
-
-    @staticmethod
-    def _node_view(node_id: str, node, source: str) -> dict[str, Any]:
-        attrs = node.attributes
-        return {
-            "node_id": node_id,
-            "kind": node.kind,
-            "label": node.label,
-            "file": attrs.get("file"),
-            "line": attrs.get("line"),
-            "end_line": attrs.get("end_line"),
-            "ast_kind": attrs.get("ast_kind"),
-            "source": source,
-            "qualified_name": attrs.get("qualified_name"),
-        }
-
-    def _prompt(self, state, intent) -> str:
-        node_ids = set(intent.repair_cut_ids)
-        for unit_id in intent.losing_path_obligation_ids:
-            for unit in state.binding_graph.units.values():
-                if unit.path_obligation_id == unit_id:
-                    node_ids.update(unit.interaction_path_ids)
-        nodes = [
-            self._node_view(
-                node_id,
-                state.program_graph.nodes[node_id],
-                state.program_graph.source_segment(node_id),
-            )
-            for node_id in sorted(node_ids)
-            if node_id in state.program_graph.nodes
-        ]
-        nodes = nodes[:120]
-        outcomes = [
-            {
-                "status": item.status.value,
-                "kind": item.kind,
-                "failure_origin": item.failure_origin,
-                "observation": item.observation,
-            }
-            for item in state.outcomes.values()
-            if item.path_obligation_id in intent.losing_path_obligation_ids
-        ]
-        issue = ""
-        for evidence in state.semantic_graph.evidence.values():
-            if evidence.kind.value in {"ISSUE_SPEC", "ISSUE_EXAMPLE"}:
-                issue += evidence.content[:3000] + "\n"
-        return json.dumps(
-            {
-                "instance_id": state.instance_id,
-                "issue_public_evidence": issue[:6000],
-                "mechanism": intent.root_mechanism_class,
-                "losing_path_obligation_ids": list(intent.losing_path_obligation_ids),
-                "causal_cut_ids": list(intent.repair_cut_ids),
-                "outcomes": outcomes[:20],
-                "allowed_operators": [
-                    "replace_return", "replace_guard", "replace_node",
-                    "delete_node", "insert_before",
-                ],
-                "candidate_nodes": nodes,
-                "output_schema": {
-                    "action": {
-                        "operator": "registered operator",
-                        "target_node_id": "one candidate node id",
-                        "replacement": "complete replacement source text",
-                        "reads": ["optional symbols"],
-                    }
-                },
-            },
-            sort_keys=True,
-        )
-
-    def _action_from_decision(self, state, intent, decision: dict[str, Any] | None):
-        if not decision or not decision.get("action"):
-            return None
-        item = decision["action"]
-        if not isinstance(item, dict):
-            return None
-        operator_name = str(item.get("operator", ""))
-        target_id = str(item.get("target_node_id", ""))
-        replacement = item.get("replacement")
-        if not isinstance(replacement, str) or not target_id:
-            return None
-        operator = registered_operator(operator_name)
-        node = state.program_graph.nodes.get(target_id)
-        if operator is None or node is None or target_id not in set(intent.repair_cut_ids):
-            return None
-        attrs = node.attributes
-        ast_kind = str(attrs.get("ast_kind", node.kind.title()))
-        if ast_kind not in operator.allowed_ast_kinds:
-            return None
-        relative_path = str(attrs.get("file", ""))
-        source = state.program_graph.source_segment(target_id)
-        line = int(attrs.get("line", 0))
-        end_line = int(attrs.get("end_line", line))
-        if not relative_path or not source or line < 1:
-            return None
-        edit = StructuredEditIntent(
-            edit_id=stable_id("deepseek-edit", intent.intent_id, target_id, replacement),
-            operator=operator_name,
-            relative_path=relative_path,
-            target_node_id=target_id,
-            expected_span=(line, end_line),
-            expected_source=source,
-            replacement=replacement,
-            payload={
-                "ast_kind": ast_kind,
-                "column": int(attrs.get("column", 0)),
-                "end_column": int(attrs.get("end_column", 0)),
-                "deepseek": True,
-            },
-            reads=tuple(str(value) for value in item.get("reads", ())),
-            writes=(target_id,),
-            control_flow_effects=operator.control_flow_effects,
-            exception_effects=operator.exception_effects,
-            object_shape_effects=operator.object_shape_effects,
-        )
-        causal_cut = tuple(sorted(set(intent.repair_cut_ids) | {target_id}))
-        coverage = {
-            path_id: {
-                "account": "REPAIR",
-                "changed_node_ids": [target_id],
-                "causal_cut_ids": list(causal_cut),
-                "frontier_id": None,
-            }
-            for path_id in intent.complete_component_path_ids
-        }
-        plan = RepairPlan(
-            plan_id=stable_id("deepseek-plan", intent.intent_id, target_id, replacement),
-            session_id=stable_id("deepseek-session", state.episode_id),
-            intent_id=intent.intent_id,
-            checkpoint_id=intent.source_checkpoint_id,
-            losing_core_id=intent.losing_core_id,
-            component_id=intent.component_id,
-            root_mechanism=intent.root_mechanism_class,
-            repair_cut_ids=causal_cut,
-            ordered_edit_intents=(edit,),
-            coverage_by_path=coverage,
-            protected_pass_pairs=intent.protected_pass_pairs,
-            preservation_ids=intent.preservation_ids,
-            expected_graph_invalidations=(target_id,),
-            forbidden_fingerprints=intent.forbidden_fingerprints,
-            atomic_compound=False,
-        )
-        return RepairAction(
-            action_id=stable_id("deepseek-action", plan.plan_id),
-            intent_id=intent.intent_id,
-            operator=operator_name,
-            causal_cut_ids=causal_cut,
-            edit_intents=(edit,),
-            read_set=tuple(sorted(edit.reads)),
-            write_set=(relative_path,),
-            expected_impact_node_ids=tuple(sorted({
-                node_id
-                for unit in state.binding_graph.units.values()
-                if unit.path_obligation_id in intent.losing_path_obligation_ids
-                for node_id in unit.impact_cone_node_ids
-            })),
-            plan=plan,
-        )
-
-
-def _public_instance(raw: dict[str, Any], tree: Path) -> Instance:
-    return Instance(
-        instance_id=str(raw["instance_id"]),
-        repository=str(tree),
-        base_commit=str(raw["base_commit"]),
-        issue=str(raw["problem_statement"]),
-        public_metadata={
-            "repo": raw["repo"],
-            "version": raw.get("version"),
-            "hints_text": raw.get("hints_text", ""),
-            "environment_setup_commit": raw.get("environment_setup_commit"),
-            "generation_source": "generation_public_instances.jsonl",
-        },
-    )
+def _public_instance(raw: dict[str, Any], tree: Path):
+    return GenerationInstance.from_public_record(raw).to_controller_instance(tree)
 
 
 def _component_effectiveness(state) -> list[dict[str, Any]]:
@@ -654,7 +380,11 @@ def _graph_summary(state) -> dict[str, Any]:
     }
 
 
-def _generate_one(raw: dict[str, Any], provider: DeepSeekActionProvider | None, max_revisions: int) -> dict[str, Any]:
+def _generate_one(
+    raw: dict[str, Any],
+    transport: DeepSeekHTTPTransport,
+    max_revisions: int,
+) -> dict[str, Any]:
     case_id = str(raw["instance_id"])
     tree = TREE_ROOT / case_id
     run_root = RUN_ROOT / case_id
@@ -678,13 +408,14 @@ def _generate_one(raw: dict[str, Any], provider: DeepSeekActionProvider | None, 
         run_root.rename(interrupted_root)
     try:
         instance = _public_instance(raw, tree)
+        agent = PersistentDeepSeekAgent(transport, max_tool_turns=12)
         controller = ReachPatchController(
             config=ReachPatchConfig(
-                selection_mode="certified",
+                selection_mode="hypothesis_set",
                 max_submitted_revisions=max_revisions,
-                max_internal_tool_turns_per_revision=4,
+                max_internal_tool_turns_per_revision=12,
             ),
-            action_provider=provider,
+            generator_agent=agent,
             implementation_root=CODE_ROOT,
         )
         state, certificate = controller.run(instance, run_root=run_root)
@@ -740,8 +471,7 @@ def _generate_one(raw: dict[str, Any], provider: DeepSeekActionProvider | None, 
             result["analysis_resources"] = {}
             result["analysis_stats"] = {}
             result["graph_summary"] = {}
-    if provider is not None:
-        result["deepseek_calls"] = list(provider.calls)
+    result["deepseek_calls"] = list(transport.calls)
     result["finished_at"] = utc_now()
     _write_json(result_path, result)
     return result
@@ -894,8 +624,16 @@ def generate_case(instance_id: str, key_path: Path, model: str, max_revisions: i
         item for item in _read_jsonl(PUBLIC_PATH)
         if str(item["instance_id"]) == instance_id
     )
-    provider = DeepSeekActionProvider(key_path, model=model, max_concurrency=1)
-    result = _generate_one(raw, provider, max_revisions)
+    api_key = key_path.read_text(encoding="utf-8").strip()
+    if not api_key:
+        raise ValueError("DeepSeek API key is empty")
+    transport = DeepSeekHTTPTransport(
+        api_key,
+        model=model,
+        base_url=os.environ.get("DEEPSEEK_BASE_URL", "https://api.deepseek.com"),
+        max_concurrency=1,
+    )
+    result = _generate_one(raw, transport, max_revisions)
     print(json.dumps({"instance_id": instance_id, "status": result.get("status")}, sort_keys=True), flush=True)
     return result
 
@@ -940,17 +678,6 @@ def _run_command(command: list[str], cwd: Path, timeout: int) -> dict[str, Any]:
         }
 
 
-def _list_field(raw: dict[str, Any], name: str) -> list[str]:
-    value = raw.get(name, [])
-    if isinstance(value, str):
-        try:
-            parsed = json.loads(value)
-            return [str(item) for item in parsed] if isinstance(parsed, list) else []
-        except json.JSONDecodeError:
-            return []
-    return [str(item) for item in value] if isinstance(value, list) else []
-
-
 def _apply_patch(base_tree: Path, patch_path: Path, target: Path) -> dict[str, Any]:
     shutil.copytree(base_tree, target, symlinks=True)
     patch_text = patch_path.read_text(encoding="utf-8") if patch_path.is_file() else ""
@@ -968,6 +695,9 @@ def _harness_one(raw: dict[str, Any], generation: dict[str, Any], timeout: int) 
     root.mkdir(parents=True)
     base_tree = TREE_ROOT / case_id
     patch_path = Path(str(generation.get("patch_path", "")))
+    evaluation = HarnessEvaluationInstance.from_official_record(
+        raw, patch_path=patch_path
+    )
     result: dict[str, Any] = {
         "instance_id": case_id,
         "generation_status": generation.get("status"),
@@ -978,14 +708,15 @@ def _harness_one(raw: dict[str, Any], generation: dict[str, Any], timeout: int) 
     if not base_tree.is_dir() or not patch_path.is_file():
         result.update({"status": "BLOCKED_GENERATION", "error": "missing base tree or generated patch"})
         return result
+    _write_json(root / "harness_evaluation_instance.json", evaluation.to_dict())
     patch_result = _apply_patch(base_tree, patch_path, root / "patched")
     result["patch_apply"] = patch_result
     if patch_result.get("status") != "PASS":
         result.update({"status": "FAIL_PATCH_APPLY", "finished_at": utc_now()})
         return result
-    fail_to_pass = _list_field(raw, "FAIL_TO_PASS")
-    pass_to_pass = _list_field(raw, "PASS_TO_PASS")
-    repo = str(raw.get("repo", ""))
+    fail_to_pass = list(evaluation.fail_to_pass)
+    pass_to_pass = list(evaluation.pass_to_pass)
+    repo = evaluation.repository_name
     if repo == "django/django":
         runner = [sys.executable, "tests/runtests.py"]
     else:
@@ -1035,7 +766,7 @@ def main() -> int:
     sub = parser.add_subparsers(dest="command", required=True)
     gen = sub.add_parser("generate")
     gen.add_argument("--workers", type=int, default=10)
-    gen.add_argument("--max-revisions", type=int, default=2)
+    gen.add_argument("--max-revisions", type=int, default=10)
     gen.add_argument("--model", default=os.environ.get("DEEPSEEK_MODEL", "deepseek-v4-pro"))
     gen.add_argument("--key-path", default="/home/slt/ReachPatch/ds_pwd.txt")
     gen.add_argument("--only", action="append", default=[])
@@ -1049,7 +780,7 @@ def main() -> int:
     case.add_argument("--instance-id", required=True)
     case.add_argument("--key-path", default="/home/slt/ReachPatch/ds_pwd.txt")
     case.add_argument("--model", default=os.environ.get("DEEPSEEK_MODEL", "deepseek-v4-pro"))
-    case.add_argument("--max-revisions", type=int, default=2)
+    case.add_argument("--max-revisions", type=int, default=10)
     har = sub.add_parser("harness")
     har.add_argument("--workers", type=int, default=10)
     har.add_argument("--timeout", type=int, default=900)

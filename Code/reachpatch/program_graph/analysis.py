@@ -7,6 +7,7 @@ from typing import Iterable
 
 from reachpatch.models.base import stable_id
 from reachpatch.models.graph import GraphNode
+from reachpatch.program_graph.budget import GraphBudget
 from reachpatch.program_graph.models import CFGRecord, ProgramGraph
 
 
@@ -80,6 +81,7 @@ class ModuleAnalysis:
     ast_node_ids: dict[int, str]
     parent_ids: dict[int, str]
     qualified_by_ast: dict[int, str]
+    active_callable_ast_ids: set[int]
 
 
 class DefinitionScopeAnalyzer(ast.NodeVisitor):
@@ -95,6 +97,9 @@ class DefinitionScopeAnalyzer(ast.NodeVisitor):
         tree: ast.Module,
         is_test: bool,
         declarations_only: bool = False,
+        active_callable_ids: set[str] | None = None,
+        precise: bool = True,
+        budget: GraphBudget | None = None,
     ) -> None:
         self.graph = graph
         self.relative_path = relative_path
@@ -103,6 +108,10 @@ class DefinitionScopeAnalyzer(ast.NodeVisitor):
         self.tree = tree
         self.is_test = is_test
         self.declarations_only = declarations_only
+        self.active_callable_ids = active_callable_ids
+        self.precise = precise
+        self.budget = budget
+        self.active_callable_ast_ids: set[int] = set()
         self.ast_node_ids: dict[int, str] = {}
         self.parent_ids: dict[int, str] = {}
         self.qualified_by_ast: dict[int, str] = {}
@@ -140,6 +149,10 @@ class DefinitionScopeAnalyzer(ast.NodeVisitor):
         label: str,
         **attributes: object,
     ) -> GraphNode:
+        if self.budget is not None and not self.budget.check(
+            nodes=len(self.graph.nodes), edges=len(self.graph.edges)
+        ):
+            raise GraphBudgetReached(self.budget.truncated_reason or "GRAPH_LIMIT")
         location = node_location(self.relative_path, node)
         node_id = stable_id(
             "program-node",
@@ -202,7 +215,10 @@ class DefinitionScopeAnalyzer(ast.NodeVisitor):
                     self._visit_index_symbols(child)
         else:
             for child in node.body:
-                self.visit(child)
+                if isinstance(child, (ast.ClassDef, ast.FunctionDef, ast.AsyncFunctionDef)):
+                    self.visit(child)
+                elif self.active_callable_ids is None and self.precise:
+                    self.visit(child)
         self.container_ids.pop()
         self.scope_names.pop()
 
@@ -225,7 +241,17 @@ class DefinitionScopeAnalyzer(ast.NodeVisitor):
             async_function=isinstance(node, ast.AsyncFunctionDef),
         )
         self.qualified_by_ast[id(node)] = qualified
-        if not self.declarations_only:
+        active = (
+            self.precise
+            and (
+                self.active_callable_ids is None
+                or qualified in self.active_callable_ids
+                or node.name in self.active_callable_ids
+            )
+        )
+        if active:
+            self.active_callable_ast_ids.add(id(node))
+        if not self.declarations_only and active:
             self.graph.add_relation("defines", [self.container_ids[-1]], [record.node_id])
         if not self.declarations_only:
             for decorator in node.decorator_list:
@@ -243,7 +269,7 @@ class DefinitionScopeAnalyzer(ast.NodeVisitor):
             arguments.append(node.args.vararg)
         if node.args.kwarg:
             arguments.append(node.args.kwarg)
-        for argument in arguments:
+        for argument in arguments if (self.declarations_only or active) else ():
             argument_qualified = f"{qualified}.{argument.arg}"
             parameter = self._make_node(
                 argument,
@@ -261,9 +287,13 @@ class DefinitionScopeAnalyzer(ast.NodeVisitor):
                     self.visit(child)
                 else:
                     self._visit_index_symbols(child)
-        else:
+        elif active:
             for child in node.body:
                 self.visit(child)
+        else:
+            for child in node.body:
+                if isinstance(child, (ast.ClassDef, ast.FunctionDef, ast.AsyncFunctionDef)):
+                    self.visit(child)
         self.container_ids.pop()
         self.scope_names.pop()
 
@@ -394,6 +424,14 @@ class DefinitionScopeAnalyzer(ast.NodeVisitor):
             else:
                 self._visit_index_symbols(node)
             return
+        if (
+            isinstance(node, ast.Module)
+            and self.active_callable_ids is not None
+        ):
+            for child in node.body:
+                if isinstance(child, (ast.ClassDef, ast.FunctionDef, ast.AsyncFunctionDef)):
+                    self.visit(child)
+            return
         if id(node) not in self.ast_node_ids and isinstance(node, (ast.expr, ast.stmt)):
             kind = "statement" if isinstance(node, ast.stmt) else "expression"
             if isinstance(node, (ast.List, ast.Tuple, ast.Dict, ast.Set)):
@@ -411,19 +449,49 @@ class DefinitionScopeAnalyzer(ast.NodeVisitor):
             ast_node_ids=self.ast_node_ids,
             parent_ids=self.parent_ids,
             qualified_by_ast=self.qualified_by_ast,
+            active_callable_ast_ids=self.active_callable_ast_ids,
         )
 
 
+class GraphBudgetReached(RuntimeError):
+    """Stops a precise graph pass while preserving the completed partial graph."""
+
+
+def iter_callable_body_without_nested_callables(
+    callable_ast: ast.FunctionDef | ast.AsyncFunctionDef | ast.Lambda,
+) -> Iterable[ast.AST]:
+    """Iterate one callable without charging nested callable/class bodies twice."""
+
+    stack = list(reversed(list(ast.iter_child_nodes(callable_ast))))
+    while stack:
+        node = stack.pop()
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda, ast.ClassDef)):
+            continue
+        yield node
+        stack.extend(reversed(list(ast.iter_child_nodes(node))))
+
+
 class CFGBuilder:
-    def __init__(self, graph: ProgramGraph, analysis: ModuleAnalysis) -> None:
+    def __init__(
+        self,
+        graph: ProgramGraph,
+        analysis: ModuleAnalysis,
+        *,
+        budget: GraphBudget | None = None,
+    ) -> None:
         self.graph = graph
         self.analysis = analysis
+        self.budget = budget
         self.edge_ids_by_callable: dict[str, list[str]] = defaultdict(list)
 
     def _node_id(self, node: ast.AST) -> str | None:
         return self.analysis.ast_node_ids.get(id(node))
 
     def _edge(self, source: str, target: str, condition: str = "True", **attributes: object) -> None:
+        if self.budget is not None and not self.budget.check(
+            nodes=len(self.graph.nodes), edges=len(self.graph.edges)
+        ):
+            return
         edge = self.graph.add_relation(
             "control_flow",
             [source],
@@ -451,67 +519,86 @@ class CFGBuilder:
     def _statement_entry(self, node: ast.stmt) -> str | None:
         return self._node_id(node)
 
-    def _build_block(self, statements: list[ast.stmt], following: str | None) -> tuple[str | None, set[str]]:
-        if not statements:
-            return following, set()
-        entries = [self._statement_entry(statement) for statement in statements]
-        entries = [entry for entry in entries if entry is not None]
+    def _build_iterative(self, statements: list[ast.stmt]) -> tuple[str | None, set[str]]:
+        entry = next((self._statement_entry(item) for item in statements if self._statement_entry(item)), None)
         exits: set[str] = set()
-        for index, statement in enumerate(statements):
-            node_id = self._statement_entry(statement)
-            if node_id is None:
-                continue
-            next_id = next(
-                (self._statement_entry(item) for item in statements[index + 1:] if self._statement_entry(item)),
-                following,
-            )
-            if isinstance(statement, ast.If):
-                true_entry, true_exits = self._build_block(statement.body, next_id)
-                false_entry, false_exits = self._build_block(statement.orelse, next_id)
-                if true_entry:
-                    self._edge(node_id, true_entry, ast.unparse(statement.test), branch_outcome=True)
-                if false_entry:
-                    self._edge(node_id, false_entry, f"not ({ast.unparse(statement.test)})", branch_outcome=False)
-                exits |= true_exits | false_exits
-            elif isinstance(statement, (ast.For, ast.AsyncFor, ast.While)):
-                predicate = (
-                    ast.unparse(statement.test)
-                    if isinstance(statement, ast.While)
-                    else f"iterable({ast.unparse(statement.iter)})"
+        worklist: list[tuple[list[ast.stmt], str | None, str | None, str | None]] = [
+            (statements, None, None, None)
+        ]
+        while worklist:
+            if self.budget is not None and not self.budget.check(
+                nodes=len(self.graph.nodes), edges=len(self.graph.edges)
+            ):
+                break
+            block, following, loop_header, loop_exit = worklist.pop()
+            for index, statement in enumerate(block):
+                if self.budget is not None and not self.budget.check(
+                    nodes=len(self.graph.nodes), edges=len(self.graph.edges)
+                ):
+                    return entry, exits
+                node_id = self._statement_entry(statement)
+                if node_id is None:
+                    continue
+                next_id = next(
+                    (self._statement_entry(item) for item in block[index + 1:] if self._statement_entry(item)),
+                    following,
                 )
-                body_entry, body_exits = self._build_block(statement.body, node_id)
-                if body_entry:
+                if isinstance(statement, ast.If):
+                    true_entry = next((self._statement_entry(item) for item in statement.body if self._statement_entry(item)), next_id)
+                    false_entry = next((self._statement_entry(item) for item in statement.orelse if self._statement_entry(item)), next_id)
+                    if true_entry:
+                        self._edge(node_id, true_entry, ast.unparse(statement.test), branch_outcome=True)
+                    if false_entry:
+                        self._edge(node_id, false_entry, f"not ({ast.unparse(statement.test)})", branch_outcome=False)
+                    worklist.append((statement.body, next_id, loop_header, loop_exit))
+                    worklist.append((statement.orelse, next_id, loop_header, loop_exit))
+                elif isinstance(statement, (ast.For, ast.AsyncFor, ast.While)):
+                    predicate = ast.unparse(statement.test) if isinstance(statement, ast.While) else f"iterable({ast.unparse(statement.iter)})"
+                    body_entry = next((self._statement_entry(item) for item in statement.body if self._statement_entry(item)), node_id)
                     self._edge(node_id, body_entry, predicate, loop_class="one_or_many")
-                if next_id:
-                    self._edge(node_id, next_id, f"not ({predicate})", loop_class="zero_or_exit")
-                for exit_id in body_exits:
-                    if exit_id != node_id:
-                        self._edge(exit_id, node_id, "loop_back", loop_class="many")
-            elif isinstance(statement, ast.Try):
-                body_entry, body_exits = self._build_block(statement.body, next_id)
-                if body_entry:
-                    self._edge(node_id, body_entry, "normal", exit_kind="normal")
-                for handler in statement.handlers:
-                    handler_entry, handler_exits = self._build_block(handler.body, next_id)
-                    if handler_entry:
-                        exception_name = ast.unparse(handler.type) if handler.type else "BaseException"
-                        edge = self.graph.add_relation(
-                            "exception_flow",
-                            [node_id],
-                            [handler_entry],
-                            condition=f"raises({exception_name})",
-                            attributes={"exception": exception_name},
-                        )
-                        self.edge_ids_by_callable[self._callable_owner(node_id) or node_id].append(edge.edge_id)
-                    exits |= handler_exits
-                exits |= body_exits
-            elif isinstance(statement, (ast.Return, ast.Raise)):
-                exits.add(node_id)
-            elif next_id:
-                self._edge(node_id, next_id)
-            else:
-                exits.add(node_id)
-        return (entries[0] if entries else following), exits
+                    if next_id:
+                        self._edge(node_id, next_id, f"not ({predicate})", loop_class="zero_or_exit")
+                    worklist.append((statement.body, node_id, node_id, next_id))
+                    worklist.append((statement.orelse, next_id, loop_header, loop_exit))
+                elif isinstance(statement, ast.Try):
+                    final_entry = next((self._statement_entry(item) for item in statement.finalbody if self._statement_entry(item)), next_id)
+                    body_entry = next((self._statement_entry(item) for item in statement.body if self._statement_entry(item)), final_entry)
+                    if body_entry:
+                        self._edge(node_id, body_entry, "normal", exit_kind="normal")
+                    for handler in statement.handlers:
+                        handler_entry = next((self._statement_entry(item) for item in handler.body if self._statement_entry(item)), final_entry)
+                        if handler_entry:
+                            exception_name = ast.unparse(handler.type) if handler.type else "BaseException"
+                            edge = self.graph.add_relation("exception_flow", [node_id], [handler_entry], condition=f"raises({exception_name})", attributes={"exception": exception_name})
+                            self.edge_ids_by_callable[self._callable_owner(node_id) or node_id].append(edge.edge_id)
+                        worklist.append((handler.body, final_entry, loop_header, loop_exit))
+                    worklist.append((statement.body, final_entry, loop_header, loop_exit))
+                    worklist.append((statement.orelse, final_entry, loop_header, loop_exit))
+                    worklist.append((statement.finalbody, next_id, loop_header, loop_exit))
+                elif isinstance(statement, (ast.With, ast.AsyncWith)):
+                    body_entry = next((self._statement_entry(item) for item in statement.body if self._statement_entry(item)), next_id)
+                    if body_entry:
+                        self._edge(node_id, body_entry, "context_enter")
+                    worklist.append((statement.body, next_id, loop_header, loop_exit))
+                elif isinstance(statement, ast.Break):
+                    if loop_exit:
+                        self._edge(node_id, loop_exit, "break")
+                    else:
+                        exits.add(node_id)
+                elif isinstance(statement, ast.Continue):
+                    if loop_header:
+                        self._edge(node_id, loop_header, "continue")
+                    else:
+                        exits.add(node_id)
+                elif isinstance(statement, (ast.Return, ast.Raise)):
+                    exits.add(node_id)
+                elif next_id:
+                    self._edge(node_id, next_id)
+                elif loop_header:
+                    self._edge(node_id, loop_header, "loop_back", loop_class="many")
+                else:
+                    exits.add(node_id)
+        return entry, exits
 
     def build(self) -> dict[str, CFGRecord]:
         callables = [
@@ -520,15 +607,17 @@ class CFGBuilder:
             if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
         ]
         for callable_ast in callables:
+            if id(callable_ast) not in self.analysis.active_callable_ast_ids:
+                continue
             callable_id = self._node_id(callable_ast)
             if callable_id is None:
                 continue
-            entry, exits = self._build_block(callable_ast.body, None)
+            entry, exits = self._build_iterative(callable_ast.body)
             if entry:
                 self._edge(callable_id, entry, "entry")
             statement_ids = tuple(
                 node_id
-                for node in ast.walk(callable_ast)
+                for node in iter_callable_body_without_nested_callables(callable_ast)
                 if isinstance(node, ast.stmt)
                 and (node_id := self._node_id(node)) is not None
             )
@@ -543,9 +632,16 @@ class CFGBuilder:
 
 
 class DefUseAnalyzer:
-    def __init__(self, graph: ProgramGraph, analysis: ModuleAnalysis) -> None:
+    def __init__(
+        self,
+        graph: ProgramGraph,
+        analysis: ModuleAnalysis,
+        *,
+        budget: GraphBudget | None = None,
+    ) -> None:
         self.graph = graph
         self.analysis = analysis
+        self.budget = budget
 
     def run(self) -> None:
         for callable_ast in [
@@ -553,6 +649,12 @@ class DefUseAnalyzer:
             for node in ast.walk(self.analysis.tree)
             if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
         ]:
+            if self.budget is not None and not self.budget.check(
+                nodes=len(self.graph.nodes), edges=len(self.graph.edges)
+            ):
+                return
+            if id(callable_ast) not in self.analysis.active_callable_ast_ids:
+                continue
             last_defs: dict[str, set[str]] = defaultdict(set)
             parameter_by_name = {
                 argument.arg: self.analysis.ast_node_ids[id(argument)]
@@ -566,7 +668,7 @@ class DefUseAnalyzer:
             for name, node_id in parameter_by_name.items():
                 last_defs[name].add(node_id)
             ordered_nodes = sorted(
-                ast.walk(callable_ast),
+                iter_callable_body_without_nested_callables(callable_ast),
                 key=lambda item: (
                     int(getattr(item, "lineno", 0)),
                     int(getattr(item, "col_offset", 0)),
@@ -574,6 +676,10 @@ class DefUseAnalyzer:
                 ),
             )
             for node in ordered_nodes:
+                if self.budget is not None and not self.budget.check(
+                    nodes=len(self.graph.nodes), edges=len(self.graph.edges)
+                ):
+                    return
                 if isinstance(node, ast.Name):
                     node_id = self.analysis.ast_node_ids.get(id(node))
                     if node_id is None:
@@ -592,7 +698,7 @@ class DefUseAnalyzer:
                     relation = "state_read" if isinstance(context, ast.Load) else "state_write"
                     owner_nodes = [
                         child_id
-                        for child in ast.walk(node.value)
+                        for child in iter_ast_without_nested_callables(node.value)
                         if (child_id := self.analysis.ast_node_ids.get(id(child))) is not None
                     ]
                     if owner_nodes:
@@ -608,3 +714,39 @@ class DefUseAnalyzer:
                     exception_id = self.analysis.ast_node_ids.get(id(node.exc))
                     if raise_id and exception_id:
                         self.graph.add_relation("raises", [exception_id], [raise_id])
+
+
+def iter_ast_without_nested_callables(root: ast.AST) -> Iterable[ast.AST]:
+    stack = [root]
+    while stack:
+        node = stack.pop()
+        yield node
+        if node is not root and isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda, ast.ClassDef)):
+            continue
+        stack.extend(reversed(list(ast.iter_child_nodes(node))))
+
+
+def build_cfg_iterative(
+    callable_ast: ast.FunctionDef | ast.AsyncFunctionDef,
+    analysis: ModuleAnalysis,
+    graph: ProgramGraph,
+) -> CFGRecord | None:
+    builder = CFGBuilder(graph, analysis)
+    callable_id = analysis.ast_node_ids.get(id(callable_ast))
+    if callable_id is None or id(callable_ast) not in analysis.active_callable_ast_ids:
+        return None
+    entry, exits = builder._build_iterative(callable_ast.body)
+    if entry:
+        builder._edge(callable_id, entry, "entry")
+    record = CFGRecord(
+        callable_id=callable_id, entry_node_id=entry or callable_id,
+        exit_node_ids=tuple(sorted(exits or {callable_id})),
+        statement_node_ids=tuple(sorted({
+            node_id for node in iter_callable_body_without_nested_callables(callable_ast)
+            if isinstance(node, ast.stmt)
+            and (node_id := analysis.ast_node_ids.get(id(node))) is not None
+        })),
+        edge_ids=tuple(sorted(set(builder.edge_ids_by_callable.get(callable_id, ())))),
+    )
+    graph.add_cfg(record)
+    return record

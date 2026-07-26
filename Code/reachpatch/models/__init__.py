@@ -12,11 +12,16 @@ from .controller import (
     WorkingPatch,
 )
 from .enums import Authority, OutcomeStatus
+from .isolation import (
+    GenerationInstance, HarnessEvaluationInstance, assert_generation_payload,
+)
 
 __all__ = [
     "Authority",
     "CounterexamplePacket",
     "IncumbentCheckpoint",
+    "GenerationInstance",
+    "HarnessEvaluationInstance",
     "OutcomeStatus",
     "ReachAvoidState",
     "RepairAction",
@@ -26,6 +31,7 @@ __all__ = [
     "TransitionCertificate",
     "WorkingPatch",
     "canonical_json",
+    "assert_generation_payload",
     "content_hash",
     "stable_id",
 ]
