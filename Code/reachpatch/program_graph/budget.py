@@ -73,10 +73,6 @@ class GraphBudget:
             reason = "NODE_LIMIT"
         elif edges >= self.max_edges:
             reason = "EDGE_LIMIT"
-        elif self.files >= self.max_files:
-            reason = "FILE_LIMIT"
-        elif self.functions >= self.max_functions:
-            reason = "FUNCTION_LIMIT"
         elif current_rss_mib() >= self.max_rss_mib:
             reason = "RSS_LIMIT"
         if reason is not None:
@@ -85,12 +81,18 @@ class GraphBudget:
         return True
 
     def consume_file(self, *, nodes: int = 0, edges: int = 0) -> bool:
+        if self.files >= self.max_files:
+            self.truncated_reason = self.truncated_reason or "FILE_LIMIT"
+            return False
         if not self.check(nodes=nodes, edges=edges):
             return False
         self.files += 1
         return True
 
     def consume_function(self, *, nodes: int = 0, edges: int = 0) -> bool:
+        if self.functions >= self.max_functions:
+            self.truncated_reason = self.truncated_reason or "FUNCTION_LIMIT"
+            return False
         if not self.check(nodes=nodes, edges=edges):
             return False
         self.functions += 1

@@ -6,13 +6,36 @@ import os
 import subprocess
 import sys
 import time
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterable
 
 from reachpatch.execution.reconcile import ActualDiff
-from reachpatch.models.base import stable_id
+from reachpatch.models.base import SerializableRecord, stable_id
 from reachpatch.models.controller import MechanicalCheck
 from reachpatch.models.enums import OutcomeStatus
+
+
+@dataclass(frozen=True, slots=True)
+class PublicCheckComparison(SerializableRecord):
+    check_id: str
+    command: tuple[str, ...]
+    classification: str
+    baseline_return_code: int | None
+    patched_return_code: int | None
+    baseline_stdout: str
+    baseline_stderr: str
+    patched_stdout: str
+    patched_stderr: str
+    duration_seconds: float
+
+    @property
+    def preservation_regression(self) -> bool:
+        return self.classification == "PRESERVATION_REGRESSION"
+
+    @property
+    def target_fixed(self) -> bool:
+        return self.classification == "TARGET_FIXED"
 
 
 def _source_hash(root: Path) -> str:
@@ -217,6 +240,87 @@ def run_mechanical_checks(
         for command in commands
     )
     return tuple(checks)
+
+
+def run_public_checks_paired(
+    baseline_root: str | Path,
+    patched_root: str | Path,
+    commands: Iterable[Iterable[str]],
+    *,
+    timeout_seconds: float = 120.0,
+) -> tuple[PublicCheckComparison, ...]:
+    """Run public checks on both trees and classify change, not just exit status."""
+
+    baseline = Path(baseline_root).resolve()
+    patched = Path(patched_root).resolve()
+    environment = {
+        **os.environ,
+        "PYTHONDONTWRITEBYTECODE": "1",
+        "PYTHONHASHSEED": "0",
+    }
+
+    def execute(command: tuple[str, ...], root: Path):
+        try:
+            process = subprocess.run(
+                command, cwd=root, env=environment, capture_output=True,
+                text=True, timeout=timeout_seconds, check=False, shell=False,
+            )
+            return process.returncode, process.stdout[-12000:], process.stderr[-12000:], None
+        except subprocess.TimeoutExpired as exc:
+            return None, str(exc.stdout or "")[-12000:], str(exc.stderr or "")[-12000:], "TIMEOUT"
+        except OSError as exc:
+            return None, "", str(exc)[-12000:], "BLOCKED_EXTERNAL"
+
+    comparisons: list[PublicCheckComparison] = []
+
+    def environment_blocked(stdout: str, stderr: str) -> bool:
+        diagnostic = f"{stdout}\n{stderr}".lower()
+        return any(marker in diagnostic for marker in (
+            "no module named pytest",
+            "command not found",
+            "no such file or directory",
+            "failed to create process",
+        ))
+
+    for raw_command in commands:
+        command = tuple(map(str, raw_command))
+        if not command:
+            continue
+        started = time.monotonic()
+        base_rc, base_out, base_err, base_error = execute(command, baseline)
+        patch_rc, patch_out, patch_err, patch_error = execute(command, patched)
+        if base_error == "TIMEOUT" or patch_error == "TIMEOUT":
+            classification = "UNKNOWN_EXECUTION"
+        elif base_error or patch_error:
+            classification = "BLOCKED_EXTERNAL"
+        elif environment_blocked(base_out, base_err) or environment_blocked(
+            patch_out, patch_err
+        ):
+            classification = "BLOCKED_EXTERNAL"
+        elif base_rc == 0 and patch_rc == 0:
+            classification = "PASS_PRESERVED"
+        elif base_rc != 0 and patch_rc == 0:
+            classification = "TARGET_FIXED"
+        elif base_rc == 0 and patch_rc != 0:
+            classification = "PRESERVATION_REGRESSION"
+        else:
+            classification = "STABLE_FAIL"
+        comparisons.append(PublicCheckComparison(
+            check_id=stable_id(
+                "public-check-comparison", command, base_rc, patch_rc,
+                classification, base_out, base_err, patch_out, patch_err,
+            ),
+            command=command,
+            classification=classification,
+            baseline_return_code=base_rc,
+            patched_return_code=patch_rc,
+            baseline_stdout=base_out,
+            baseline_stderr=base_err,
+            patched_stdout=patch_out,
+            patched_stderr=patch_err,
+            duration_seconds=time.monotonic() - started,
+        ))
+    return tuple(comparisons)
 
 
 def mechanical_pass(checks: Iterable[MechanicalCheck]) -> bool:

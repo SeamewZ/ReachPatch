@@ -302,6 +302,12 @@ def challenge_graph_from_dict(raw: dict[str, Any]) -> ChallengeGraph:
         key: ChallengePriority(**value)
         for key, value in raw.get("priorities", {}).items()
     }
+    graph.build_timings = {
+        str(key): float(value) for key, value in raw.get("build_timings", {}).items()
+    }
+    graph.build_stats = {
+        str(key): int(value) for key, value in raw.get("build_stats", {}).items()
+    }
     expected = raw.get("graph_hash")
     if expected and graph.graph_hash() != expected:
         raise ValueError("persisted active Challenge Graph hash mismatch")

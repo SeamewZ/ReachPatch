@@ -132,15 +132,17 @@ class DefinitionScopeAnalyzer(ast.NodeVisitor):
         return ".".join(self.scope_names)
 
     def _visit_index_symbols(self, node: ast.AST) -> None:
-        for child in ast.iter_child_nodes(node):
-            if isinstance(child, (ast.ClassDef, ast.FunctionDef, ast.AsyncFunctionDef)):
-                self.visit(child)
-            elif isinstance(child, ast.Name):
-                self.visit_Name(child)
-            elif isinstance(child, ast.Attribute):
-                self.visit_Attribute(child)
-            else:
-                self._visit_index_symbols(child)
+        # The declaration pass is intentionally summary-only.  Walking every
+        # Name/Attribute here used to materialize locals and fields for the
+        # entire repository before the active precise pass even started.
+        worklist = [node]
+        while worklist:
+            current = worklist.pop()
+            for child in ast.iter_child_nodes(current):
+                if isinstance(child, (ast.ClassDef, ast.FunctionDef, ast.AsyncFunctionDef)):
+                    self.visit(child)
+                elif not isinstance(child, (ast.Name, ast.Attribute, ast.Constant)):
+                    worklist.append(child)
 
     def _make_node(
         self,

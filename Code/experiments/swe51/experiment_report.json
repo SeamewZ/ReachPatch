@@ -1,13 +1,19 @@
 {
   "case_count": 12,
   "failure_report": "/home/slt/ReachPatch/Code/experiments/swe51/failure_report.json",
-  "generated_at": "2026-07-26T16:45:08.693160+00:00",
+  "generated_at": "2026-07-27T03:49:42.100706+00:00",
   "generation_counts": {
+    "BUDGET_EXHAUSTED": 1,
     "ERROR": 5,
-    "NO_LEGAL_ACTION": 1,
     "SEMANTIC_BLOCKED": 6
   },
   "graph_memory_summary": {
+    "active_program_slice": {
+      "count": 1,
+      "max_peak_rss_mib": 69.484375,
+      "mean_peak_rss_mib": 69.484375,
+      "sum_peak_rss_mib": 69.484375
+    },
     "program_graph_initial": {
       "count": 5,
       "max_peak_rss_mib": 9837.96484375,
@@ -28,47 +34,59 @@
     }
   },
   "graph_timing_summary": {
+    "active_program_slice_seconds": {
+      "count": 1,
+      "max_seconds": 3.4674210580124054,
+      "mean_seconds": 3.4674210580124054,
+      "sum_seconds": 3.4674210580124054
+    },
     "analysis_total_seconds": {
       "count": 7,
-      "max_seconds": 397.54618411231786,
-      "mean_seconds": 60.511149417608976,
-      "sum_seconds": 423.57804592326283
+      "max_seconds": 61.26112899999134,
+      "mean_seconds": 12.470427258705188,
+      "sum_seconds": 87.29299081093632
     },
-    "baseline_execution_initial_seconds": {
+    "binding_graph_incremental_seconds": {
       "count": 1,
-      "max_seconds": 0.00038877222687005997,
-      "mean_seconds": 0.00038877222687005997,
-      "sum_seconds": 0.00038877222687005997
-    },
-    "baseline_execution_replay_seconds": {
-      "count": 1,
-      "max_seconds": 0.000327051617205143,
-      "mean_seconds": 0.000327051617205143,
-      "sum_seconds": 0.000327051617205143
-    },
-    "binding_graph_dynamic_rebuild_seconds": {
-      "count": 1,
-      "max_seconds": 29.31760357040912,
-      "mean_seconds": 29.31760357040912,
-      "sum_seconds": 29.31760357040912
+      "max_seconds": 0.0033648060052655637,
+      "mean_seconds": 0.0033648060052655637,
+      "sum_seconds": 0.0033648060052655637
     },
     "binding_graph_initial_seconds": {
       "count": 1,
-      "max_seconds": 29.191360705532134,
-      "mean_seconds": 29.191360705532134,
-      "sum_seconds": 29.191360705532134
+      "max_seconds": 0.007063386001391336,
+      "mean_seconds": 0.007063386001391336,
+      "sum_seconds": 0.007063386001391336
     },
-    "challenge_graph_dynamic_rebuild_seconds": {
+    "challenge_graph_incremental_seconds": {
       "count": 1,
-      "max_seconds": 22.408939834684134,
-      "mean_seconds": 22.408939834684134,
-      "sum_seconds": 22.408939834684134
+      "max_seconds": 0.000934204988880083,
+      "mean_seconds": 0.000934204988880083,
+      "sum_seconds": 0.000934204988880083
     },
     "challenge_graph_initial_seconds": {
       "count": 1,
-      "max_seconds": 22.832106362096965,
-      "mean_seconds": 22.832106362096965,
-      "sum_seconds": 22.832106362096965
+      "max_seconds": 0.0015758189983898774,
+      "mean_seconds": 0.0015758189983898774,
+      "sum_seconds": 0.0015758189983898774
+    },
+    "first_patch_generation_seconds": {
+      "count": 1,
+      "max_seconds": 30.466096478994587,
+      "mean_seconds": 30.466096478994587,
+      "sum_seconds": 30.466096478994587
+    },
+    "initial_localization_seconds": {
+      "count": 1,
+      "max_seconds": 0.0006849759956821799,
+      "mean_seconds": 0.0006849759956821799,
+      "sum_seconds": 0.0006849759956821799
+    },
+    "initial_revision_validation_seconds": {
+      "count": 1,
+      "max_seconds": 4.195282111002598,
+      "mean_seconds": 4.195282111002598,
+      "sum_seconds": 4.195282111002598
     },
     "program_graph_definition_index_seconds": {
       "count": 3,
@@ -76,39 +94,58 @@
       "mean_seconds": 33.9077411936693,
       "sum_seconds": 101.72322358100791
     },
-    "program_graph_dynamic_merge_seconds": {
+    "program_graph_incremental_seconds": {
       "count": 1,
-      "max_seconds": 5.566515028476715e-06,
-      "mean_seconds": 5.566515028476715e-06,
-      "sum_seconds": 5.566515028476715e-06
+      "max_seconds": 0.4268237709911773,
+      "mean_seconds": 0.4268237709911773,
+      "sum_seconds": 0.4268237709911773
     },
     "program_graph_initial_seconds": {
-      "count": 3,
+      "count": 2,
       "max_seconds": 2726.916206283,
-      "mean_seconds": 940.6301631086704,
-      "sum_seconds": 2821.8904893260114
+      "mean_seconds": 1403.3960404624995,
+      "sum_seconds": 2806.792080924999
     },
-    "requirement_graph_dynamic_rebuild_seconds": {
+    "public_test_recovery_seconds": {
       "count": 1,
-      "max_seconds": 114.79989553336054,
-      "mean_seconds": 114.79989553336054,
-      "sum_seconds": 114.79989553336054
+      "max_seconds": 0.0,
+      "mean_seconds": 0.0,
+      "sum_seconds": 0.0
+    },
+    "repository_index_seconds": {
+      "count": 1,
+      "max_seconds": 0.2833162919996539,
+      "mean_seconds": 0.2833162919996539,
+      "sum_seconds": 0.2833162919996539
+    },
+    "requirement_core_seconds": {
+      "count": 1,
+      "max_seconds": 0.0019731880020117387,
+      "mean_seconds": 0.0019731880020117387,
+      "sum_seconds": 0.0019731880020117387
+    },
+    "requirement_graph_incremental_seconds": {
+      "count": 1,
+      "max_seconds": 1.6471682979899924,
+      "mean_seconds": 1.6471682979899924,
+      "sum_seconds": 1.6471682979899924
     },
     "requirement_graph_initial_seconds": {
       "count": 1,
-      "max_seconds": 117.13769526965916,
-      "mean_seconds": 117.13769526965916,
-      "sum_seconds": 117.13769526965916
+      "max_seconds": 0.9333903410006315,
+      "mean_seconds": 0.9333903410006315,
+      "sum_seconds": 0.9333903410006315
     },
     "semantic_analysis_seconds": {
       "count": 12,
       "max_seconds": 28.840674693004985,
-      "mean_seconds": 2.993278964388537,
-      "sum_seconds": 35.919347572662446
+      "mean_seconds": 2.993430609095564,
+      "sum_seconds": 35.92116730914677
     }
   },
   "harness_counts": {
-    "PENDING": 12
+    "PENDING": 11,
+    "UNKNOWN_EXECUTION": 1
   },
   "results": [
     {
@@ -221,71 +258,200 @@
       "transition_count": 0
     },
     {
-      "accepted_transition_id": null,
-      "analysis_resources": {},
-      "analysis_stats": {},
-      "analysis_timings": {
-        "analysis_total_seconds": 397.54618411231786,
-        "baseline_execution_initial_seconds": 0.00038877222687005997,
-        "baseline_execution_replay_seconds": 0.000327051617205143,
-        "binding_graph_dynamic_rebuild_seconds": 29.31760357040912,
-        "binding_graph_initial_seconds": 29.191360705532134,
-        "challenge_graph_dynamic_rebuild_seconds": 22.408939834684134,
-        "challenge_graph_initial_seconds": 22.832106362096965,
-        "program_graph_dynamic_merge_seconds": 5.566515028476715e-06,
-        "program_graph_initial_seconds": 15.09840840101242,
-        "requirement_graph_dynamic_rebuild_seconds": 114.79989553336054,
-        "requirement_graph_initial_seconds": 117.13769526965916,
-        "semantic_analysis_seconds": 0.004490036517381668
+      "accepted_transition_id": "patch-revision-transition-07e6a94bb8ab52834ca583ba",
+      "analysis_resources": {
+        "active_program_slice": {
+          "peak_rss_mib": 69.484375,
+          "precise_files": 40,
+          "precise_functions": 195
+        },
+        "graph_build_records": [
+          {
+            "active_binding_units": 0,
+            "binding_graph_seconds": 0.007063386001391336,
+            "binding_units": 4,
+            "challenge_cells": 0,
+            "challenge_graph_seconds": 0.0015758189983898774,
+            "deferred_binding_units": 4,
+            "frontier_count": 478,
+            "kind": "initial_active",
+            "program_edges": 21891,
+            "program_graph_seconds": 3.4674210580124054,
+            "program_nodes": 10414,
+            "requirement_graph_seconds": 0.9333903410006315,
+            "requirement_leaves": 2,
+            "requirement_path_obligations": 4,
+            "truncated": true
+          },
+          {
+            "active_binding_units": 0,
+            "binding_graph_seconds": 0.0033648060052655637,
+            "binding_units": 4,
+            "challenge_cells": 0,
+            "challenge_graph_seconds": 0.000934204988880083,
+            "deferred_binding_units": 4,
+            "kind": "incremental_transition",
+            "peak_rss_mib": 86.6171875,
+            "program_edges": 17234,
+            "program_graph_seconds": 0.4268237709911773,
+            "program_nodes": 8699,
+            "repository_index_seconds": 0.02628323899989482,
+            "requirement_graph_seconds": 1.6471682979899924,
+            "requirement_leaves": 2,
+            "requirement_path_obligations": 4,
+            "total_seconds": 2.10457431897521,
+            "transition_id": "patch-revision-transition-07e6a94bb8ab52834ca583ba",
+            "truncated": true
+          }
+        ],
+        "peak_rss_mib": 86.6171875,
+        "repository_index": {
+          "file_count": 83
+        }
       },
-      "component_count": 184,
+      "analysis_stats": {
+        "accepted_transitions": 1,
+        "active_binding_count": 0,
+        "active_challenge_count": 0,
+        "active_program_slice_seconds": 0.3495980900042923,
+        "candidate_binding_count": 0,
+        "deepseek_initial_generation_count": 1,
+        "deepseek_repair_count": 0,
+        "deepseek_root_recovery_count": 7,
+        "deepseek_tool_turns": 117,
+        "deferred_binding_count": 4,
+        "diff_adequacy_closed": true,
+        "diff_adequacy_keys": [
+          "call_added",
+          "call_modified",
+          "exception_added"
+        ],
+        "discriminator_probes": [],
+        "executed_discriminator_probe_ids": [],
+        "final_patch_hash": "5abed94d246bbcf53e1d683e32db770b7d0d6f217e1506682ad86190da8df38a",
+        "final_patch_nonempty": true,
+        "final_status": "BUDGET_EXHAUSTED",
+        "generator_contextless_revisions": 9,
+        "graph_build_records": [
+          {
+            "active_binding_units": 0,
+            "binding_graph_seconds": 0.007063386001391336,
+            "binding_units": 4,
+            "challenge_cells": 0,
+            "challenge_graph_seconds": 0.0015758189983898774,
+            "deferred_binding_units": 4,
+            "frontier_count": 478,
+            "kind": "initial_active",
+            "program_edges": 21891,
+            "program_graph_seconds": 3.4674210580124054,
+            "program_nodes": 10414,
+            "requirement_graph_seconds": 0.9333903410006315,
+            "requirement_leaves": 2,
+            "requirement_path_obligations": 4,
+            "truncated": true
+          },
+          {
+            "active_binding_units": 0,
+            "binding_graph_seconds": 0.0033648060052655637,
+            "binding_units": 4,
+            "challenge_cells": 0,
+            "challenge_graph_seconds": 0.000934204988880083,
+            "deferred_binding_units": 4,
+            "kind": "incremental_transition",
+            "peak_rss_mib": 86.6171875,
+            "program_edges": 17234,
+            "program_graph_seconds": 0.4268237709911773,
+            "program_nodes": 8699,
+            "repository_index_seconds": 0.02628323899989482,
+            "requirement_graph_seconds": 1.6471682979899924,
+            "requirement_leaves": 2,
+            "requirement_path_obligations": 4,
+            "total_seconds": 2.10457431897521,
+            "transition_id": "patch-revision-transition-07e6a94bb8ab52834ca583ba",
+            "truncated": true
+          }
+        ],
+        "graph_build_total_seconds": 2.10457431897521,
+        "high_risk_unknowns": 0,
+        "high_value_pending_challenge_ids": [],
+        "inferred_public_test_count": 1,
+        "last_graph_build_timings": {
+          "binding_graph_seconds": 0.0033648060052655637,
+          "challenge_graph_seconds": 0.000934204988880083,
+          "program_graph_seconds": 0.4268237709911773,
+          "repository_index_seconds": 0.02628323899989482,
+          "requirement_graph_seconds": 1.6471682979899924
+        },
+        "peak_rss_mib": 86.6171875,
+        "precise_files": 2,
+        "precise_functions": 165,
+        "program_edges": 17234,
+        "program_nodes": 8699,
+        "real_execution_challenge_count": 0,
+        "repository_index_files": 83,
+        "repository_index_seconds": 0.2829380099865375,
+        "requirement_leaves": 2,
+        "requirement_partitions": 9,
+        "requirement_path_obligations": 4,
+        "rolled_back_transitions": 0,
+        "submitted_generator_revisions": 10,
+        "targeted_challenge_expansion": false,
+        "transition_count": 1
+      },
+      "analysis_timings": {
+        "active_program_slice_seconds": 3.4674210580124054,
+        "analysis_total_seconds": 61.26112899999134,
+        "binding_graph_incremental_seconds": 0.0033648060052655637,
+        "binding_graph_initial_seconds": 0.007063386001391336,
+        "challenge_graph_incremental_seconds": 0.000934204988880083,
+        "challenge_graph_initial_seconds": 0.0015758189983898774,
+        "first_patch_generation_seconds": 30.466096478994587,
+        "initial_localization_seconds": 0.0006849759956821799,
+        "initial_revision_validation_seconds": 4.195282111002598,
+        "program_graph_incremental_seconds": 0.4268237709911773,
+        "public_test_recovery_seconds": 0.0,
+        "repository_index_seconds": 0.2833162919996539,
+        "requirement_core_seconds": 0.0019731880020117387,
+        "requirement_graph_incremental_seconds": 1.6471682979899924,
+        "requirement_graph_initial_seconds": 0.9333903410006315,
+        "semantic_analysis_seconds": 0.006309773001703434
+      },
+      "component_count": 0,
       "effective_component_count": 0,
-      "generation_status": "NO_LEGAL_ACTION",
+      "generation_status": "BUDGET_EXHAUSTED",
       "graph_reached": false,
       "graph_summary": {
-        "expected_full_closure_graph_count": 5,
-        "full_closure": true,
+        "active_stack": true,
+        "full_closure": false,
         "graph_count": 5,
-        "graph_names": [
-          "semantic_hypothesis_graph",
-          "requirement_graph",
-          "program_graph",
-          "binding_graph",
-          "challenge_graph"
-        ],
         "graphs": {
           "binding_graph": {
-            "artifact_ids": [],
-            "hash": "146f20209c63ba7053dbe1f023e75c5dca356656bd12d691859352ebee637b41"
+            "hash": "953c4884d825feabb80ac51cc797bd2fa67d38a3bf51c55ed5aab3a0b288183a"
           },
           "challenge_graph": {
-            "artifact_ids": [],
-            "hash": "bea0b4815cfe07d41debb8b122a20fcd9734dbe37a4765c72200bb9b4fbe70c8"
+            "hash": "21c0082fe9a8aeda7896d4f0aa486dc9166ccaa503297c4dc88e073f43699bb4"
           },
           "program_graph": {
-            "artifact_ids": [],
-            "hash": "076c613acdcdebc901ac609fb08a7df1cbec17d4a194c423b858f16469613394"
+            "hash": "53e0c84d3bce9ec1df3df96605ac4d8ce5821a09910b7af07de734a3a9d6290a"
           },
           "requirement_graph": {
-            "artifact_ids": [],
-            "hash": "5f5db81e24adaa4a942750c03be4d491505b196e162e480d4623bcf8934fc512"
+            "hash": "18e1309bd32c700d228cf768ed458088ebc99981676d54bbbad74ca222ecd09a"
           },
           "semantic_hypothesis_graph": {
-            "artifact_ids": [],
-            "hash": "b80f1b3b651d83d8f79fcb992925da99721e56c2d10458b06dadcfe6908c6e03"
+            "hash": "e2f05c01892ce3d0645fd6fde73055c910efff7d31120673febd95874dd9d9da"
           }
         }
       },
       "harness_detail": {
-        "fail_to_pass": null,
-        "pass_to_pass": null,
-        "patch_apply": null
+        "fail_to_pass": "BLOCKED_EXTERNAL",
+        "pass_to_pass": "BLOCKED_EXTERNAL",
+        "patch_apply": "PASS"
       },
-      "harness_status": "PENDING",
+      "harness_status": "UNKNOWN_EXECUTION",
       "instance_id": "psf__requests-2148",
-      "patch_hash": "12ae32cb1ec02d01eda3581b127c1fee3b0dc53572ed6baf239721a03d82e126",
+      "patch_hash": "5abed94d246bbcf53e1d683e32db770b7d0d6f217e1506682ad86190da8df38a",
       "run_root": "/home/slt/ReachPatch/Code/experiments/swe51/runs/psf__requests-2148",
-      "transition_count": 0
+      "transition_count": 1
     },
     {
       "accepted_transition_id": null,

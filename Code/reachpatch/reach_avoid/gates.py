@@ -81,9 +81,15 @@ def in_target_set(state: ReachAvoidState) -> bool:
         unit_id: [item for item in state.outcomes.values() if item.unit_id == unit_id]
         for unit_id in active_target_ids | active_preservation_ids
     }
+    public_target_evidence = set(
+        map(str, state.runtime_metrics.get("public_target_evidence_unit_ids", ()))
+    )
     active_targets_pass = all(
-        by_unit[unit_id]
-        and all(item.status == OutcomeStatus.PASS for item in by_unit[unit_id])
+        (
+            by_unit[unit_id]
+            and all(item.status == OutcomeStatus.PASS for item in by_unit[unit_id])
+        )
+        or unit_id in public_target_evidence
         for unit_id in active_target_ids
     )
     preservation_pass = all(
@@ -106,6 +112,7 @@ def in_target_set(state: ReachAvoidState) -> bool:
         active_targets_pass,
         preservation_pass,
         stable_counterexamples_pass,
+        not state.runtime_metrics.get("public_stable_fail_commands", ()),
         diff_closed,
         hashes_current,
         not any(

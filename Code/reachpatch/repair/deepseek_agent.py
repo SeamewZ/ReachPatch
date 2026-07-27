@@ -4,7 +4,7 @@ import json
 import subprocess
 import threading
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from enum import StrEnum
 from typing import Any, Callable
 from urllib.request import Request, urlopen
@@ -17,6 +17,8 @@ from reachpatch.repair.tools import ProposedEdit, RepairToolExecutor
 SYSTEM_PROMPT = """You are the Repair Player maintaining one persistent working patch.
 Preserve previously validated edits. Use repository tools to inspect only relevant code.
 You may make multiple coordinated edits when they implement one repair mechanism.
+For apply_edits, choose exactly one registered mechanism value from the tool schema;
+put a human-readable explanation in finish_revision instead of inventing a mechanism name.
 Do not claim success from reasoning alone. After editing, request executable public checks.
 When evidence is insufficient, request targeted context instead of returning no action.
 Never access hidden tests, gold patches, test_patch, or harness outcomes."""
@@ -87,12 +89,41 @@ _MECHANISMS = {
 }
 
 
+def _normalize_mechanism(value: str, *, initial: bool) -> str | None:
+    normalized = value.strip().lower().replace("-", "_").replace(" ", "_")
+    if normalized in _MECHANISMS:
+        return normalized
+    keyword_mapping = (
+        (("exception", "error", "raise", "catch", "wrap"), "exception_edge"),
+        (("dispatch", "notimplemented", "operand"), "protocol_dispatch"),
+        (("guard", "condition", "predicate"), "guard_tighten"),
+        (("wrapper",), "remove_wrapper"),
+        (("representation", "shape"), "restore_representation"),
+        (("state", "order"), "state_update_order"),
+        (("preserv", "regression"), "preservation_restore"),
+        (("import", "propagat", "caller", "callee"), "cross_function_propagation"),
+        (("fix", "repair", "rewrite", "replace"), "causal_slice_rewrite"),
+    )
+    for keywords, mechanism in keyword_mapping:
+        if any(keyword in normalized for keyword in keywords):
+            return "initial_issue_repair" if initial and mechanism == "causal_slice_rewrite" else mechanism
+    return None
+
+
 def convert_revision_action(state, revision: GeneratorRevision) -> ActionConversionResult:
-    if revision.mechanism not in _MECHANISMS:
+    normalized_mechanism = _normalize_mechanism(
+        revision.mechanism,
+        initial=not bool(getattr(
+            getattr(state.checkpoint, "patch", None), "canonical_diff", ""
+        )),
+    )
+    if normalized_mechanism is None:
         return ActionConversionResult(
             ActionConversionStatus.INVALID_OPERATOR, revision,
             (f"unregistered mechanism: {revision.mechanism}",),
         )
+    if normalized_mechanism != revision.mechanism:
+        revision = replace(revision, mechanism=normalized_mechanism)
     root = __import__("pathlib").Path(state.checkpoint.snapshot_tree).resolve()
     active_files = set(state.program_graph.file_index)
     requested_files = {
@@ -206,7 +237,7 @@ def _tool_schema() -> list[dict]:
         tool("show_current_diff", {}),
         tool("run_public_check", {"check_id": string}, ["check_id"]),
         tool("request_program_slice", {"symbols": strings, "relation_kinds": strings}, ["symbols", "relation_kinds"]),
-        tool("apply_edits", {"mechanism": string, "edits": {"type": "array", "items": {"type": "object", "properties": {
+        tool("apply_edits", {"mechanism": {"type": "string", "enum": sorted(_MECHANISMS)}, "edits": {"type": "array", "items": {"type": "object", "properties": {
             "relative_path": string, "start_line": {"type": "integer"}, "end_line": {"type": "integer"},
             "expected_source": string, "replacement": string},
             "required": ["relative_path", "start_line", "end_line", "expected_source", "replacement"]}}}, ["mechanism", "edits"]),
@@ -219,6 +250,31 @@ class PersistentDeepSeekAgent:
         self.transport = transport
         self.max_tool_turns = max_tool_turns
 
+    @staticmethod
+    def _request_messages(conversation: GeneratorConversation) -> list[dict]:
+        last_user = max(
+            index for index, message in enumerate(conversation.messages)
+            if message.get("role") == "user"
+        )
+        memory = {
+            "conversation_id": conversation.conversation_id,
+            "inspected_files": sorted(conversation.inspected_files)[-40:],
+            "inspected_symbols": sorted(conversation.inspected_symbols)[-40:],
+            "attempted_mechanisms": conversation.attempted_mechanisms[-20:],
+            "accepted_patch_hashes": conversation.accepted_patch_hashes[-10:],
+            "rejected_patch_hashes": conversation.rejected_patch_hashes[-10:],
+            "delivered_counterexamples": sorted(conversation.delivered_counterexamples)[-20:],
+        }
+        return [
+            conversation.messages[0],
+            {
+                "role": "system",
+                "content": "Persistent conversation memory: "
+                + json.dumps(memory, sort_keys=True),
+            },
+            *conversation.messages[last_user:],
+        ]
+
     def _invoke(self, state, conversation: GeneratorConversation, tools: RepairToolExecutor, *, mode: str) -> GeneratorRevision:
         context = build_repair_context(state, mode=mode)
         conversation.messages.append({"role": "user", "content": json.dumps(context.to_dict(), sort_keys=True)})
@@ -228,7 +284,9 @@ class PersistentDeepSeekAgent:
         turns = 0
         for turns in range(1, self.max_tool_turns + 1):
             try:
-                message = self.transport(conversation.messages, _tool_schema())
+                message = self.transport(
+                    self._request_messages(conversation), _tool_schema()
+                )
             except GeneratorBlockedExternal:
                 raise
             except Exception as exc:

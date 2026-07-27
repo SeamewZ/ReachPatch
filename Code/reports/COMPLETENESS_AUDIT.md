@@ -87,3 +87,19 @@ prototype with a persistent working patch and verified certificates. It is
 **not** a proof-complete implementation of every open-world Python/framework
 semantic in the paper. The controller now demonstrates the required safety
 behavior by refusing Reach when universal coverage is unproved.
+
+## Patch-first Audit Addendum (2026-07-27)
+
+The current production path has been verified with **105 passed** tests. It
+uses summary-only `RepositoryIndex`, bounded `ActiveProgramSlice`,
+`compile_requirement_core`, sparse active bindings, priority-bounded
+challenges, paired incumbent/trial public checks, and incremental graph
+updates. Initial DeepSeek generation precedes complete graph closure; later
+revisions preserve one conversation and one checkpoint lineage.
+
+An AST/source audit found no lone `pass` function body, no
+`NotImplementedError`, and no TODO/FIXME in `reachpatch`. Public check
+comparisons are schema-registered and persisted. Harness results remain outside
+Generator artifacts and resume input. Full-graph APIs remain only as explicit
+environment-gated diagnostics, not normal `run`, `resume`, or SWE generation
+production paths.

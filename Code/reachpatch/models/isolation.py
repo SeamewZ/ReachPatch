@@ -14,6 +14,20 @@ _FORBIDDEN_GENERATION_KEYS = {
 }
 
 
+def is_official_only_path(path: str) -> bool:
+    """Return true for paths reserved for post-seal evaluation evidence."""
+
+    normalized = path.replace("\\", "/").lower()
+    parts = set(Path(normalized).parts)
+    return (
+        any(token in normalized for token in (
+            "test_patch", "gold_patch", "gold-patch", "hidden_test",
+            "hidden-test", "harness_result", "harness-log",
+        ))
+        or bool(parts & {"gold", "hidden", "official_harness", "harness_logs"})
+    )
+
+
 def _assert_public_payload(value: Any, *, path: str = "root") -> None:
     if isinstance(value, dict):
         for key, item in value.items():

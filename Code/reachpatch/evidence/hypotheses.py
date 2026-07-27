@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from itertools import product
 from typing import Any
 
 from reachpatch.evidence.models import SemanticDecision
@@ -60,8 +59,23 @@ def factor_semantic_decisions(graph: SemanticGraph) -> list[SemanticDecision]:
 
 def _coherent_choice(graph: SemanticGraph, selected: set[str]) -> bool:
     for edge in graph.edges.values():
-        if edge.kind == "REFUTES" and set(edge.source_ids + edge.target_ids) <= selected:
+        if edge.kind != "REFUTES":
+            continue
+        claim_ids = set(edge.source_ids + edge.target_ids)
+        if not claim_ids <= selected:
+            continue
+        claims = [graph.claims[claim_id] for claim_id in claim_ids if claim_id in graph.claims]
+        kinds = {claim.kind for claim in claims}
+        if kinds == {SemanticNodeKind.SEMANTIC_HYPOTHESIS}:
             return False
+        if (
+            SemanticNodeKind.SEMANTIC_HYPOTHESIS in kinds
+            and SemanticNodeKind.NORMATIVE_REQUIREMENT in kinds
+        ):
+            return False
+        # Preservation assertions are scoped by their input and trace. Opposite
+        # assertions from different public-test partitions become challenges;
+        # they are not global semantic contradictions.
     return True
 
 
@@ -117,12 +131,31 @@ def enumerate_assignments(
         )
         return decisions, [assignment]
 
-    alternatives = [decision.alternative_claim_ids + (decision.unknown_claim_id,) for decision in decisions]
     unknowns = {decision.unknown_claim_id for decision in decisions}
+    beam: list[tuple[str, ...]] = [()]
+    beam_width = max(max_assignments * 4, 16)
+    fixed = set(hard) | set(preservation)
+    for decision in decisions:
+        alternatives = decision.alternative_claim_ids + (decision.unknown_claim_id,)
+        expanded: list[tuple[str, ...]] = []
+        for partial in beam:
+            for choice in alternatives:
+                candidate = partial + (choice,)
+                selected = set(candidate) - unknowns
+                if _coherent_choice(graph, selected | fixed):
+                    expanded.append(candidate)
+        expanded.sort(key=lambda choices: (
+            -_assignment_score(graph, choices, unknowns),
+            sum(choice in unknowns for choice in choices),
+            choices,
+        ))
+        beam = expanded[:beam_width]
+        if not beam:
+            break
     candidates: list[HypothesisAssignment] = []
-    for choices in product(*alternatives):
+    for choices in beam:
         selected = set(choices) - unknowns
-        coherent = _coherent_choice(graph, selected | set(hard) | set(preservation))
+        coherent = _coherent_choice(graph, selected | fixed)
         if not coherent:
             continue
         mapping = {
@@ -140,7 +173,14 @@ def enumerate_assignments(
                 for contradiction_id in decision.contradiction_ids
             })),
             coherent=True,
-            authority_complete=not any(choice in unknowns for choice in choices),
+            authority_complete=all(
+                choice not in unknowns
+                or not any(
+                    graph.claims[claim_id].authority.trusted
+                    for claim_id in decision.alternative_claim_ids
+                )
+                for decision, choice in zip(decisions, choices, strict=True)
+            ),
             selection_mode="unfrozen",
             score=_assignment_score(graph, choices, unknowns),
         ))

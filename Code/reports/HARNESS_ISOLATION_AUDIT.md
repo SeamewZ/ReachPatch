@@ -77,3 +77,12 @@ Repository maintainers may have ordinary public tests whose filenames include br
 ## Conclusion
 
 No harness/gold feedback path into the Generator was found. The sealed patch is evaluated in an independent tree and result namespace, and the persistent Generator cannot resume from those results.
+
+## Observed Sealed Evaluation
+
+The sealed `psf__requests-2148` patch was evaluated after generation in the
+independent harness process. Patch application passed. Both official target
+and preservation command groups were `BLOCKED_EXTERNAL` because the configured
+harness Python environment did not provide pytest, so the aggregate status was
+`UNKNOWN_EXECUTION`. The result remains under `experiments/swe51/harness` and
+was not read by Generator or `resume()`.

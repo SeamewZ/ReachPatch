@@ -58,6 +58,8 @@ MAX_RSS_KIB=487136
 
 Before this refactor, the recorded Astropy Program Graph peak approached 10 GiB and some cases spent hours in repository-scale graph construction. That observation motivated the change but is not presented as a controlled before/after benchmark here. The 51 SWE cases must be regenerated with the new code before claiming a corpus-level speedup.
 
+A later end-to-end public-evidence-only run on `psf__requests-2148` measured: 83 repository files summarized in 0.28 seconds; initial ActiveProgramSlice in 3.47 seconds; 10,414 initial nodes and 21,891 edges; and 86.6 MiB peak RSS. It produced a 918-byte patch and one COMMIT before sealing `BUDGET_EXHAUSTED` because all four bindings lacked executable Oracles. The earlier isolated slice smoke (4,531 nodes, 8,606 edges, 1.783 seconds, 47.1 MiB) used a narrower seed/configuration and is not substituted for the end-to-end measurement. Reaching the file cap no longer disables CFG/def-use for already selected files; file, function, node/edge and RSS budgets are consumed independently.
+
 ## Complexity change
 
 | Stage | Old scaling | New scaling |

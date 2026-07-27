@@ -58,6 +58,7 @@ def materialize_challenges(
     max_challenges: int | None = None,
     deadline: float | None = None,
 ) -> ChallengeGraph:
+    total_started = time.perf_counter()
     if binding_graph.requirement_graph_hash != requirement_graph.semantic_layer_hash():
         raise ValueError("Binding Graph references a stale Requirement Graph")
     if binding_graph.program_graph_hash != program_graph.program_hash():
@@ -221,6 +222,15 @@ def materialize_challenges(
             hard=False,
             evidence_ids=(),
         ))
+    challenge_graph.build_timings = {
+        "total_seconds": time.perf_counter() - total_started,
+    }
+    challenge_graph.build_stats = {
+        "active_unit_count": len(active_units),
+        "cell_count": len(challenge_graph.cells),
+        "frontier_count": len(challenge_graph.frontiers),
+        "deadline_truncated": int(deadline_truncated),
+    }
     return challenge_graph
 
 
@@ -236,6 +246,7 @@ def materialize_active_challenges(
 ) -> ChallengeGraph:
     if max_challenges < 1:
         raise ValueError("max_challenges must be positive")
+    total_started = time.perf_counter()
     graph = materialize_challenges(
         requirement_graph, program_graph, binding_graph,
         diff_hash=getattr(actual_diff, "canonical_diff_hash", "BASELINE") if actual_diff else "BASELINE",
@@ -317,6 +328,24 @@ def materialize_active_challenges(
             hard=False,
             evidence_ids=(),
         ))
+    bounded.build_timings = {
+        "materialize_all_candidates_seconds": float(
+            graph.build_timings.get("total_seconds", 0.0)
+        ),
+        "priority_selection_seconds": max(
+            0.0,
+            time.perf_counter() - total_started
+            - float(graph.build_timings.get("total_seconds", 0.0)),
+        ),
+        "total_seconds": time.perf_counter() - total_started,
+    }
+    bounded.build_stats = {
+        "candidate_cell_count": len(graph.cells),
+        "active_cell_count": len(bounded.cells),
+        "active_unit_count": len({item.binding_unit_id for item in bounded.cells.values()}),
+        "frontier_count": len(bounded.frontiers),
+        "deadline_truncated": int(deadline_truncated),
+    }
     return bounded
 
 

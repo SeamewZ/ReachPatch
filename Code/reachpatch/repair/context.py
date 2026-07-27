@@ -32,9 +32,9 @@ def _issue_text(state) -> str:
     ]
     issue = "\n".join(dict.fromkeys(values))
     hints = str(state.runtime_config.get("generation_hints", "")).strip()
-    return (
-        issue + (f"\n\nPublic hints (non-normative):\n{hints}" if hints else "")
-    )
+    if hints and hints not in issue:
+        issue += f"\n\nPublic hints:\n{hints}"
+    return issue
 
 
 def build_repair_context(
@@ -61,12 +61,26 @@ def build_repair_context(
                 for unit in state.binding_graph.units.values()
             ),
         })
-    failed = tuple({
+    failed_rows = [{
         "outcome_id": item.outcome_id,
         "status": item.status.value,
         "origin": item.failure_origin,
         "observation": item.observation,
-    } for item in state.outcomes.values() if item.status == OutcomeStatus.FAIL)
+    } for item in state.outcomes.values() if item.status == OutcomeStatus.FAIL]
+    failed_rows.extend({
+        "outcome_id": item.get("check_id"),
+        "status": item.get("classification"),
+        "origin": "PUBLIC_CHECK",
+        "observation": {
+            "command": item.get("command", ()),
+            "baseline_return_code": item.get("baseline_return_code"),
+            "patched_return_code": item.get("patched_return_code"),
+            "patched_stdout": item.get("patched_stdout", ""),
+            "patched_stderr": item.get("patched_stderr", ""),
+        },
+    } for item in state.runtime_metrics.get("last_public_check_comparisons", ())
+    if item.get("classification") in {"STABLE_FAIL", "PRESERVATION_REGRESSION"})
+    failed = tuple(failed_rows)
     packets = tuple({
         "counterexample_id": item.counterexample_id,
         "minimal_input": item.minimal_input,

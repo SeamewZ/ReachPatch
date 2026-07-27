@@ -61,6 +61,10 @@ for _artifact_type, _fields in {
     "binding_graph": ("units", "components", "graph_hash"),
     "challenge_graph": ("cells", "graph_hash"),
     "trace_bundle": ("recipe_id", "runs", "stability_status"),
+    "public_check_comparison": (
+        "check_id", "command", "classification",
+        "baseline_return_code", "patched_return_code",
+    ),
     "counterexample": ("counterexample_id", "failure_origin", "raw_execution_ids"),
     "repair_action": ("action_id", "operator", "causal_cut_ids"),
     "generator_revision": ("revision_id", "mechanism", "edits", "status"),

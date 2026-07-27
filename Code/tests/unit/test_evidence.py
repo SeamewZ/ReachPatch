@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 from reachpatch.evidence import build_semantic_graph, enumerate_assignments, freeze_assignment
+from reachpatch.evidence.hypotheses import build_hypothesis_set
 from reachpatch.models.enums import Authority, SemanticNodeKind
+from reachpatch.models.graph import GraphEdge
 
 
 def test_observation_normative_and_question_are_separate_authority_classes():
@@ -47,3 +49,54 @@ def test_multiple_unresolved_alternatives_retain_a_preferred_assignment():
     assert assignment.coherent
     assert assignment.authority_complete
     assert freeze_assignment(result.graph, selection_mode="benchmark") is not None
+
+
+def test_contextual_public_preservation_conflict_does_not_block_assignment(
+    tmp_path,
+):
+    public_test = tmp_path / "test_public.py"
+    public_test.write_text(
+        "def test_api():\n    assert api(1) == 2\n", encoding="utf-8"
+    )
+    result = build_semantic_graph(
+        "Could api return 3?", visible_test_paths=[public_test]
+    )
+    hypothesis = next(
+        claim for claim in result.graph.claims.values()
+        if claim.kind == SemanticNodeKind.SEMANTIC_HYPOTHESIS
+    )
+    preservation = next(
+        claim for claim in result.graph.claims.values()
+        if claim.kind == SemanticNodeKind.PRESERVATION_CONTRACT
+    )
+    result.graph.add_edge(GraphEdge.create(
+        "REFUTES", [preservation.claim_id], [hypothesis.claim_id]
+    ))
+
+    hypothesis_set = build_hypothesis_set(result.graph)
+
+    assert hypothesis_set.alternatives
+    assert hypothesis_set.alternatives[0].authority_complete
+
+
+def test_provisional_hypothesis_refuted_by_normative_evidence_keeps_unknown():
+    result = build_semantic_graph(
+        "The api must return 2. Could the api return 3?"
+    )
+    hypothesis = next(
+        claim for claim in result.graph.claims.values()
+        if claim.kind == SemanticNodeKind.SEMANTIC_HYPOTHESIS
+    )
+    normative = next(
+        claim for claim in result.graph.claims.values()
+        if claim.kind == SemanticNodeKind.NORMATIVE_REQUIREMENT
+    )
+    result.graph.add_edge(GraphEdge.create(
+        "REFUTES", [normative.claim_id], [hypothesis.claim_id]
+    ))
+
+    hypothesis_set = build_hypothesis_set(result.graph)
+
+    assert hypothesis_set.alternatives
+    assert hypothesis_set.alternatives[0].authority_complete
+    assert hypothesis_set.alternatives[0].assignment_node_ids == ()

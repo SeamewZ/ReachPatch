@@ -155,12 +155,23 @@ class PythonProgramGraphBuilder:
                 progress_callback(callback_name, "complete", elapsed)
 
         discovery_started = time.perf_counter()
-        paths = _iter_python_files(self.root, self.excludes)
         if self.include_files is not None:
-            paths = [
-                path for path in paths
-                if str(path.relative_to(self.root)).replace(os.sep, "/") in self.include_files
-            ]
+            # Active-slice builds receive an explicit file set from
+            # RepositoryIndex.  Resolve that set directly; walking the whole
+            # repository here would erase the performance boundary between
+            # summary indexing and precise analysis.
+            paths = []
+            for relative in sorted(self.include_files):
+                path = (self.root / relative).resolve()
+                if (
+                    path.is_relative_to(self.root)
+                    and path.is_file()
+                    and path.suffix == ".py"
+                    and not any(part in self.excludes for part in path.relative_to(self.root).parts)
+                ):
+                    paths.append(path)
+        else:
+            paths = _iter_python_files(self.root, self.excludes)
         if len(paths) > self.max_files:
             paths = paths[: self.max_files]
             capped = True
@@ -172,6 +183,10 @@ class PythonProgramGraphBuilder:
         timings["source_hash_seconds"] = time.perf_counter() - hash_started
         graph = ProgramGraph(repository_root=str(self.root), source_hash=source_hash)
         try:
+            # The declaration pass indexes every selected module/class/
+            # callable before the behavior stream resolves imports.  It is
+            # summary-only (no locals/expressions), so it preserves streaming
+            # resolution without reintroducing repository-scale AST nodes.
             measured(
                 "definition_index_seconds",
                 lambda: self._definition_index_pass(graph, paths),
@@ -271,10 +286,10 @@ class PythonProgramGraphBuilder:
     def _definition_index_pass(self, graph: ProgramGraph, paths: list[Path]) -> None:
         self.analyses.clear()
         for path in paths:
-            if self.budget is not None and not self.budget.consume_file(
+            if self.budget is not None and not self.budget.check(
                 nodes=len(graph.nodes), edges=len(graph.edges)
             ):
-                raise GraphBudgetReached(self.budget.truncated_reason or "FILE_LIMIT")
+                raise GraphBudgetReached(self.budget.truncated_reason or "GRAPH_LIMIT")
             self._analyze_path(graph, path, declarations_only=True)
 
     def _behavior_stream_pass(
@@ -284,16 +299,18 @@ class PythonProgramGraphBuilder:
         *,
         progress_callback: Callable[[str, str, float | None], None] | None,
     ) -> None:
-        operations = (
-            ("import_export_seconds", self._import_export_pass),
-            ("points_to_seconds", self._points_to_pass),
-        )
         stream_started = time.perf_counter()
+        # Parse each selected file once and retain only the bounded active
+        # slice until its cross-file resolution passes complete.  Running
+        # import/points-to/call discovery in file order made early modules
+        # observe incomplete aliases and produced order-dependent may-call
+        # edges; it also prevented the streaming graph from matching the
+        # retained multi-pass semantics.
         for index, path in enumerate(paths, start=1):
-            if self.budget is not None and not self.budget.check(
+            if self.budget is not None and not self.budget.consume_file(
                 nodes=len(graph.nodes), edges=len(graph.edges)
             ):
-                raise GraphBudgetReached(self.budget.truncated_reason or "GRAPH_LIMIT")
+                raise GraphBudgetReached(self.budget.truncated_reason or "FILE_LIMIT")
             parse_started = time.perf_counter()
             analysis = self._analyze_path(graph, path, declarations_only=False)
             self._stream_timings["behavior_reparse_seconds"] += (
@@ -301,6 +318,7 @@ class PythonProgramGraphBuilder:
             )
             if analysis is None:
                 continue
+            self.analyses.append(analysis)
             if self.budget is not None:
                 new_functions = len(analysis.active_callable_ast_ids)
                 for _ in range(new_functions):
@@ -308,10 +326,24 @@ class PythonProgramGraphBuilder:
                         nodes=len(graph.nodes), edges=len(graph.edges)
                     ):
                         raise GraphBudgetReached(self.budget.truncated_reason or "FUNCTION_LIMIT")
-            for timing_name, operation in operations:
-                started = time.perf_counter()
-                operation(graph, (analysis,))
-                self._stream_timings[timing_name] += time.perf_counter() - started
+            if index % 64 == 0:
+                gc.collect()
+                if progress_callback is not None:
+                    progress_callback(
+                        "behavior_stream",
+                        "progress",
+                        time.perf_counter() - stream_started,
+                    )
+        if not self.analyses:
+            return
+        for timing_name, operation in (
+            ("import_export_seconds", self._import_export_pass),
+            ("points_to_seconds", self._points_to_pass),
+        ):
+            started = time.perf_counter()
+            operation(graph, self.analyses)
+            self._stream_timings[timing_name] += time.perf_counter() - started
+        for analysis in self.analyses:
             started = time.perf_counter()
             CFGBuilder(graph, analysis, budget=self.budget).build()
             DefUseAnalyzer(graph, analysis, budget=self.budget).run()
@@ -326,20 +358,15 @@ class PythonProgramGraphBuilder:
             self._collect_registration_facts(graph, analysis)
             self._stream_timings["registration_fact_collection_seconds"] += time.perf_counter() - started
             started = time.perf_counter()
-            analyzer = ProtocolAnalyzer(
-                graph, analysis, defer_materialization=True
-            )
+            analyzer = ProtocolAnalyzer(graph, analysis, defer_materialization=True)
             analyzer.run()
             self.protocol_facts.extend(analyzer.facts)
             self._stream_timings["protocol_fact_collection_seconds"] += time.perf_counter() - started
-            if index % 64 == 0:
-                gc.collect()
-                if progress_callback is not None:
-                    progress_callback(
-                        "behavior_stream",
-                        "progress",
-                        time.perf_counter() - stream_started,
-                    )
+        # All relation facts and protocol summaries are now detached from the
+        # ASTs.  Release selected-slice ASTs before the later materialization
+        # passes and never retain them in RepositoryIndex.
+        self.analyses.clear()
+        gc.collect()
 
     def _import_export_pass(
         self,

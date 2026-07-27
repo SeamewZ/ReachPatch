@@ -19,7 +19,12 @@ from reachpatch.challenge_graph.materialize import (
     execute_challenges, materialize_active_challenges,
 )
 from reachpatch.challenge_graph.models import ChallengeGraph
-from reachpatch.execution import TraceExecutor, WorktreeManager
+from reachpatch.execution import (
+    PublicCheckComparison,
+    TraceExecutor,
+    WorktreeManager,
+    run_public_checks_paired,
+)
 from reachpatch.execution.mechanical import mechanical_pass, run_mechanical_checks
 from reachpatch.execution.reconcile import ActualDiff, reconcile_actual_diff
 from reachpatch.execution.worktree import tree_hash
@@ -171,6 +176,78 @@ def _mechanical_packet(
         diff_hash=actual_diff.canonical_diff_hash,
         failure_origin="PATCH_MECHANICAL",
         frontier_kind=reason,
+        uncertain_information=(),
+        mechanism_fingerprint_hash=str(actual_diff.fingerprint.get("hash")),
+    )
+
+
+def _public_check_packet(
+    state: ReachAvoidState,
+    transition_id: str,
+    actual_diff: ActualDiff,
+    comparison: PublicCheckComparison,
+) -> CounterexamplePacket:
+    target_units = tuple(sorted(
+        (
+            unit for unit in state.binding_graph.units.values()
+            if unit.status in {"ACTIVE", "READY"}
+            and state.requirement_graph.leaves[unit.leaf_id].authority_class.value
+            != "PRESERVATION"
+        ),
+        key=lambda unit: unit.unit_id,
+    ))
+    unit = target_units[0] if target_units else None
+    return CounterexamplePacket(
+        counterexample_id=stable_id(
+            "public-check-counterexample", transition_id, comparison.check_id,
+            actual_diff.canonical_diff_hash,
+        ),
+        transition_id=transition_id,
+        path_obligation_id=unit.path_obligation_id if unit else None,
+        binding_unit_id=unit.unit_id if unit else None,
+        challenge_id=None,
+        public_trigger_id=unit.trigger_id if unit else None,
+        entrypoint_id=unit.entrypoint_id if unit else None,
+        guarded_path_edge_ids=(),
+        exit_kind=unit.exit_kind if unit else None,
+        trusted_oracle_id=unit.oracle_id if unit else None,
+        expected_observation={
+            "classification": "TARGET_FIXED_OR_PASS_PRESERVED",
+            "return_code": 0,
+        },
+        actual_observation={
+            "classification": comparison.classification,
+            "command": list(comparison.command),
+            "baseline_return_code": comparison.baseline_return_code,
+            "patched_return_code": comparison.patched_return_code,
+            "baseline_stdout": comparison.baseline_stdout,
+            "baseline_stderr": comparison.baseline_stderr,
+            "patched_stdout": comparison.patched_stdout,
+            "patched_stderr": comparison.patched_stderr,
+        },
+        minimal_input={"command": list(comparison.command)},
+        reproduction_recipe_id=None,
+        raw_execution_ids=(comparison.check_id,),
+        relevant_source_slice_ids=(unit.interaction_path_ids if unit else ()),
+        causal_touch_witness_ids=(),
+        candidate_repair_cut_ids=(unit.repair_cut_node_ids if unit else ()),
+        protected_sibling_path_ids=tuple(sorted(
+            item.path_obligation_id for item in state.outcomes.values()
+            if item.status == OutcomeStatus.PASS
+        )),
+        preservation_path_ids=(unit.preservation_node_ids if unit else ()),
+        forbidden_behavior_ids=tuple(sorted(
+            item.path_obligation_id for item in state.outcomes.values()
+            if item.status == OutcomeStatus.PASS
+        )),
+        source_hash=state.checkpoint.patch.working_tree_hash,
+        diff_hash=actual_diff.canonical_diff_hash,
+        failure_origin=(
+            "PUBLIC_PRESERVATION_REGRESSION"
+            if comparison.preservation_regression
+            else "PUBLIC_CHECK_STABLE_FAIL"
+        ),
+        frontier_kind=comparison.classification,
         uncertain_information=(),
         mechanism_fingerprint_hash=str(actual_diff.fingerprint.get("hash")),
     )
@@ -545,7 +622,14 @@ def _legacy_evaluate_single_update(
         actual_edit_ids=tuple(edit.edit_id for edit in action.edit_intents),
         causal_cut_ids=action.causal_cut_ids,
         graph_delta=graph_delta,
-        mechanical_check_ids=tuple(item.check_id for item in checks),
+        mechanical_check_ids=(
+            tuple(item.check_id for item in checks)
+            + tuple(
+                str(item.get("check_id"))
+                for item in graph_delta.get("public_check_comparisons", ())
+                if item.get("check_id")
+            )
+        ),
         outcome_ids=tuple(sorted(validation_outcomes)),
         new_counterexample_ids=tuple(item.counterexample_id for item in packets),
         eliminated_counterexample_ids=tuple(sorted({
@@ -768,8 +852,16 @@ def evaluate_patch_revision(
     trial_tree = Path(trial.tree)
     checkpoint_tree = Path(state.checkpoint.snapshot_tree)
     config = state.runtime_config
+    graph_stage_timings: dict[str, float] = {}
+    transition_started = time.perf_counter()
     forbidden = tuple(config.get("forbidden_patterns", ()))
-    commands = tuple(tuple(item) for item in config.get("mechanical_commands", ()))
+    public_commands = tuple(
+        tuple(map(str, item))
+        for item in config.get(
+            "public_check_commands", config.get("mechanical_commands", ())
+        )
+        if item
+    )
     try:
         _apply_revision_edits(trial_tree, revision)
         incremental = reconcile_actual_diff(
@@ -806,7 +898,7 @@ def evaluate_patch_revision(
             (packet,), state.checkpoint, revision, "EDIT_APPLY_FAILURE",
         )
     checks = run_mechanical_checks(
-        trial_tree, incremental, commands=commands,
+        trial_tree, incremental,
         baseline_root=checkpoint_tree,
     )
     mechanical_ok = mechanical_pass(checks)
@@ -845,6 +937,71 @@ def evaluate_patch_revision(
             transition_id, False, Decision.ROLLBACK, certificate,
             (packet,), state.checkpoint, revision, ",".join(sorted(avoid_reasons)),
         )
+    public_comparisons = run_public_checks_paired(
+        checkpoint_tree, trial_tree, public_commands,
+        timeout_seconds=min(
+            120.0,
+            max(1.0, float(state.remaining_budget.execution_seconds)),
+        ),
+    )
+    _charge_execution(
+        state, sum(item.duration_seconds for item in public_comparisons)
+    )
+    public_packets = tuple(
+        _public_check_packet(state, transition_id, incremental, item)
+        for item in public_comparisons
+        if item.classification in {"STABLE_FAIL", "PRESERVATION_REGRESSION"}
+    )
+    public_regressions = tuple(
+        item for item in public_comparisons if item.preservation_regression
+    )
+    if public_regressions:
+        receipt = manager.rollback(trial)
+        graph_delta = {
+            "actual_diff": incremental.to_dict(),
+            "public_check_comparisons": [
+                item.to_dict() for item in public_comparisons
+            ],
+            "public_check_classification_counts": {
+                classification: sum(
+                    item.classification == classification
+                    for item in public_comparisons
+                )
+                for classification in sorted({
+                    item.classification for item in public_comparisons
+                })
+            },
+        }
+        certificate = _revision_certificate(
+            state, revision, transition_id, incremental, checks,
+            decision=Decision.ROLLBACK, receipt_id=receipt.receipt_id,
+            result_checkpoint_id=None, graph_delta=graph_delta,
+            outcomes=state.outcomes, packets=public_packets,
+            safe=False, progress=False, reach=False,
+            avoid_reasons=("PUBLIC_PRESERVATION_REGRESSION",),
+        )
+        state.counterexamples.extend(public_packets)
+        state.repair_history.append(certificate)
+        state.transition_index += 1
+        state.runtime_metrics["last_public_check_comparisons"] = [
+            item.to_dict() for item in public_comparisons
+        ]
+        state.runtime_metrics["public_check_execution_count"] = int(
+            state.runtime_metrics.get("public_check_execution_count", 0)
+        ) + len(public_comparisons) * 2
+        if state.generator_conversation is not None:
+            state.generator_conversation.rejected_patch_hashes.append(
+                incremental.canonical_diff_hash
+            )
+        state.transition_phase(
+            ControllerPhase.COUNTEREXAMPLE_FEEDBACK,
+            event="public_preservation_regression",
+        )
+        return TransitionResult(
+            transition_id, False, Decision.ROLLBACK, certificate,
+            public_packets, state.checkpoint, revision,
+            "PUBLIC_PRESERVATION_REGRESSION",
+        )
     if state.repository_index is None:
         manager.rollback(trial)
         raise RuntimeError("patch-first transition requires a persisted RepositoryIndex")
@@ -860,17 +1017,22 @@ def evaluate_patch_revision(
         ),
     )
     state.transition_phase(ControllerPhase.ACTIVE_GRAPH_BUILD, event="mechanical_checks_passed")
+    graph_stage_timings_started = time.perf_counter()
     trial_repository_index = update_repository_index(
         state.repository_index, trial_tree, tuple(incremental.changed_files),
         deadline=Deadline.after(float(
             config.get("repository_index_deadline_seconds", 60.0)
         )),
     )
+    graph_stage_timings["repository_index_seconds"] = time.perf_counter() - graph_stage_timings_started
+    graph_stage_timings_started = time.perf_counter()
     graph_delta_result = update_active_program_slice(
         state.program_graph, trial_repository_index, trial_tree,
         incremental, None, tuple(revision.context_requests), graph_budget,
     )
+    graph_stage_timings["program_graph_seconds"] = time.perf_counter() - graph_stage_timings_started
     trial_program = graph_delta_result.graph
+    graph_stage_timings_started = time.perf_counter()
     trial_requirements = copy.deepcopy(state.requirement_graph)
     requirement_delta = promote_domains_from_diff(
         trial_requirements, trial_program, incremental, None,
@@ -925,6 +1087,8 @@ def evaluate_patch_revision(
         if obligation.leaf_id in set(requirement_delta.affected_leaf_ids)
         or set(obligation.path_edge_ids) & set(graph_delta_result.added_edge_ids + graph_delta_result.removed_edge_ids)
     })
+    graph_stage_timings["requirement_graph_seconds"] = time.perf_counter() - graph_stage_timings_started
+    graph_stage_timings_started = time.perf_counter()
     trial_binding = build_active_binding_graph(
         trial_requirements, trial_program, previous=state.binding_graph,
         affected_leaf_ids=affected_leaf_ids,
@@ -933,12 +1097,15 @@ def evaluate_patch_revision(
         max_preservation_units=int(config.get("max_active_preservation_bindings", 20)),
         deadline=time.monotonic() + float(config.get("binding_deadline_seconds", 15.0)),
     )
+    graph_stage_timings["binding_graph_seconds"] = time.perf_counter() - graph_stage_timings_started
+    graph_stage_timings_started = time.perf_counter()
     trial_challenges = materialize_active_challenges(
         trial_requirements, trial_program, trial_binding,
         actual_diff=incremental, previous_outcomes=state.outcomes,
         max_challenges=int(config.get("max_active_challenges", 40)),
         deadline=time.monotonic() + float(config.get("challenge_deadline_seconds", 15.0)),
     )
+    graph_stage_timings["challenge_graph_seconds"] = time.perf_counter() - graph_stage_timings_started
     state.transition_phase(ControllerPhase.CHALLENGE_EXECUTE, event="active_graph_stack_updated")
     executor = TraceExecutor(temporary_root=Path(state.run_root) / "tmp")
     execution = execute_challenges(
@@ -1041,12 +1208,78 @@ def evaluate_patch_revision(
             ChallengeTerminalStatus.PASS, ChallengeTerminalStatus.INFEASIBLE_PROVED,
         }
     ))
+    command_key = lambda comparison: "\0".join(comparison.command)
+    previous_target_commands = set(
+        map(str, state.runtime_metrics.get("public_target_fixed_commands", ()))
+    )
+    current_by_command = {
+        command_key(item): item for item in public_comparisons
+    }
+    public_target_commands = {
+        command_key(item) for item in public_comparisons
+        if item.classification == "TARGET_FIXED"
+    } | {
+        key for key in previous_target_commands
+        if key in current_by_command
+        and current_by_command[key].classification == "PASS_PRESERVED"
+    }
+    active_target_unit_ids = {
+        unit.unit_id for unit in trial_binding.units.values()
+        if unit.status in {"ACTIVE", "READY"}
+        and trial_requirements.leaves[unit.leaf_id].authority_class.value
+        != "PRESERVATION"
+    }
+    public_target_evidence_units = set(
+        map(str, state.runtime_metrics.get("public_target_evidence_unit_ids", ()))
+    )
+    if public_target_commands:
+        public_target_evidence_units.update(active_target_unit_ids)
     trial_state.runtime_metrics = {
         **state.runtime_metrics,
+        "graph_build_records": [
+            *[
+                dict(item) for item in state.runtime_metrics.get("graph_build_records", ())
+                if isinstance(item, dict)
+            ],
+            {
+                "kind": "incremental_transition",
+                "transition_id": transition_id,
+                **graph_stage_timings,
+                "total_seconds": sum(graph_stage_timings.values()),
+                "program_nodes": len(trial_program.nodes),
+                "program_edges": len(trial_program.edges),
+                "precise_files": len(trial_program.file_index),
+                "rebuilt_precise_files": len(graph_delta_result.rebuilt_files),
+                "precise_functions": len(trial_program.cfgs),
+                "requirement_leaves": len(trial_requirements.leaves),
+                "requirement_path_obligations": len(trial_requirements.path_obligations),
+                "binding_units": len(trial_binding.units),
+                "active_binding_units": trial_binding.build_stats.get("active_count", 0),
+                "deferred_binding_units": trial_binding.build_stats.get("deferred_count", 0),
+                "challenge_cells": len(trial_challenges.cells),
+                "peak_rss_mib": max(
+                    float(state.runtime_metrics.get("peak_rss_mib", 0.0)),
+                    graph_delta_result.build.peak_rss_mib,
+                ),
+                "truncated": bool(
+                    graph_delta_result.build.truncated_reason
+                    or any(
+                        frontier.kind == "ANALYSIS_TRUNCATED"
+                        for graph in (trial_requirements, trial_program, trial_binding, trial_challenges)
+                        for frontier in getattr(graph, "frontiers", {}).values()
+                    )
+                ),
+            },
+        ],
+        "last_graph_build_timings": dict(graph_stage_timings),
+        "graph_build_total_seconds": float(
+            state.runtime_metrics.get("graph_build_total_seconds", 0.0)
+        ) + sum(graph_stage_timings.values()),
         "active_program_slice_seconds": graph_delta_result.build.elapsed_seconds,
         "program_nodes": len(trial_program.nodes),
         "program_edges": len(trial_program.edges),
-        "precise_files": len(graph_delta_result.build.analyzed_files),
+        "precise_files": len(trial_program.file_index),
+        "rebuilt_precise_files": len(graph_delta_result.rebuilt_files),
         "precise_functions": len(trial_program.cfgs),
         "peak_rss_mib": max(
             float(state.runtime_metrics.get("peak_rss_mib", 0.0)),
@@ -1064,12 +1297,33 @@ def evaluate_patch_revision(
         "high_risk_unknowns": len(high_pending),
         "real_execution_challenge_count": execution.real_execution_count,
         "targeted_challenge_expansion": targeted_expansion,
+        "last_public_check_comparisons": [
+            item.to_dict() for item in public_comparisons
+        ],
+        "public_check_execution_count": int(
+            state.runtime_metrics.get("public_check_execution_count", 0)
+        ) + len(public_comparisons) * 2,
+        "public_target_fixed_commands": sorted(public_target_commands),
+        "public_target_evidence_unit_ids": sorted(public_target_evidence_units),
+        "public_stable_fail_commands": sorted(
+            command_key(item) for item in public_comparisons
+            if item.classification == "STABLE_FAIL"
+        ),
+        "public_preservation_pass_commands": sorted(
+            command_key(item) for item in public_comparisons
+            if item.classification == "PASS_PRESERVED"
+        ),
+        "public_unknown_commands": sorted(
+            command_key(item) for item in public_comparisons
+            if item.classification in {"UNKNOWN_EXECUTION", "BLOCKED_EXTERNAL"}
+        ),
     }
-    packets = packets_for_nonpass_challenges(
+    challenge_packets = packets_for_nonpass_challenges(
         trial_state, trial_challenges, incremental,
         transition_id=transition_id, executor=executor,
         base_repository=state.base_repository, patch_repository=trial_tree,
     )
+    packets = tuple(challenge_packets) + public_packets
     trial_state.counterexamples = state.counterexamples + list(packets)
     metrics = progress_metrics(state, trial_state)
     established_regression = any(
@@ -1138,11 +1392,25 @@ def evaluate_patch_revision(
             "rebuilt_files": list(graph_delta_result.rebuilt_files),
             "updated_index_files": list(incremental.changed_files),
         },
+        "graph_timings_seconds": dict(graph_stage_timings),
+        "graph_build_total_seconds": sum(graph_stage_timings.values()),
         "requirement": asdict(requirement_delta),
         "binding_stats": trial_binding.build_stats,
         "active_challenge_ids": list(trial_challenges.cells),
         "executed_challenge_ids": list(execution.executed_challenge_ids),
         "real_execution_count": execution.real_execution_count,
+        "public_check_comparisons": [
+            item.to_dict() for item in public_comparisons
+        ],
+        "public_check_classification_counts": {
+            classification: sum(
+                item.classification == classification
+                for item in public_comparisons
+            )
+            for classification in sorted({
+                item.classification for item in public_comparisons
+            })
+        },
         "diff_adequacy_closed": bool(trial_state.runtime_metrics["diff_adequacy_closed"]),
         "hard_frontier_ids": list(high_pending),
         "cumulative_diff_hash": cumulative.canonical_diff_hash if accepted else state.checkpoint.patch.canonical_diff_hash,

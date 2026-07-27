@@ -170,6 +170,8 @@ class ChallengeGraph(SerializableRecord):
         self.by_partition: dict[str, set[str]] = {}
         self.by_path_class: dict[str, set[str]] = {}
         self.priorities: dict[str, ChallengePriority] = {}
+        self.build_timings: dict[str, float] = {}
+        self.build_stats: dict[str, int] = {}
 
     def add_cell(
         self,
@@ -216,8 +218,13 @@ class ChallengeGraph(SerializableRecord):
             "priorities": {
                 key: value.to_dict() for key, value in sorted(self.priorities.items())
             },
+            "build_timings": dict(self.build_timings),
+            "build_stats": dict(self.build_stats),
         }
-        body["graph_hash"] = content_hash(body)
+        hash_body = dict(body)
+        hash_body.pop("build_timings", None)
+        hash_body.pop("build_stats", None)
+        body["graph_hash"] = content_hash(hash_body)
         return body
 
     def graph_hash(self) -> str:

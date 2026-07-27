@@ -6,6 +6,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Iterable
 
+from reachpatch.models.isolation import is_official_only_path
 from reachpatch.program_graph.index import RepositoryIndex
 from reachpatch.program_graph.slice import ContextRequest
 
@@ -39,15 +40,7 @@ class RepairToolExecutor:
 
     @staticmethod
     def _is_official_only_path(relative_path: str) -> bool:
-        normalized = relative_path.replace("\\", "/").lower()
-        parts = set(Path(normalized).parts)
-        return (
-            any(token in normalized for token in (
-                "test_patch", "gold_patch", "gold-patch", "hidden_test",
-                "hidden-test", "harness_result", "harness-log",
-            ))
-            or bool(parts & {"gold", "hidden", "official_harness", "harness_logs"})
-        )
+        return is_official_only_path(relative_path)
 
     def _path(self, relative_path: str, *, for_edit: bool = False) -> Path:
         root = self.repository_root.resolve()
@@ -141,7 +134,40 @@ class RepairToolExecutor:
         return {"accepted": True, "request": request.to_dict()}
 
     def apply_edits(self, edits: Iterable[ProposedEdit]) -> dict:
-        candidate = list(edits)
+        candidate: list[ProposedEdit] = []
+        relocated: list[dict[str, int | str]] = []
+        for edit in edits:
+            path = self._path(edit.relative_path, for_edit=True)
+            lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
+            expected_lines = edit.expected_source.rstrip("\n").splitlines()
+            start = edit.start_line
+            end = edit.end_line
+            actual = "\n".join(lines[start - 1:end])
+            if actual != edit.expected_source.rstrip("\n") and expected_lines:
+                matches = [
+                    index + 1
+                    for index in range(len(lines) - len(expected_lines) + 1)
+                    if lines[index:index + len(expected_lines)] == expected_lines
+                ]
+                if len(matches) == 1:
+                    start = matches[0]
+                    end = start + len(expected_lines) - 1
+                    relocated.append({
+                        "path": edit.relative_path,
+                        "from_start_line": edit.start_line,
+                        "to_start_line": start,
+                    })
+                elif len(matches) > 1:
+                    raise ValueError(
+                        f"expected source is ambiguous: {edit.relative_path}:{edit.start_line}"
+                    )
+            candidate.append(ProposedEdit(
+                relative_path=edit.relative_path,
+                start_line=start,
+                end_line=end,
+                expected_source=edit.expected_source,
+                replacement=edit.replacement,
+            ))
         occupied: dict[str, list[tuple[int, int]]] = {}
         for staged in self.staged_edits:
             occupied.setdefault(staged.relative_path, []).append(
@@ -161,7 +187,8 @@ class RepairToolExecutor:
             ranges.append((edit.start_line, edit.end_line))
         self.staged_edits.extend(candidate)
         return {"accepted": True, "edit_count": len(candidate),
-                "paths": sorted({item.relative_path for item in candidate})}
+                "paths": sorted({item.relative_path for item in candidate}),
+                "relocated": relocated}
 
     def finish_revision(self, summary: str) -> dict:
         if not self.staged_edits:

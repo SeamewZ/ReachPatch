@@ -92,3 +92,16 @@ overrides are authoritative:
 | User and Appendix CLI contract | `reachpatch/cli/main.py`, `reachpatch/run.py` | all required subcommands | config/instance/run directory | shared production operations | command audit | console entry point | nonzero typed failures | IMPLEMENTED |
 | Appendix unit/integration contract | `tests/unit`, `tests/integration`, `tests/conformance` | normative acceptance tests | controlled generic repositories | executable conformance evidence | test reports | CI/manual verification | failed gate | IMPLEMENTED |
 | Appendix run validity and terminal export | `reachpatch/artifacts/verify.py`, `reachpatch/reporting.py` | `verify_artifacts`, `seal_terminal`, `export_patch` | run artifact store/checkpoint | replay proof and one pure diff | terminal certificate/final patch | CLI | hash/lineage/evidence inconsistency | IMPLEMENTED |
+
+## Patch-first Production Override (2026-07-27)
+
+Rows describing the pre-refactor full-closure route are historical. The
+authoritative production symbols are documented in
+`PATCH_FIRST_REFACTOR_PLAN.md` and `PATCH_FIRST_REFACTOR_REPORT.md`:
+`build_hypothesis_set`, `build_repository_index`,
+`compile_requirement_core`, `build_active_program_slice`,
+`evaluate_patch_revision`, `run_public_checks_paired`, sparse active binding
+and challenge queues, persistent DeepSeek revisions, and Reach-Avoid
+commit/rollback. The current suite has 105 passing tests. Legacy
+`build_augmented_program_graph` callers are explicitly environment-gated and
+not reachable from normal `run`, `resume`, or SWE generation.

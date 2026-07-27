@@ -156,3 +156,20 @@ the declared domain and limit; witness-only open-world partitions create a
 hard universal-coverage frontier and cannot enter Reach. The adapters and
 discriminator are evidence-only by contract. These are conservative terminal
 conditions, not silent success.
+
+## Patch-first Production Addendum (2026-07-27)
+
+The production SWE route is now `SemanticGraph/HypothesisSet -> RepositoryIndex
+-> RequirementCore -> ActiveProgramSlice -> initial DeepSeek revision ->
+paired public validation -> incremental active graphs -> persistent repair
+conversation -> Reach-Avoid commit/rollback`. The legacy full-graph narrative
+above is historical matrix context; normal `run`, `resume`, and SWE runner
+calls use the patch-first route. Legacy full-graph constructors are explicitly
+gated by `REACHPATCH_ENABLE_LEGACY_FULL_GRAPH=1`.
+
+The current behavior suite is **105 passed**. The sealed requests smoke
+produced a real 918-byte patch and one COMMIT, then stopped at
+`BUDGET_EXHAUSTED` with four deferred bindings and no executable challenges.
+Its independent harness result was `UNKNOWN_EXECUTION` because both command
+groups were `BLOCKED_EXTERNAL` (pytest unavailable); this evidence was not
+returned to the Generator.

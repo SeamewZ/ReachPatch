@@ -195,9 +195,25 @@ def progress_metrics(old_state, trial_state, causal_touch=None, **legacy_graphs)
     new_unknown = int(trial_state.runtime_metrics.get("high_risk_unknowns", 0))
     old_coverage = set(old_state.runtime_metrics.get("diff_adequacy_keys", ()))
     new_coverage = set(trial_state.runtime_metrics.get("diff_adequacy_keys", ()))
+    old_public_targets = set(
+        old_state.runtime_metrics.get("public_target_fixed_commands", ())
+    )
+    new_public_targets = set(
+        trial_state.runtime_metrics.get("public_target_fixed_commands", ())
+    )
+    old_public_failures = set(
+        old_state.runtime_metrics.get("public_stable_fail_commands", ())
+    )
+    new_public_failures = set(
+        trial_state.runtime_metrics.get("public_stable_fail_commands", ())
+    )
     return ProgressMetrics(
-        new_target_passes=len(new_pass - old_pass),
-        eliminated_stable_failures=len(old_fail - new_fail),
+        new_target_passes=(
+            len(new_pass - old_pass) + len(new_public_targets - old_public_targets)
+        ),
+        eliminated_stable_failures=(
+            len(old_fail - new_fail) + len(old_public_failures - new_public_failures)
+        ),
         eliminated_counterexamples=len(
             eliminated_counterexample_ids & old_counterexamples
         ),

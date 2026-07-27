@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import shutil
+import sys
 import time
 from pathlib import Path
 from types import SimpleNamespace
@@ -13,7 +14,9 @@ from reachpatch.challenge_graph.materialize import materialize_active_challenges
 from reachpatch.evidence import build_hypothesis_set, build_semantic_graph
 from reachpatch.evidence.hypotheses import enumerate_assignments
 from reachpatch.execution.reconcile import reconcile_actual_diff
-from reachpatch.execution.mechanical import run_mechanical_checks
+from reachpatch.execution.mechanical import (
+    run_mechanical_checks, run_public_checks_paired,
+)
 from reachpatch.models.core import Instance
 from reachpatch.models.enums import Decision
 from reachpatch.models.isolation import GenerationInstance, assert_generation_payload
@@ -23,6 +26,7 @@ from reachpatch.program_graph import (
     recover_repair_slice_seeds, update_active_program_slice,
     update_repository_index,
 )
+from reachpatch.program_graph.builder import PythonProgramGraphBuilder
 from reachpatch.program_graph.slice import ContextRequest, RepairSliceSeed
 from reachpatch.reach_avoid.controller import ReachPatchConfig, ReachPatchController
 from reachpatch.reach_avoid.transition import evaluate_patch_revision
@@ -74,6 +78,30 @@ def test_repository_index_keeps_unrelated_expression_growth_out_of_precise_graph
     assert len(result.graph.nodes) < 200
     assert result.peak_rss_mib < 2_048
     assert result.elapsed_seconds < 10
+
+
+def test_precise_builder_does_not_walk_repository_when_include_files_are_given(
+    tmp_path, monkeypatch,
+):
+    root = tmp_path / "repo"
+    (root / "pkg").mkdir(parents=True)
+    (root / "pkg" / "target.py").write_text(
+        "def target(value):\n    return value\n", encoding="utf-8"
+    )
+    (root / "pkg" / "unrelated.py").write_text(
+        "def unrelated(value):\n    return value\n", encoding="utf-8"
+    )
+
+    def fail_full_walk(*args, **kwargs):
+        raise AssertionError("precise include build walked the repository")
+
+    monkeypatch.setattr("reachpatch.program_graph.builder._iter_python_files", fail_full_walk)
+    graph = PythonProgramGraphBuilder(
+        root, include_files=("pkg/target.py",), budget=_budget(files=1, functions=4)
+    ).build()
+    assert graph.build_stats["precise_file_count"] == 1
+    assert set(graph.file_index) <= {"pkg/target.py"}
+    assert len(graph.cfgs) == 1
 
 
 def test_semantic_ambiguity_retains_hypotheses_and_plans_discriminator():
@@ -178,6 +206,11 @@ def test_deepseek_action_conversion_reports_precise_statuses(tmp_path):
     assert convert_revision_action(
         state, _revision("invented_operator", (single,))
     ).status == ActionConversionStatus.INVALID_OPERATOR
+    normalized = convert_revision_action(
+        state, _revision("Add required import", (single,))
+    )
+    assert normalized.status == ActionConversionStatus.ACCEPTED
+    assert normalized.revision.mechanism == "cross_function_propagation"
     forbidden = ProposedEdit(
         "tests/test_api.py", 1, 1,
         "from pkg.api import Box, dispatch, public", "# forbidden",
@@ -185,6 +218,23 @@ def test_deepseek_action_conversion_reports_precise_statuses(tmp_path):
     assert convert_revision_action(
         state, _revision("initial_issue_repair", (forbidden,))
     ).status == ActionConversionStatus.FORBIDDEN_PATH
+
+
+def test_repair_tool_relocates_unique_expected_source_anchor(tmp_path):
+    root = tmp_path / "repo"
+    shutil.copytree(FIXTURE, root, ignore=shutil.ignore_patterns("__pycache__"))
+    index = build_repository_index(root, max_files=20, deadline=Deadline.after(10))
+    executor = RepairToolExecutor(
+        repository_root=root, repository_index=index,
+    )
+    result = executor.apply_edits((ProposedEdit(
+        "pkg/api.py", 1, 1,
+        "    return normalize(value)", "    return []",
+    ),))
+
+    assert result["accepted"]
+    assert result["relocated"]
+    assert executor.staged_edits[0].start_line == 40
 
 
 class _TwoRevisionTransport:
@@ -236,6 +286,7 @@ def test_single_working_patch_is_repaired_in_one_persistent_conversation(
 ):
     repository = tmp_path / "repo"
     shutil.copytree(FIXTURE, repository, ignore=shutil.ignore_patterns("__pycache__"))
+    shutil.rmtree(repository / "tests")
     agent = PersistentDeepSeekAgent(_TwoRevisionTransport(), max_tool_turns=3)
     controller = ReachPatchController(
         config=ReachPatchConfig(
@@ -272,6 +323,16 @@ def test_single_working_patch_is_repaired_in_one_persistent_conversation(
     assert len(state.generator_conversation.rejected_patch_hashes) == 1
     assert "return []" in state.checkpoint.patch.canonical_diff
     assert "return [1]" not in state.checkpoint.patch.canonical_diff
+    records = state.runtime_metrics["graph_build_records"]
+    assert records[0]["kind"] == "initial_active"
+    assert any(item["kind"] == "incremental_transition" for item in records)
+    assert all(
+        item["program_graph_seconds"] >= 0
+        and item["requirement_graph_seconds"] >= 0
+        and item["binding_graph_seconds"] >= 0
+        and item["challenge_graph_seconds"] >= 0
+        for item in records
+    )
 
 
 def test_incremental_program_update_retains_untouched_nodes(tmp_path):
@@ -357,6 +418,39 @@ def test_import_check_treats_baseline_environment_failure_as_non_regression(tmp_
     assert "no confirmed import regression" in import_check.stderr
 
 
+@pytest.mark.parametrize(
+    ("baseline_value", "patched_value", "classification"),
+    [
+        ("pass", "pass", "PASS_PRESERVED"),
+        ("fail", "pass", "TARGET_FIXED"),
+        ("pass", "fail", "PRESERVATION_REGRESSION"),
+        ("fail", "fail", "STABLE_FAIL"),
+    ],
+)
+def test_public_checks_compare_incumbent_and_trial(
+    tmp_path, baseline_value, patched_value, classification,
+):
+    baseline = tmp_path / "baseline"
+    patched = tmp_path / "patched"
+    baseline.mkdir()
+    patched.mkdir()
+    (baseline / "result.txt").write_text(baseline_value, encoding="utf-8")
+    (patched / "result.txt").write_text(patched_value, encoding="utf-8")
+    command = (
+        sys.executable, "-c",
+        "import pathlib,sys; sys.exit(pathlib.Path('result.txt').read_text() != 'pass')",
+    )
+
+    comparison = run_public_checks_paired(
+        baseline, patched, (command,), timeout_seconds=10,
+    )[0]
+
+    assert comparison.classification == classification
+    assert comparison.preservation_regression == (
+        classification == "PRESERVATION_REGRESSION"
+    )
+
+
 def test_repair_tools_enforce_public_evidence_boundary(tmp_path):
     root = tmp_path / "repo"
     (root / "pkg").mkdir(parents=True)
@@ -424,7 +518,7 @@ class _CorrectInitialTransport:
                                 "relative_path": "pkg/api.py",
                                 "start_line": 40, "end_line": 40,
                                 "expected_source": "    return normalize(value)",
-                                "replacement": "    return []",
+                                "replacement": "    return list(normalize(value))",
                             }],
                         }),
                     },
@@ -441,6 +535,107 @@ class _CorrectInitialTransport:
         }
 
 
+class _RegressingTransport:
+    def __init__(self):
+        self.turn = 0
+
+    def __call__(self, messages, schemas):
+        self.turn += 1
+        if self.turn == 1:
+            return {
+                "role": "assistant", "content": "", "tool_calls": [{
+                    "id": "apply-regression", "type": "function",
+                    "function": {
+                        "name": "apply_edits",
+                        "arguments": json.dumps({
+                            "mechanism": "initial_issue_repair",
+                            "edits": [{
+                                "relative_path": "pkg/api.py",
+                                "start_line": 40, "end_line": 40,
+                                "expected_source": "    return normalize(value)",
+                                "replacement": "    return []",
+                            }],
+                        }),
+                    },
+                }],
+            }
+        return {
+            "role": "assistant", "content": "", "tool_calls": [{
+                "id": "finish-regression", "type": "function",
+                "function": {
+                    "name": "finish_revision",
+                    "arguments": json.dumps({"summary": "regressing revision"}),
+                },
+            }],
+        }
+
+
+def test_public_preservation_regression_rolls_back_only_trial(tmp_path):
+    repository = tmp_path / "repo"
+    shutil.copytree(FIXTURE, repository, ignore=shutil.ignore_patterns("__pycache__"))
+    controller = ReachPatchController(
+        config=ReachPatchConfig(max_submitted_revisions=1),
+        generator_agent=PersistentDeepSeekAgent(
+            _RegressingTransport(), max_tool_turns=3,
+        ),
+        implementation_root=tmp_path,
+    )
+
+    state = controller.analyze(
+        Instance(
+            "public-regression", str(repository), "base",
+            "For every x, pkg.api.public(x) must return a list.",
+        ),
+        run_root=tmp_path / "run",
+    )
+
+    assert state.transition_index == 1
+    assert state.checkpoint.patch.canonical_diff == ""
+    assert state.repair_history[-1].decision == Decision.ROLLBACK
+    assert state.repair_history[-1].avoid
+    assert any(
+        item.failure_origin == "PUBLIC_PRESERVATION_REGRESSION"
+        for item in state.counterexamples
+    )
+    assert state.artifact_ids["public_check_comparison"]
+
+
+def test_public_target_fix_contributes_transition_progress(tmp_path):
+    repository = tmp_path / "repo"
+    shutil.copytree(FIXTURE, repository, ignore=shutil.ignore_patterns("__pycache__"))
+    shutil.rmtree(repository / "tests")
+    target_check = (
+        sys.executable, "-c",
+        "import sys; from pkg.api import public; sys.exit(public([1]) != [])",
+    )
+    controller = ReachPatchController(
+        config=ReachPatchConfig(
+            max_submitted_revisions=1,
+            mechanical_commands=(target_check,),
+        ),
+        generator_agent=PersistentDeepSeekAgent(
+            _RegressingTransport(), max_tool_turns=3,
+        ),
+        implementation_root=tmp_path,
+    )
+
+    state = controller.analyze(
+        Instance(
+            "public-target", str(repository), "base",
+            "For every x, pkg.api.public(x) must return [].",
+        ),
+        run_root=tmp_path / "run",
+    )
+
+    assert state.checkpoint.patch.canonical_diff
+    assert state.repair_history[-1].decision == Decision.COMMIT
+    assert state.repair_history[-1].progress
+    comparisons = state.repair_history[-1].graph_delta["public_check_comparisons"]
+    assert {item["classification"] for item in comparisons} == {"TARGET_FIXED"}
+    assert state.runtime_metrics["public_target_fixed_commands"]
+    assert state.runtime_metrics["public_target_evidence_unit_ids"]
+
+
 def test_semantic_ambiguity_still_reaches_initial_generator(tmp_path):
     repository = tmp_path / "repo"
     shutil.copytree(FIXTURE, repository, ignore=shutil.ignore_patterns("__pycache__"))
@@ -454,7 +649,7 @@ def test_semantic_ambiguity_still_reaches_initial_generator(tmp_path):
     state = controller.analyze(
         Instance(
             "ambiguous-generation", str(repository), "base",
-            "For every x, pkg.api.public(x) must return []. "
+            "For every x, pkg.api.public(x) must return a list. "
             "The result could preserve identity? The result could create a copy?",
         ),
         run_root=tmp_path / "run",

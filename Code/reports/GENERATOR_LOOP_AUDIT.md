@@ -85,7 +85,7 @@ A legal edit is not rejected merely because the original causal cut missed its n
 1. conversion and trial checkout from the sole incumbent;
 2. reverse-line-order application of all coordinated edits;
 3. actual diff reconciliation and scope/gold checks;
-4. syntax and differential import/public checks;
+4. syntax/import checks plus paired incumbent/trial public checks;
 5. incremental RepositoryIndex and ActiveProgramSlice update;
 6. diff-only Requirement promotion and affected path refresh;
 7. affected Active Binding and bounded Challenge materialization;
@@ -96,6 +96,8 @@ A legal edit is not rejected merely because the original causal cut missed its n
 
 The transition certificate embeds the structured actual incremental diff, graph node/edge delta, checks, outcomes, packets, diff adequacy and decision. An initial safe nonempty patch may become the incumbent before complete evidence; it cannot reach the target until active target, stable counterexample, preservation, diff adequacy and hash gates pass.
 
+Public checks are not treated as patched-only mechanical commands. `PASS_PRESERVED` protects prior behavior, `TARGET_FIXED` adds target progress, `PRESERVATION_REGRESSION` rolls back only the revision, and `STABLE_FAIL` creates a real packet containing the command and both outputs. `UNKNOWN_EXECUTION` and `BLOCKED_EXTERNAL` remain explicit evidence states. Every comparison is persisted and appears in the TransitionCertificate; none is inferred from model text.
+
 ## Failure handling
 
 HTTP, timeout, decoding and non-object response failures become `GeneratorBlockedExternal`. The Controller persists `generator_failure`, conversation and state, writes a terminal `GENERATOR_BLOCKED_EXTERNAL` certificate and preserves any previous incumbent. It does not report a generic success or restart with a fresh conversation.
@@ -105,6 +107,7 @@ Malformed tool arguments are returned to the same model conversation as structur
 ## Behavioral evidence
 
 - Single patch test: initial `[1]` revision commits, syntax-invalid revision rolls back, final `[]` revision commits and reaches; patch version is 2 while transition count is 3.
+- Paired public-check tests execute real subprocesses for all four deterministic transitions: pass/pass, fail/pass, pass/fail and fail/fail.
 - Conversation assertions: one ID, one message history, initial count 1, repair count 2, accepted hashes 2, rejected hashes 1.
 - Conversion test covers legal single edit, coordinated edits, requested expansion, invalid operator and forbidden path.
 - External failure test produces no transition or patch, persists a failure artifact and seals `GENERATOR_BLOCKED_EXTERNAL`.

@@ -25,6 +25,7 @@ from reachpatch.challenge_graph.materialize import (
 )
 from reachpatch.challenge_graph.models import ChallengeGraph, DiffClosureCertificate
 from reachpatch.evidence import build_hypothesis_set, build_semantic_graph
+from reachpatch.evidence.extract import issue_evidence
 from reachpatch.evidence.hypotheses import enumerate_assignments
 from reachpatch.execution import TraceExecutor, WorktreeManager
 from reachpatch.execution.reconcile import ActualDiff, reconcile_actual_diff
@@ -43,7 +44,7 @@ from reachpatch.models.controller import (
 )
 from reachpatch.models.core import Instance
 from reachpatch.models.enums import Confidence, ControllerPhase, Decision, OutcomeStatus
-from reachpatch.models.isolation import assert_generation_payload
+from reachpatch.models.isolation import assert_generation_payload, is_official_only_path
 from reachpatch.oracle.discriminator import DiscriminatorProbe, HypothesisDiscriminator
 from reachpatch.program_graph import (
     Deadline, GraphBudget, build_active_program_slice, build_repository_index,
@@ -136,6 +137,44 @@ class ReachPatchConfig(SerializableRecord):
         )
         if any(value <= 0 for value in positive):
             raise ValueError("graph and agent limits must be positive")
+
+
+def _public_check_commands(
+    visible_test_paths: Iterable[str],
+    configured_commands: Iterable[Iterable[str]],
+    *,
+    max_visible_checks: int = 5,
+) -> tuple[tuple[str, ...], ...]:
+    """Compile a small public-only check set shared by tools and transitions."""
+
+    commands = [tuple(map(str, command)) for command in configured_commands if command]
+    seen = set(commands)
+    selected = 0
+    for relative in visible_test_paths:
+        normalized = str(relative).replace("\\", "/")
+        if is_official_only_path(normalized) or selected >= max_visible_checks:
+            continue
+        command = (sys.executable, "-m", "pytest", "-q", normalized)
+        if command in seen:
+            continue
+        commands.append(command)
+        seen.add(command)
+        selected += 1
+    return tuple(commands)
+
+
+def _named_public_checks(state: ReachAvoidState) -> dict[str, tuple[str, ...]]:
+    configured = state.runtime_config.get("public_check_commands")
+    if configured is None:
+        configured = _public_check_commands(
+            state.runtime_config.get("visible_test_paths", ()),
+            state.runtime_config.get("mechanical_commands", ()),
+        )
+    return {
+        f"public-check-{index}": tuple(map(str, command))
+        for index, command in enumerate(configured)
+        if command
+    }
 
 
 def default_budget() -> BudgetVector:
@@ -315,10 +354,20 @@ class ReachPatchController:
                 "visible test",
             ))
             for path in instance.visible_tests
+            if not is_official_only_path(str(path))
         )
+        if len(visible_tests) != len(instance.visible_tests):
+            raise AnalysisBlocked(
+                "ORACLE_CONTAMINATION",
+                "GenerationInstance visible_tests contains official-only evidence",
+            )
+        public_hints = str(instance.public_metadata.get("hints_text", "")).strip()
+        hint_evidence = tuple(issue_evidence(public_hints)) if public_hints else ()
         semantic_started = time.perf_counter()
         semantic_result = build_semantic_graph(
-            instance.issue, visible_test_paths=visible_tests,
+            instance.issue,
+            visible_test_paths=visible_tests,
+            extra_evidence=hint_evidence,
         )
         hypothesis_set = build_hypothesis_set(semantic_result.graph)
         if not hypothesis_set.alternatives:
@@ -356,33 +405,17 @@ class ReachPatchController:
             str(repository / relative)
             for relative, references in sorted(repository_index.test_references.items())
             if issue_symbols & {name.rsplit(".", 1)[-1].lower() for name in references}
+            and not is_official_only_path(relative)
         )[: min(20, self.config.max_precise_files)]
         selected_visible_tests = tuple(dict.fromkeys(
             (*visible_tests, *inferred_public_tests)
         ))
         if selected_visible_tests != visible_tests:
-            semantic_started = time.perf_counter()
-            semantic_result = build_semantic_graph(
-                instance.issue, visible_test_paths=selected_visible_tests,
-            )
-            hypothesis_set = build_hypothesis_set(semantic_result.graph)
-            if not hypothesis_set.alternatives:
-                raise AnalysisBlocked(
-                    "SEMANTIC_BLOCKED",
-                    "public issue and tests produced no coherent authority-complete hypothesis",
-                )
-            assignment = next(
-                item for item in hypothesis_set.alternatives
-                if item.assignment_id == hypothesis_set.preferred_assignment_id
-            )
-            semantic_decisions, _ = enumerate_assignments(semantic_result.graph)
-            discriminator_probes = HypothesisDiscriminator().plan(
-                semantic_decisions, hypothesis_set.alternatives
-            )
-            timings["semantic_public_test_refinement_seconds"] = (
-                time.perf_counter() - semantic_started
-            )
             visible_tests = selected_visible_tests
+            timings["public_test_recovery_seconds"] = 0.0
+            phase_metrics["inferred_public_test_count"] = len(
+                inferred_public_tests
+            )
         requirement_started = time.perf_counter()
         requirements = compile_requirement_core(
             semantic_result.graph, hypothesis_set, repository_index,
@@ -410,16 +443,74 @@ class ReachPatchController:
         )
         program = slice_result.graph
         timings["active_program_slice_seconds"] = slice_result.elapsed_seconds
-        binding = BindingGraph(
-            requirement_graph_hash=requirements.semantic_layer_hash(),
-            program_graph_hash=program.program_hash(),
-            assignment_id=requirements.assignment_id,
+        # Build only the bounded active product needed to give the initial
+        # generator useful executable context.  This is deliberately not the
+        # historical full closure: path construction is capped per leaf and
+        # binding/challenge materialization is capped by the active budgets.
+        requirement_paths_started = time.perf_counter()
+        compile_requirement_paths(
+            requirements,
+            program,
+            max_open_world_seeds=min(32, self.config.max_precise_functions),
+            max_observation_nodes=min(96, self.config.max_program_nodes),
+            max_paths_per_entry=self.config.max_path_classes_per_leaf,
+            max_path_classes_per_leaf=self.config.max_path_classes_per_leaf,
+            promote_all_program_predicates=False,
+            deadline=time.monotonic() + self.config.requirement_deadline_seconds,
         )
-        challenges = ChallengeGraph(
-            requirement_graph_hash=binding.requirement_graph_hash,
-            program_graph_hash=binding.program_graph_hash,
-            binding_graph_hash=binding.graph_hash(),
+        timings["requirement_graph_initial_seconds"] = (
+            time.perf_counter() - requirement_paths_started
         )
+        binding_started = time.perf_counter()
+        binding = build_active_binding_graph(
+            requirements,
+            program,
+            previous=None,
+            affected_leaf_ids=set(requirements.leaves),
+            affected_path_ids=set(requirements.path_obligations),
+            max_target_units=self.config.max_active_target_bindings,
+            max_preservation_units=self.config.max_active_preservation_bindings,
+            deadline=time.monotonic() + self.config.binding_deadline_seconds,
+        )
+        timings["binding_graph_initial_seconds"] = time.perf_counter() - binding_started
+        challenge_started = time.perf_counter()
+        challenges = materialize_active_challenges(
+            requirements,
+            program,
+            binding,
+            actual_diff=None,
+            previous_outcomes={},
+            max_challenges=self.config.max_active_challenges,
+            deadline=time.monotonic() + self.config.challenge_deadline_seconds,
+        )
+        timings["challenge_graph_initial_seconds"] = time.perf_counter() - challenge_started
+        initial_graph_record = {
+            "kind": "initial_active",
+            "program_graph_seconds": float(timings["active_program_slice_seconds"]),
+            "requirement_graph_seconds": float(timings["requirement_graph_initial_seconds"]),
+            "binding_graph_seconds": float(timings["binding_graph_initial_seconds"]),
+            "challenge_graph_seconds": float(timings["challenge_graph_initial_seconds"]),
+            "program_nodes": len(program.nodes),
+            "program_edges": len(program.edges),
+            "requirement_leaves": len(requirements.leaves),
+            "requirement_path_obligations": len(requirements.path_obligations),
+            "binding_units": len(binding.units),
+            "active_binding_units": binding.build_stats.get("active_count", 0),
+            "deferred_binding_units": binding.build_stats.get("deferred_count", 0),
+            "challenge_cells": len(challenges.cells),
+            "frontier_count": (
+                len(requirements.frontiers) + len(program.frontiers)
+                + len(binding.frontiers) + len(challenges.frontiers)
+            ),
+            "truncated": bool(
+                slice_result.truncated_reason
+                or any(
+                    frontier.kind == "ANALYSIS_TRUNCATED"
+                    for graph in (requirements, program, binding, challenges)
+                    for frontier in getattr(graph, "frontiers", {}).values()
+                )
+            ),
+        }
         episode_id = stable_id(
             "patch-first-episode", instance.instance_id,
             hypothesis_set.active_assignment_ids, program.source_hash,
@@ -479,6 +570,15 @@ class ReachPatchController:
                     str(Path(path).resolve().relative_to(repository)).replace("\\", "/")
                     for path in visible_tests
                 ],
+                "public_check_commands": [
+                    list(command) for command in _public_check_commands(
+                        (
+                            str(Path(path).resolve().relative_to(repository)).replace("\\", "/")
+                            for path in visible_tests
+                        ),
+                        self.config.mechanical_commands,
+                    )
+                ],
             }, runtime_metrics={
                 "repository_index_seconds": repository_index.build_seconds,
                 "repository_index_files": repository_index.scanned_files,
@@ -490,6 +590,17 @@ class ReachPatchController:
                 "peak_rss_mib": slice_result.peak_rss_mib,
                 "requirement_leaves": len(requirements.leaves),
                 "requirement_partitions": len(requirements.partitions),
+                "requirement_path_obligations": len(requirements.path_obligations),
+                "candidate_binding_count": binding.build_stats.get("candidate_count", 0),
+                "active_binding_count": binding.build_stats.get("active_count", 0),
+                "deferred_binding_count": binding.build_stats.get("deferred_count", 0),
+                "active_challenge_count": len(challenges.cells),
+                "high_value_pending_challenge_ids": tuple(sorted(
+                    challenge_id for challenge_id, cell in challenges.cells.items()
+                    if cell.hard
+                )),
+                "diff_adequacy_closed": False,
+                "graph_build_records": [initial_graph_record],
                 "discriminator_probes": [
                     item.to_dict() for item in discriminator_probes
                 ],
@@ -541,10 +652,7 @@ class ReachPatchController:
         )
         first_patch_started = time.perf_counter()
         if self.generator_agent is not None:
-            public_checks = {
-                f"public-check-{index}": tuple(command)
-                for index, command in enumerate(self.config.mechanical_commands)
-            }
+            public_checks = _named_public_checks(state)
             tools = RepairToolExecutor(
                 repository_root=snapshot, repository_index=repository_index,
                 current_diff="", public_checks=public_checks,
@@ -580,6 +688,7 @@ class ReachPatchController:
                     ActionConversionStatus.ACCEPTED,
                     ActionConversionStatus.NEEDS_SLICE_EXPANSION,
                 }:
+                    revision = conversion.revision
                     result = evaluate_patch_revision(state, revision)
                     timings["initial_revision_validation_seconds"] = (
                         time.perf_counter() - validation_started
@@ -1018,7 +1127,7 @@ class ReachPatchController:
                 "challenge_graph": {"hash": challenges.graph_hash(), "artifact_ids": []},
             },
             "expected_full_closure_graph_count": 5,
-            "full_closure": True,
+            "full_closure": False,
         }
         manifest_path.write_text(
             json.dumps(manifest, sort_keys=True, indent=2) + "\n",
@@ -1067,6 +1176,15 @@ class ReachPatchController:
                 "counterexample", packet, state=state,
                 producer="reachpatch.transition-gate",
                 confidence=Confidence.CONFIRMED,
+            )
+        for comparison in result.certificate.graph_delta.get(
+            "public_check_comparisons", ()
+        ):
+            artifacts.put(
+                "public_check_comparison", comparison, state=state,
+                producer="reachpatch.public-check-executor",
+                confidence=Confidence.CONFIRMED,
+                status=str(comparison.get("classification", "UNKNOWN_EXECUTION")),
             )
         if state.diff_closure_certificates:
             artifacts.put(
@@ -1168,6 +1286,33 @@ class ReachPatchController:
         manifest = json.loads(path.read_text(encoding="utf-8"))
         manifest["acceptance_metrics"] = dict(state.runtime_metrics)
         manifest["analysis_stats"] = dict(state.runtime_metrics)
+        records = [
+            dict(item) for item in state.runtime_metrics.get("graph_build_records", ())
+            if isinstance(item, dict)
+        ]
+        if records:
+            manifest["graph_build_records"] = records
+            analysis_timings = dict(manifest.get("analysis_timings", {}))
+            for key in (
+                "program_graph_seconds", "requirement_graph_seconds",
+                "binding_graph_seconds", "challenge_graph_seconds",
+            ):
+                total = sum(
+                    float(item.get(key, 0.0) or 0.0)
+                    for item in records
+                    if item.get("kind") != "initial_active"
+                )
+                if not total:
+                    continue
+                analysis_timings[key.replace("_seconds", "_incremental_seconds")] = total
+            manifest["analysis_timings"] = analysis_timings
+            resources = dict(manifest.get("analysis_resources", {}))
+            resources["graph_build_records"] = records
+            resources["peak_rss_mib"] = max(
+                [float(item.get("peak_rss_mib", 0.0) or 0.0) for item in records]
+                + [float(resources.get("peak_rss_mib", 0.0) or 0.0)]
+            )
+            manifest["analysis_resources"] = resources
         manifest["graph_summary"] = {
             "graph_count": 5,
             "full_closure": in_target_set(state),
@@ -1432,10 +1577,7 @@ class ReachPatchController:
     def _repair_tools(self, state: ReachAvoidState) -> RepairToolExecutor:
         if state.repository_index is None:
             raise RuntimeError("patch-first repair requires RepositoryIndex")
-        public_checks = {
-            f"public-check-{index}": tuple(command)
-            for index, command in enumerate(self.config.mechanical_commands)
-        }
+        public_checks = _named_public_checks(state)
         return RepairToolExecutor(
             repository_root=Path(state.checkpoint.snapshot_tree),
             repository_index=state.repository_index,
@@ -1469,15 +1611,18 @@ class ReachPatchController:
             ),
         )
         previous_program = state.program_graph
+        graph_started = time.perf_counter()
         delta = update_active_program_slice(
             previous_program, state.repository_index, snapshot, empty, None,
             tuple(requests), budget,
         )
+        program_seconds = time.perf_counter() - graph_started
         if (
             not delta.added_node_ids and not delta.modified_node_ids
             and not delta.added_edge_ids
         ):
             return False
+        graph_started = time.perf_counter()
         requirements = copy.deepcopy(state.requirement_graph)
         old_paths = set(requirements.path_obligations)
         selected_leaves = set(requirements.leaves)
@@ -1504,6 +1649,8 @@ class ReachPatchController:
             for obligation in requirements.path_obligations.values()
             if set(obligation.path_edge_ids) & set(delta.added_edge_ids)
         )
+        requirement_seconds = time.perf_counter() - graph_started
+        graph_started = time.perf_counter()
         binding = build_active_binding_graph(
             requirements, delta.graph, previous=state.binding_graph,
             affected_leaf_ids=selected_leaves,
@@ -1512,13 +1659,16 @@ class ReachPatchController:
             max_preservation_units=self.config.max_active_preservation_bindings,
             deadline=time.monotonic() + self.config.binding_deadline_seconds,
         )
+        binding_seconds = time.perf_counter() - graph_started
         cumulative = reconcile_actual_diff(state.base_repository, snapshot)
+        graph_started = time.perf_counter()
         challenges = materialize_active_challenges(
             requirements, delta.graph, binding, actual_diff=cumulative,
             previous_outcomes=state.outcomes,
             max_challenges=self.config.max_active_challenges,
             deadline=time.monotonic() + self.config.challenge_deadline_seconds,
         )
+        challenge_seconds = time.perf_counter() - graph_started
         state.requirement_graph = requirements
         state.program_graph = delta.graph
         state.binding_graph = binding
@@ -1530,6 +1680,24 @@ class ReachPatchController:
             state.runtime_metrics.get("targeted_slice_expansions", 0)
         ) + 1
         state.runtime_metrics["last_context_added_nodes"] = len(delta.added_node_ids)
+        state.runtime_metrics.setdefault("graph_build_records", []).append({
+            "kind": "context_expansion",
+            "program_graph_seconds": program_seconds,
+            "requirement_graph_seconds": requirement_seconds,
+            "binding_graph_seconds": binding_seconds,
+            "challenge_graph_seconds": challenge_seconds,
+            "total_seconds": program_seconds + requirement_seconds + binding_seconds + challenge_seconds,
+            "program_nodes": len(delta.graph.nodes),
+            "program_edges": len(delta.graph.edges),
+            "requirement_leaves": len(requirements.leaves),
+            "requirement_path_obligations": len(requirements.path_obligations),
+            "binding_units": len(binding.units),
+            "active_binding_units": binding.build_stats.get("active_count", 0),
+            "deferred_binding_units": binding.build_stats.get("deferred_count", 0),
+            "challenge_cells": len(challenges.cells),
+            "peak_rss_mib": delta.build.peak_rss_mib,
+            "truncated": bool(delta.build.truncated_reason),
+        })
         state.refresh_id()
         artifacts = RunArtifacts(state.run_root, state.instance_id)
         artifacts.persist_graph_stack(state)
@@ -1713,6 +1881,7 @@ class ReachPatchController:
                 self._record_action_rejection(state, revision, conversion)
                 nonprogress += 1
                 continue
+            revision = conversion.revision
             result = evaluate_patch_revision(state, revision)
             if result.accepted:
                 state.runtime_metrics["accepted_transitions"] = int(

@@ -35,6 +35,9 @@ TREE_ROOT = EXPERIMENT_ROOT / "case_trees"
 RUN_ROOT = EXPERIMENT_ROOT / "runs"
 RESULT_ROOT = EXPERIMENT_ROOT / "results"
 HARNESS_ROOT = EXPERIMENT_ROOT / "harness"
+HARNESS_RESULT_ROOT = HARNESS_ROOT / "results"
+GENERATION_HISTORY_ROOT = RESULT_ROOT / "_history"
+HARNESS_HISTORY_ROOT = HARNESS_ROOT / "_history"
 
 
 def _read_jsonl(path: Path) -> list[dict[str, Any]]:
@@ -46,6 +49,37 @@ def _write_json(path: Path, payload: dict[str, Any]) -> None:
     temporary = path.with_suffix(path.suffix + ".tmp")
     temporary.write_text(json.dumps(payload, sort_keys=True, indent=2) + "\n", encoding="utf-8")
     os.replace(temporary, path)
+
+
+def _read_json(path: Path) -> dict[str, Any] | None:
+    if not path.is_file():
+        return None
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError, TypeError):
+        return None
+    return payload if isinstance(payload, dict) else None
+
+
+def _archive_path(path: Path, history_root: Path, case_id: str) -> Path | None:
+    if not path.exists():
+        return None
+    destination_root = history_root / case_id
+    destination_root.mkdir(parents=True, exist_ok=True)
+    stamp = f"{time.time_ns()}"
+    suffix = path.suffix if path.is_file() else ""
+    destination = destination_root / f"attempt-{stamp}{suffix}"
+    path.rename(destination)
+    return destination
+
+
+def _validate_only_ids(records: list[dict[str, Any]], only: set[str] | None) -> None:
+    if not only:
+        return
+    known = {str(item["instance_id"]) for item in records}
+    unknown = sorted(only - known)
+    if unknown:
+        raise ValueError(f"unknown SWE51 instance ids: {', '.join(unknown)}")
 
 
 def _failure_rows(stage_summary: dict[str, Any], stage: str) -> list[dict[str, Any]]:
@@ -74,6 +108,7 @@ def _failure_rows(stage_summary: dict[str, Any], stage: str) -> list[dict[str, A
             "analysis_timings": item.get("analysis_timings", {}),
             "analysis_resources": item.get("analysis_resources", {}),
             "analysis_stats": item.get("analysis_stats", {}),
+            "phase_history": item.get("phase_history", []),
             "graph_summary": item.get("graph_summary", {}),
             "reach_avoid": item.get("reach_avoid"),
             "component_effectiveness": item.get("component_effectiveness", []),
@@ -96,22 +131,66 @@ def _failure_point(row: dict[str, Any]) -> str:
         return "semantic_analysis"
     if status == "NO_LEGAL_ACTION":
         return "repair_action_selection"
+    phase_history = row.get("phase_history", ())
+    for transition in reversed(phase_history):
+        if not isinstance(transition, dict):
+            continue
+        phase = str(transition.get("to_phase", ""))
+        if phase and phase != "SEALED":
+            return phase.lower()
     resources = row.get("analysis_resources", {})
     in_progress = [
         stage
         for stage, samples in resources.items()
-        if any(str(key).startswith("in_progress_") for key in samples)
+        if isinstance(samples, dict)
+        and any(str(key).startswith("in_progress_") for key in samples)
         and not any(str(key).startswith("complete_") for key in samples)
     ]
     if in_progress:
         return sorted(in_progress)[-1]
     timings = row.get("analysis_timings", {})
-    completed = [
+    stage_order = (
+        "semantic_analysis", "repository_index", "requirement_core",
+        "initial_localization", "active_program_slice",
+        "requirement_graph_initial", "binding_graph_initial",
+        "challenge_graph_initial", "first_patch_generation",
+        "initial_revision_validation", "program_graph_incremental",
+        "requirement_graph_incremental", "binding_graph_incremental",
+        "challenge_graph_incremental",
+    )
+    completed = {
         key.removesuffix("_seconds")
         for key in timings
         if key.endswith("_seconds") and key != "analysis_total_seconds"
-    ]
-    return sorted(completed)[-1] if completed else "generation"
+    }
+    return next(
+        (stage for stage in reversed(stage_order) if stage in completed),
+        "generation",
+    )
+
+
+def _failure_reason(row: dict[str, Any]) -> str:
+    if row.get("error"):
+        return str(row["error"])
+    status = str(row.get("status", "UNKNOWN"))
+    if row.get("stage") == "official_harness":
+        target = row.get("fail_to_pass") or {}
+        preservation = row.get("pass_to_pass") or {}
+        return (
+            "official harness isolated result: "
+            f"target={target.get('status', 'UNKNOWN')}, "
+            f"preservation={preservation.get('status', 'UNKNOWN')}"
+        )
+    stats = row.get("analysis_stats", {})
+    if status == "BUDGET_EXHAUSTED":
+        return (
+            "revision budget exhausted before Reach: "
+            f"submitted={stats.get('submitted_generator_revisions', 0)}, "
+            f"deferred_bindings={stats.get('deferred_binding_count', 0)}, "
+            f"active_challenges={stats.get('active_challenge_count', 0)}, "
+            f"real_challenge_executions={stats.get('real_execution_challenge_count', 0)}"
+        )
+    return "no certified Reach transition was available"
 
 
 def write_failure_report(
@@ -122,6 +201,9 @@ def write_failure_report(
     generation_summary = generation_summary or {}
     harness_summary = harness_summary or {}
     rows = _failure_rows(generation_summary, "generation") + _failure_rows(harness_summary, "official_harness")
+    for row in rows:
+        row["failure_point"] = _failure_point(row)
+        row["failure_reason"] = _failure_reason(row)
     report = {
         "generated_at": utc_now(),
         "case_count": max(
@@ -142,7 +224,7 @@ def write_failure_report(
         "|---|---|---|---|---|",
     ]
     for row in sorted(rows, key=lambda item: (str(item.get("instance_id")), str(item.get("stage")))):
-        reason = str(row.get("error") or "see stage details").replace("|", "/").replace("\n", " ")[:240]
+        reason = str(row["failure_reason"]).replace("|", "/").replace("\n", " ")[:240]
         lines.append(
             f"| `{row.get('instance_id')}` | `{row.get('stage')}` | `{row.get('status')}` | {reason} | `{row.get('run_root') or ''}` |"
         )
@@ -160,10 +242,10 @@ def write_failure_report(
         lines.extend([
             f"### `{row.get('instance_id')}`",
             "",
-            f"- Failure point: `{_failure_point(row)}`",
+            f"- Failure point: `{row['failure_point']}`",
             f"- Status: `{row.get('status')}`",
-            f"- Reason: {str(row.get('error') or 'no legal repair transition was available')}",
-            f"- Graph closure: `{graph_summary.get('graph_count', 0)}/{graph_summary.get('expected_full_closure_graph_count', 5)}`",
+            f"- Reason: {row['failure_reason']}",
+            f"- Graph stack: `{graph_summary.get('graph_count', 0)}` graphs; full closure `{bool(graph_summary.get('full_closure', False))}`",
             f"- Transitions: `{row.get('transition_count') or 0}`",
         ])
         if components:
@@ -244,6 +326,8 @@ def write_experiment_report(
     memory_summary: dict[str, dict[str, float | int]] = {}
     for row in rows:
         for stage, samples in row.get("analysis_resources", {}).items():
+            if not isinstance(samples, dict):
+                continue
             values = [float(value) for key, value in samples.items() if key.endswith("peak_rss_mib")]
             if not values:
                 continue
@@ -312,6 +396,191 @@ def write_experiment_report(
         )
     lines.extend(["", "Detailed failure rows and reasons: `failure_report.md` and `failure_report.json`."])
     (EXPERIMENT_ROOT / "experiment_report.md").write_text("\n".join(lines) + "\n", encoding="utf-8")
+    return report
+
+
+def _graph_stage_timings(item: dict[str, Any]) -> dict[str, float]:
+    timings = item.get("analysis_timings", {})
+    groups = {
+        "semantic_graph": ("semantic_",),
+        "repository_index": ("repository_index_",),
+        "requirement_graph": ("requirement_core_", "requirement_graph_", "requirement_"),
+        "program_graph": ("active_program_slice_", "program_graph_", "program_slice_"),
+        "binding_graph": ("binding_graph_", "binding_"),
+        "challenge_graph": ("challenge_graph_", "challenge_"),
+        "initial_generation": ("first_patch_generation_",),
+    }
+    output: dict[str, float] = {}
+    for stage, prefixes in groups.items():
+        values: list[float] = []
+        for key, value in timings.items():
+            if not any(str(key).startswith(prefix) for prefix in prefixes):
+                continue
+            try:
+                values.append(float(value))
+            except (TypeError, ValueError):
+                continue
+        output[stage] = sum(values)
+    return output
+
+
+def _transition_process(item: dict[str, Any]) -> list[dict[str, Any]]:
+    rows: list[dict[str, Any]] = []
+    for index, certificate in enumerate(item.get("transition_certificates", ())):
+        if not isinstance(certificate, dict):
+            continue
+        decision = certificate.get("decision")
+        if isinstance(decision, dict):
+            decision = decision.get("value") or decision.get("name")
+        rows.append({
+            "index": index + 1,
+            "transition_id": certificate.get("transition_id"),
+            "decision": str(decision or "UNKNOWN"),
+            "mechanical_pass": certificate.get("mechanical_pass"),
+            "safe": certificate.get("safe"),
+            "progress": certificate.get("progress"),
+            "reach": certificate.get("reach"),
+            "avoid": certificate.get("avoid"),
+            "actual_edit_ids": certificate.get("actual_edit_ids", []),
+            "new_counterexample_ids": certificate.get("new_counterexample_ids", []),
+            "eliminated_counterexample_ids": certificate.get("eliminated_counterexample_ids", []),
+            "graph_delta": certificate.get("graph_delta", {}),
+        })
+    return rows
+
+
+def write_case_process_report(
+    generation_summary: dict[str, Any],
+    harness_summary: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    harness_summary = harness_summary or {}
+    generated = {
+        str(item["instance_id"]): item
+        for item in generation_summary.get("results", ())
+        if item.get("instance_id")
+    }
+    harnessed = {
+        str(item["instance_id"]): item
+        for item in harness_summary.get("results", ())
+        if item.get("instance_id")
+    }
+    rows: list[dict[str, Any]] = []
+    for case_id in sorted(set(generated) | set(harnessed)):
+        generation = generated.get(case_id, {})
+        harness_result = harnessed.get(case_id, {})
+        transitions = _transition_process(generation)
+        effective_components = [
+            item for item in generation.get("component_effectiveness", ())
+            if item.get("effective")
+        ]
+        rows.append({
+            "instance_id": case_id,
+            "generation_status": generation.get("status", "MISSING"),
+            "harness_status": harness_result.get("status", "PENDING"),
+            "attempt": generation.get("attempt"),
+            "started_at": generation.get("started_at"),
+            "finished_at": generation.get("finished_at"),
+            "phase_history": generation.get("phase_history", []),
+            "graph_timings_seconds": _graph_stage_timings(generation),
+            "graph_build_records": generation.get(
+                "analysis_resources", {}
+            ).get("graph_build_records", []),
+            "analysis_timings": generation.get("analysis_timings", {}),
+            "analysis_resources": generation.get("analysis_resources", {}),
+            "analysis_stats": generation.get("analysis_stats", {}),
+            "graph_summary": generation.get("graph_summary", {}),
+            "deepseek_calls": generation.get("deepseek_calls", []),
+            "transitions": transitions,
+            "accepted_transition_count": sum(
+                row["decision"] == "COMMIT" for row in transitions
+            ),
+            "rolled_back_transition_count": sum(
+                row["decision"] == "ROLLBACK" for row in transitions
+            ),
+            "effective_components": effective_components,
+            "all_components": generation.get("component_effectiveness", []),
+            "successful_steps": [
+                {
+                    "transition_id": row["transition_id"],
+                    "edit_ids": row["actual_edit_ids"],
+                    "eliminated_counterexamples": row["eliminated_counterexample_ids"],
+                }
+                for row in transitions
+                if row["decision"] == "COMMIT"
+            ],
+            "failure": {
+                "error": generation.get("error"),
+                "traceback": generation.get("error_traceback"),
+                "worker_stderr": generation.get("worker_stderr"),
+            } if generation.get("status") != "GRAPH_REACHED" else None,
+            "harness": {
+                "patch_apply": harness_result.get("patch_apply"),
+                "fail_to_pass": harness_result.get("fail_to_pass"),
+                "pass_to_pass": harness_result.get("pass_to_pass"),
+            } if harness_result else None,
+            "patch_path": generation.get("patch_path"),
+            "patch_hash": generation.get("patch_hash"),
+            "run_root": generation.get("run_root"),
+        })
+    report = {
+        "generated_at": utc_now(),
+        "case_count": len(rows),
+        "results": rows,
+    }
+    _write_json(EXPERIMENT_ROOT / "case_process_report.json", report)
+    lines = [
+        "# SWE51 Case Process Report",
+        "",
+        f"- Cases observed: `{len(rows)}`",
+        "- Every row records generation phases, all five graph timings, DeepSeek calls, transitions, component outcomes, and isolated harness results.",
+        "",
+        "| Case | Generation | Harness | Semantic | Index | Requirement | Program | Binding | Challenge | Initial patch | Commit/Rollback |",
+        "|---|---|---|---:|---:|---:|---:|---:|---:|---:|---:|",
+    ]
+    for row in rows:
+        timing = row["graph_timings_seconds"]
+        lines.append(
+            f"| `{row['instance_id']}` | `{row['generation_status']}` | `{row['harness_status']}` | "
+            f"{timing['semantic_graph']:.3f} | {timing['repository_index']:.3f} | "
+            f"{timing['requirement_graph']:.3f} | {timing['program_graph']:.3f} | "
+            f"{timing['binding_graph']:.3f} | {timing['challenge_graph']:.3f} | "
+            f"{timing['initial_generation']:.3f} | "
+            f"{row['accepted_transition_count']}/{row['rolled_back_transition_count']} |"
+        )
+    lines.extend(["", "## Per-case process", ""])
+    for row in rows:
+        phase_names = [
+            str(item.get("phase") or item.get("to") or item)
+            if isinstance(item, dict) else str(item)
+            for item in row["phase_history"]
+        ]
+        lines.extend([
+            f"### `{row['instance_id']}`",
+            "",
+            f"- Generation/Harness: `{row['generation_status']}` / `{row['harness_status']}`",
+            f"- Phase path: `{' -> '.join(phase_names) if phase_names else 'not recorded'}`",
+            f"- Graph timings: `{json.dumps(row['graph_timings_seconds'], sort_keys=True)}`",
+            f"- Graph build records: `{len(row['graph_build_records'])}` (initial and every incremental/context update)",
+            f"- DeepSeek calls: `{len(row['deepseek_calls'])}`",
+            f"- Transitions: `{len(row['transitions'])}`; accepted `{row['accepted_transition_count']}`, rolled back `{row['rolled_back_transition_count']}`",
+            f"- Effective components: `{len(row['effective_components'])}/{len(row['all_components'])}`",
+        ])
+        if row["successful_steps"]:
+            lines.append(
+                f"- Successful steps: `{json.dumps(row['successful_steps'], sort_keys=True)}`"
+            )
+        if row["failure"]:
+            lines.append(
+                f"- Failure reason: `{str(row['failure'].get('error') or 'no certified Reach transition')[:500]}`"
+            )
+        lines.extend([
+            f"- Patch: `{row['patch_path'] or ''}`",
+            f"- Full structured process: `case_process_report.json` entry `{row['instance_id']}`",
+            "",
+        ])
+    (EXPERIMENT_ROOT / "case_process_report.md").write_text(
+        "\n".join(lines) + "\n", encoding="utf-8"
+    )
     return report
 
 
@@ -384,19 +653,27 @@ def _generate_one(
     raw: dict[str, Any],
     transport: DeepSeekHTTPTransport,
     max_revisions: int,
+    *,
+    force: bool = False,
 ) -> dict[str, Any]:
     case_id = str(raw["instance_id"])
     tree = TREE_ROOT / case_id
     run_root = RUN_ROOT / case_id
     result_path = RESULT_ROOT / f"{case_id}.json"
-    if result_path.exists():
-        return json.loads(result_path.read_text(encoding="utf-8"))
+    previous = _read_json(result_path)
+    if previous is not None and not force:
+        return previous
+    if force:
+        _archive_path(result_path, GENERATION_HISTORY_ROOT, case_id)
+        _archive_path(run_root, RUN_ROOT / "_history", case_id)
     result: dict[str, Any] = {
         "instance_id": case_id,
         "repo": raw["repo"],
         "base_commit": raw["base_commit"],
+        "attempt": int((previous or {}).get("attempt", 0)) + 1,
         "started_at": utc_now(),
         "generation_source": "generation_public_instances.jsonl",
+        "implementation": "patch_first_incremental_v1",
     }
     if not tree.is_dir():
         result.update({"status": "BLOCKED_REPOSITORY", "error": str(tree)})
@@ -484,6 +761,7 @@ def _run_case_subprocess(
     model: str,
     max_revisions: int,
     timeout: int | None,
+    force: bool,
 ) -> dict[str, Any]:
     case_id = str(raw["instance_id"])
     result_path = RESULT_ROOT / f"{case_id}.json"
@@ -500,6 +778,8 @@ def _run_case_subprocess(
         "--max-revisions",
         str(max_revisions),
     ]
+    if force:
+        command.append("--force")
     try:
         process = subprocess.run(
             command,
@@ -553,9 +833,11 @@ def generate(
     key_path: Path,
     only: set[str] | None = None,
     case_timeout: int | None = None,
+    force: bool = False,
 ) -> dict[str, Any]:
     RESULT_ROOT.mkdir(parents=True, exist_ok=True)
     all_public = _read_jsonl(PUBLIC_PATH)
+    _validate_only_ids(all_public, only)
     public = all_public
     if only:
         public = [item for item in all_public if str(item["instance_id"]) in only]
@@ -591,6 +873,7 @@ def generate(
                 model=model,
                 max_revisions=max_revisions,
                 timeout=case_timeout,
+                force=force,
             )
             for item in public
         ]
@@ -613,13 +896,21 @@ def generate(
         "deepseek_model": model,
         "deepseek_concurrency": min(max_workers, 10),
         "case_timeout_seconds": None if case_timeout is None or case_timeout <= 0 else case_timeout,
+        "forced": force,
         "completed_at": utc_now(),
     }
     _write_json(EXPERIMENT_ROOT / "generation_summary.json", summary)
     return summary
 
 
-def generate_case(instance_id: str, key_path: Path, model: str, max_revisions: int) -> dict[str, Any]:
+def generate_case(
+    instance_id: str,
+    key_path: Path,
+    model: str,
+    max_revisions: int,
+    *,
+    force: bool = False,
+) -> dict[str, Any]:
     raw = next(
         item for item in _read_jsonl(PUBLIC_PATH)
         if str(item["instance_id"]) == instance_id
@@ -633,7 +924,7 @@ def generate_case(instance_id: str, key_path: Path, model: str, max_revisions: i
         base_url=os.environ.get("DEEPSEEK_BASE_URL", "https://api.deepseek.com"),
         max_concurrency=1,
     )
-    result = _generate_one(raw, transport, max_revisions)
+    result = _generate_one(raw, transport, max_revisions, force=force)
     print(json.dumps({"instance_id": instance_id, "status": result.get("status")}, sort_keys=True), flush=True)
     return result
 
@@ -650,13 +941,23 @@ def _run_command(command: list[str], cwd: Path, timeout: int) -> dict[str, Any]:
             env={**os.environ, "PYTHONHASHSEED": "0", "PYTHONDONTWRITEBYTECODE": "1"},
             check=False,
         )
+        diagnostic = f"{process.stdout}\n{process.stderr}".lower()
+        blocked = any(marker in diagnostic for marker in (
+            "no module named pytest",
+            "command not found",
+            "no such file or directory",
+            "failed to create process",
+        ))
         return {
             "command": command,
             "return_code": process.returncode,
             "stdout": process.stdout[-30000:],
             "stderr": process.stderr[-30000:],
             "duration_seconds": time.monotonic() - started,
-            "status": "PASS" if process.returncode == 0 else "FAIL",
+            "status": (
+                "PASS" if process.returncode == 0
+                else "BLOCKED_EXTERNAL" if blocked else "FAIL"
+            ),
         }
     except subprocess.TimeoutExpired as exc:
         return {
@@ -687,11 +988,28 @@ def _apply_patch(base_tree: Path, patch_path: Path, target: Path) -> dict[str, A
     return result
 
 
-def _harness_one(raw: dict[str, Any], generation: dict[str, Any], timeout: int) -> dict[str, Any]:
+def _harness_one(
+    raw: dict[str, Any],
+    generation: dict[str, Any],
+    timeout: int,
+    *,
+    force: bool = False,
+) -> dict[str, Any]:
     case_id = str(raw["instance_id"])
     root = HARNESS_ROOT / case_id
+    result_path = HARNESS_RESULT_ROOT / f"{case_id}.json"
+    patch_hash = str(generation.get("patch_hash") or "")
+    cached = _read_json(result_path)
+    if (
+        cached is not None
+        and not force
+        and str(cached.get("generation_patch_hash") or "") == patch_hash
+    ):
+        return cached
+    if cached is not None:
+        _archive_path(result_path, HARNESS_HISTORY_ROOT, case_id)
     if root.exists():
-        shutil.rmtree(root)
+        _archive_path(root, HARNESS_HISTORY_ROOT / "trees", case_id)
     root.mkdir(parents=True)
     base_tree = TREE_ROOT / case_id
     patch_path = Path(str(generation.get("patch_path", "")))
@@ -701,18 +1019,22 @@ def _harness_one(raw: dict[str, Any], generation: dict[str, Any], timeout: int) 
     result: dict[str, Any] = {
         "instance_id": case_id,
         "generation_status": generation.get("status"),
+        "generation_patch_hash": patch_hash,
         "patch_path": str(patch_path),
         "official_source": "official_instances.jsonl (post-generation only)",
         "started_at": utc_now(),
     }
     if not base_tree.is_dir() or not patch_path.is_file():
         result.update({"status": "BLOCKED_GENERATION", "error": "missing base tree or generated patch"})
+        result["finished_at"] = utc_now()
+        _write_json(result_path, result)
         return result
     _write_json(root / "harness_evaluation_instance.json", evaluation.to_dict())
     patch_result = _apply_patch(base_tree, patch_path, root / "patched")
     result["patch_apply"] = patch_result
     if patch_result.get("status") != "PASS":
         result.update({"status": "FAIL_PATCH_APPLY", "finished_at": utc_now()})
+        _write_json(result_path, result)
         return result
     fail_to_pass = list(evaluation.fail_to_pass)
     pass_to_pass = list(evaluation.pass_to_pass)
@@ -733,28 +1055,58 @@ def _harness_one(raw: dict[str, Any], generation: dict[str, Any], timeout: int) 
     else:
         status = "FAIL_TARGET"
     result.update({"status": status, "finished_at": utc_now()})
+    _write_json(result_path, result)
     return result
 
 
-def harness(max_workers: int, timeout: int) -> dict[str, Any]:
+def harness(
+    max_workers: int,
+    timeout: int,
+    *,
+    only: set[str] | None = None,
+    force: bool = False,
+) -> dict[str, Any]:
     official = {str(item["instance_id"]): item for item in _read_jsonl(OFFICIAL_PATH)}
+    _validate_only_ids(list(official.values()), only)
     summary_path = EXPERIMENT_ROOT / "generation_summary.json"
     summary = json.loads(summary_path.read_text(encoding="utf-8")) if summary_path.is_file() else {}
     generated = {str(item["instance_id"]): item for item in summary.get("results", [])}
+    selected = {
+        case_id: item for case_id, item in official.items()
+        if not only or case_id in only
+    }
+    prior_by_id: dict[str, dict[str, Any]] = {}
+    previous_summary = _read_json(EXPERIMENT_ROOT / "harness_summary.json") or {}
+    prior_by_id.update({
+        str(item["instance_id"]): item
+        for item in previous_summary.get("results", ())
+        if item.get("instance_id")
+    })
+    for result_path in sorted(HARNESS_RESULT_ROOT.glob("*.json")):
+        item = _read_json(result_path)
+        if item and item.get("instance_id"):
+            prior_by_id[str(item["instance_id"])] = item
     results: list[dict[str, Any]] = []
     with ThreadPoolExecutor(max_workers=min(max_workers, 10), thread_name_prefix="swe51-harness") as pool:
         futures = [
-            pool.submit(_harness_one, item, generated.get(case_id, {}), timeout)
-            for case_id, item in sorted(official.items())
+            pool.submit(
+                _harness_one, item, generated.get(case_id, {}), timeout,
+                force=force,
+            )
+            for case_id, item in sorted(selected.items())
         ]
         for future in as_completed(futures):
             result = future.result()
             results.append(result)
+            prior_by_id[str(result["instance_id"])] = result
             print(json.dumps({"instance_id": result["instance_id"], "status": result.get("status")}, sort_keys=True), flush=True)
     output = {
         "stage": "official_harness",
         "case_count": len(official),
-        "results": sorted(results, key=lambda item: item["instance_id"]),
+        "observed_case_count": len(prior_by_id),
+        "selected_case_count": len(selected),
+        "forced": force,
+        "results": sorted(prior_by_id.values(), key=lambda item: item["instance_id"]),
         "completed_at": utc_now(),
     }
     _write_json(EXPERIMENT_ROOT / "harness_summary.json", output)
@@ -765,11 +1117,15 @@ def main() -> int:
     parser = argparse.ArgumentParser()
     sub = parser.add_subparsers(dest="command", required=True)
     gen = sub.add_parser("generate")
-    gen.add_argument("--workers", type=int, default=10)
+    gen.add_argument("--workers", type=int, default=4)
     gen.add_argument("--max-revisions", type=int, default=10)
-    gen.add_argument("--model", default=os.environ.get("DEEPSEEK_MODEL", "deepseek-v4-pro"))
+    gen.add_argument("--model", default=os.environ.get("DEEPSEEK_MODEL", "deepseek-chat"))
     gen.add_argument("--key-path", default="/home/slt/ReachPatch/ds_pwd.txt")
     gen.add_argument("--only", action="append", default=[])
+    gen.add_argument(
+        "--force", action="store_true",
+        help="rerun only the selected cases and archive their previous result/run",
+    )
     gen.add_argument(
         "--case-timeout",
         type=int,
@@ -779,11 +1135,17 @@ def main() -> int:
     case = sub.add_parser("case")
     case.add_argument("--instance-id", required=True)
     case.add_argument("--key-path", default="/home/slt/ReachPatch/ds_pwd.txt")
-    case.add_argument("--model", default=os.environ.get("DEEPSEEK_MODEL", "deepseek-v4-pro"))
+    case.add_argument("--model", default=os.environ.get("DEEPSEEK_MODEL", "deepseek-chat"))
     case.add_argument("--max-revisions", type=int, default=10)
+    case.add_argument("--force", action="store_true")
     har = sub.add_parser("harness")
-    har.add_argument("--workers", type=int, default=10)
+    har.add_argument("--workers", type=int, default=4)
     har.add_argument("--timeout", type=int, default=900)
+    har.add_argument("--only", action="append", default=[])
+    har.add_argument(
+        "--force", action="store_true",
+        help="rerun only selected harness cases and archive prior evaluation",
+    )
     args = parser.parse_args()
     if args.command == "generate":
         summary = generate(
@@ -793,18 +1155,27 @@ def main() -> int:
             Path(args.key_path),
             set(args.only),
             args.case_timeout,
+            args.force,
         )
         write_failure_report(generation_summary=summary)
         write_experiment_report(summary)
+        write_case_process_report(summary)
     elif args.command == "case":
-        generate_case(args.instance_id, Path(args.key_path), args.model, args.max_revisions)
+        generate_case(
+            args.instance_id, Path(args.key_path), args.model,
+            args.max_revisions, force=args.force,
+        )
         return 0
     else:
-        summary = harness(args.workers, args.timeout)
+        summary = harness(
+            args.workers, args.timeout,
+            only=set(args.only), force=args.force,
+        )
         generation_path = EXPERIMENT_ROOT / "generation_summary.json"
         generation_summary = json.loads(generation_path.read_text(encoding="utf-8")) if generation_path.is_file() else {}
         write_failure_report(generation_summary=generation_summary, harness_summary=summary)
         write_experiment_report(generation_summary, summary)
+        write_case_process_report(generation_summary, summary)
     counts: dict[str, int] = {}
     for item in summary.get("results", []):
         status = str(item.get("status"))

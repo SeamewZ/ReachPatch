@@ -560,6 +560,8 @@ def build_active_binding_graph(
 
     if max_target_units < 1 or max_preservation_units < 1:
         raise ValueError("active binding limits must be positive")
+    total_started = time.perf_counter()
+    unit_started = total_started
     requirement_hash = requirement_graph.semantic_layer_hash()
     program_hash = program_graph.program_hash()
     result = BindingGraph(
@@ -601,6 +603,20 @@ def build_active_binding_graph(
             or item.path_obligation_id in affected_path_ids
         )
     ]
+    bound_leaf_ids = {item.leaf_id for item in obligations}
+    for leaf_id in sorted(affected_leaf_ids - bound_leaf_ids):
+        if leaf_id not in requirement_graph.leaves:
+            continue
+        leaf = requirement_graph.leaves[leaf_id]
+        result.add_frontier(_binding_frontier(
+            stable_id("unbound-requirement", leaf_id, requirement_hash, program_hash),
+            leaf_id,
+            "UNBOUND_REQUIREMENT",
+            "requirement leaf has no feasible active path obligation",
+            "recover an entrypoint/observation path before claiming coverage",
+            evidence_ids=leaf.supporting_evidence,
+            hard=bool(leaf.mandatory),
+        ))
     obligations.sort(key=lambda item: (
         requirement_graph.leaves[item.leaf_id].authority_class.value == "PRESERVATION",
         -requirement_graph.leaves[item.leaf_id].weight,
@@ -687,6 +703,10 @@ def build_active_binding_graph(
         "infeasible_count": sum(item.status == BindingStatus.INFEASIBLE for item in result.units.values()),
         "oracle_frontier_count": len(result.oracle_frontiers),
         "deadline_truncated": int(deadline_truncated),
+    }
+    result.build_timings = {
+        "unit_materialization_seconds": time.perf_counter() - unit_started,
+        "total_seconds": time.perf_counter() - total_started,
     }
     return result
 
