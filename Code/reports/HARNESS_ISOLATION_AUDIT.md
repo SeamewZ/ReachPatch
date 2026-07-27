@@ -74,6 +74,16 @@ The harness copies the base tree into its own directory, applies the sealed pure
 
 Repository maintainers may have ordinary public tests whose filenames include broad words such as “golden”. The hard path filter targets explicit official/gold-patch/hidden/harness evidence names; Controller-declared public tests remain readable unless they match an official-only path. Project network/database tests remain public evidence but may be `BLOCKED_EXTERNAL`; blocked status is not converted to PASS.
 
+## Current sealed evaluation
+
+The latest generation merge yielded 41 nonempty sealed patches. The harness
+evaluated exactly those patches in independent trees with four workers. It
+recorded 38 `UNKNOWN_EXECUTION` results caused by missing dependencies,
+collection/build failures or other external execution blockers, and 3
+`FAIL_PRESERVATION_REGRESSION` results. No patch was selected or modified
+based on these outcomes, and no harness result was copied into an ArtifactStore
+or Generator conversation.
+
 ## Conclusion
 
 No harness/gold feedback path into the Generator was found. The sealed patch is evaluated in an independent tree and result namespace, and the persistent Generator cannot resume from those results.
@@ -81,8 +91,10 @@ No harness/gold feedback path into the Generator was found. The sealed patch is 
 ## Observed Sealed Evaluation
 
 The sealed `psf__requests-2148` patch was evaluated after generation in the
-independent harness process. Patch application passed. Both official target
-and preservation command groups were `BLOCKED_EXTERNAL` because the configured
-harness Python environment did not provide pytest, so the aggregate status was
-`UNKNOWN_EXECUTION`. The result remains under `experiments/swe51/harness` and
-was not read by Generator or `resume()`.
+independent harness process. Patch application passed. Its historical target
+and preservation command groups were `BLOCKED_EXTERNAL` because that harness
+Python environment did not provide pytest, so the aggregate status was
+`UNKNOWN_EXECUTION`. Pytest has since been installed in the harness interpreter;
+sealed patches are re-evaluated independently after generation completes. The
+historical result remains under `experiments/swe51/harness` and was not read by
+Generator or `resume()`.

@@ -130,8 +130,8 @@ prove behavior.
 
 ## Evidence
 
-- Unit, integration and conformance suite: **42 passed** with
-  `.venv/bin/pytest -q --basetemp=.pytest-tmp`.
+- Unit, integration and conformance suite: **120 passed** with
+  `PYTHONPATH=. pytest -q`. `compileall` and `git diff --check` also pass.
 - The permitted dataset copy at
   `dataset/patchpsro_55_unique51` was inventoried as 55 files, 1,404,216
   bytes, with recursive per-file-SHA256 digest
@@ -167,9 +167,10 @@ above is historical matrix context; normal `run`, `resume`, and SWE runner
 calls use the patch-first route. Legacy full-graph constructors are explicitly
 gated by `REACHPATCH_ENABLE_LEGACY_FULL_GRAPH=1`.
 
-The current behavior suite is **105 passed**. The sealed requests smoke
-produced a real 918-byte patch and one COMMIT, then stopped at
-`BUDGET_EXHAUSTED` with four deferred bindings and no executable challenges.
-Its independent harness result was `UNKNOWN_EXECUTION` because both command
-groups were `BLOCKED_EXTERNAL` (pytest unavailable); this evidence was not
-returned to the Generator.
+The current behavior suite is **120 passed**. The merged 51-case generation
+results contain 50 `BUDGET_EXHAUSTED` terminals and one
+`GENERATOR_NONPROGRESS` terminal; 41 cases have nonempty sealed patches. The
+independent harness evaluated exactly those 41 patches with four workers and
+returned 38 `UNKNOWN_EXECUTION` results and 3
+`FAIL_PRESERVATION_REGRESSION` results. These harness outcomes remain outside
+the Generator and ArtifactStore input path.

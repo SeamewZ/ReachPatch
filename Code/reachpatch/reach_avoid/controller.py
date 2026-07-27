@@ -45,7 +45,10 @@ from reachpatch.models.controller import (
 from reachpatch.models.core import Instance
 from reachpatch.models.enums import Confidence, ControllerPhase, Decision, OutcomeStatus
 from reachpatch.models.isolation import assert_generation_payload, is_official_only_path
-from reachpatch.oracle.discriminator import DiscriminatorProbe, HypothesisDiscriminator
+from reachpatch.oracle.discriminator import (
+    HypothesisDiscriminator,
+    discriminator_probe_from_dict,
+)
 from reachpatch.program_graph import (
     Deadline, GraphBudget, build_active_program_slice, build_repository_index,
     recover_repair_slice_seeds, update_active_program_slice,
@@ -103,6 +106,7 @@ class ReachPatchConfig(SerializableRecord):
     max_active_target_bindings: int = 20
     max_active_preservation_bindings: int = 20
     max_active_challenges: int = 40
+    max_parallel_challenge_executions: int = 2
     repository_index_deadline_seconds: float = 60.0
     program_slice_deadline_seconds: float = 90.0
     requirement_deadline_seconds: float = 30.0
@@ -130,6 +134,7 @@ class ReachPatchConfig(SerializableRecord):
             self.max_program_edges, self.max_protocol_candidates_per_operation,
             self.max_path_classes_per_leaf, self.max_active_target_bindings,
             self.max_active_preservation_bindings, self.max_active_challenges,
+            self.max_parallel_challenge_executions,
             self.repository_index_deadline_seconds,
             self.program_slice_deadline_seconds, self.requirement_deadline_seconds,
             self.binding_deadline_seconds, self.challenge_deadline_seconds,
@@ -443,49 +448,27 @@ class ReachPatchController:
         )
         program = slice_result.graph
         timings["active_program_slice_seconds"] = slice_result.elapsed_seconds
-        # Build only the bounded active product needed to give the initial
-        # generator useful executable context.  This is deliberately not the
-        # historical full closure: path construction is capped per leaf and
-        # binding/challenge materialization is capped by the active budgets.
-        requirement_paths_started = time.perf_counter()
-        compile_requirement_paths(
-            requirements,
-            program,
-            max_open_world_seeds=min(32, self.config.max_precise_functions),
-            max_observation_nodes=min(96, self.config.max_program_nodes),
-            max_paths_per_entry=self.config.max_path_classes_per_leaf,
-            max_path_classes_per_leaf=self.config.max_path_classes_per_leaf,
-            promote_all_program_predicates=False,
-            deadline=time.monotonic() + self.config.requirement_deadline_seconds,
+        # The first Generator call must precede path enumeration and product
+        # materialization.  Empty sparse products keep the state schema and
+        # hashes well-defined; evaluate_patch_revision() fills them from the
+        # first actual diff and executable evidence.
+        requirement_hash = requirements.semantic_layer_hash()
+        program_hash = program.program_hash()
+        binding = BindingGraph(
+            requirement_graph_hash=requirement_hash,
+            program_graph_hash=program_hash,
+            assignment_id=requirements.assignment_id,
         )
-        timings["requirement_graph_initial_seconds"] = (
-            time.perf_counter() - requirement_paths_started
+        challenges = ChallengeGraph(
+            requirement_graph_hash=requirement_hash,
+            program_graph_hash=program_hash,
+            binding_graph_hash=binding.graph_hash(),
         )
-        binding_started = time.perf_counter()
-        binding = build_active_binding_graph(
-            requirements,
-            program,
-            previous=None,
-            affected_leaf_ids=set(requirements.leaves),
-            affected_path_ids=set(requirements.path_obligations),
-            max_target_units=self.config.max_active_target_bindings,
-            max_preservation_units=self.config.max_active_preservation_bindings,
-            deadline=time.monotonic() + self.config.binding_deadline_seconds,
-        )
-        timings["binding_graph_initial_seconds"] = time.perf_counter() - binding_started
-        challenge_started = time.perf_counter()
-        challenges = materialize_active_challenges(
-            requirements,
-            program,
-            binding,
-            actual_diff=None,
-            previous_outcomes={},
-            max_challenges=self.config.max_active_challenges,
-            deadline=time.monotonic() + self.config.challenge_deadline_seconds,
-        )
-        timings["challenge_graph_initial_seconds"] = time.perf_counter() - challenge_started
+        timings["requirement_graph_initial_seconds"] = 0.0
+        timings["binding_graph_initial_seconds"] = 0.0
+        timings["challenge_graph_initial_seconds"] = 0.0
         initial_graph_record = {
-            "kind": "initial_active",
+            "kind": "initial_localization",
             "program_graph_seconds": float(timings["active_program_slice_seconds"]),
             "requirement_graph_seconds": float(timings["requirement_graph_initial_seconds"]),
             "binding_graph_seconds": float(timings["binding_graph_initial_seconds"]),
@@ -502,14 +485,8 @@ class ReachPatchController:
                 len(requirements.frontiers) + len(program.frontiers)
                 + len(binding.frontiers) + len(challenges.frontiers)
             ),
-            "truncated": bool(
-                slice_result.truncated_reason
-                or any(
-                    frontier.kind == "ANALYSIS_TRUNCATED"
-                    for graph in (requirements, program, binding, challenges)
-                    for frontier in getattr(graph, "frontiers", {}).values()
-                )
-            ),
+            "truncated": bool(slice_result.truncated_reason),
+            "products_materialized": False,
         }
         episode_id = stable_id(
             "patch-first-episode", instance.instance_id,
@@ -1244,24 +1221,33 @@ class ReachPatchController:
         executed_probe_ids = set(
             state.runtime_metrics.get("executed_discriminator_probe_ids", ())
         )
-        observations = tuple(
-            dict(run.run.channels)
-            for paired in state.trace_bundles.values()
-            for run in paired.patch_bundle.runs
-            if run.run.observation_reached
+        persisted_probe_ids = set(
+            state.runtime_metrics.get("persisted_discriminator_result_ids", ())
         )
-        if observations:
-            for raw in state.runtime_metrics.get("discriminator_probes", ()):
-                probe = DiscriminatorProbe(
-                    probe_id=str(raw["probe_id"]),
-                    decision_id=str(raw["decision_id"]),
-                    alternative_claim_ids=tuple(raw.get("alternative_claim_ids", ())),
-                    observation_channels=tuple(raw.get("observation_channels", ())),
-                    recipe_hint=dict(raw.get("recipe_hint", {})),
-                    correctness_authority=str(raw.get("correctness_authority", "NONE")),
-                )
-                if probe.probe_id in executed_probe_ids:
-                    continue
+        challenge_mapping = state.runtime_metrics.get(
+            "discriminator_probe_challenges", {}
+        )
+        for raw in state.runtime_metrics.get("discriminator_probes", ()):
+            probe = discriminator_probe_from_dict(raw)
+            if (
+                probe.probe_id not in executed_probe_ids
+                or probe.probe_id in persisted_probe_ids
+            ):
+                continue
+            bundle_ids = {
+                state.challenge_graph.cells[challenge_id].execution_bundle_id
+                for challenge_id in challenge_mapping.get(probe.probe_id, ())
+                if challenge_id in state.challenge_graph.cells
+                and state.challenge_graph.cells[challenge_id].execution_bundle_id
+            }
+            observations = tuple(
+                dict(run.run.channels)
+                for bundle_id in sorted(bundle_ids)
+                if bundle_id in state.trace_bundles
+                for run in state.trace_bundles[bundle_id].patch_bundle.runs
+                if run.run.observation_reached
+            )
+            if observations:
                 discriminator_result = HypothesisDiscriminator().record(
                     probe, observations[:20], evidence_ids=(), selected_claim_id=None,
                 )
@@ -1271,10 +1257,10 @@ class ReachPatchController:
                     confidence=Confidence.CONFIRMED,
                     status=discriminator_result.correctness_status,
                 )
-                executed_probe_ids.add(probe.probe_id)
-            state.runtime_metrics["executed_discriminator_probe_ids"] = sorted(
-                executed_probe_ids
-            )
+                persisted_probe_ids.add(probe.probe_id)
+        state.runtime_metrics["persisted_discriminator_result_ids"] = sorted(
+            persisted_probe_ids
+        )
         artifacts.persist_state(state)
         self._update_run_manifest(state)
 
@@ -1867,11 +1853,27 @@ class ReachPatchController:
                     request for request in revision.context_requests
                     if request not in conversation.pending_context_requests
                 )
-                nonprogress += 1
                 if not revision.context_requests:
-                    state.runtime_metrics["generator_contextless_revisions"] = int(
+                    contextless = int(
                         state.runtime_metrics.get("generator_contextless_revisions", 0)
                     ) + 1
+                    state.runtime_metrics["generator_contextless_revisions"] = contextless
+                    nonprogress += 1
+                    # A persistent conversation is useful only while it is
+                    # producing evidence, context requests, or edits.  Do
+                    # not repeatedly reset root recovery and spend every
+                    # submitted revision on the same browse-only response.
+                    if contextless >= max(
+                        2, self.config.nonprogress_before_root_recovery
+                    ):
+                        state.termination_status = "GENERATOR_NONPROGRESS"
+                        state.runtime_metrics["generator_nonprogress_reason"] = (
+                            "consecutive revisions contained neither edits nor "
+                            "targeted context requests"
+                        )
+                        break
+                else:
+                    nonprogress += 1
                 continue
             conversion = convert_revision_action(state, revision)
             if conversion.status not in {

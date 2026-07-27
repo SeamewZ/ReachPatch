@@ -12,8 +12,15 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from typing import Any
 
+# Keep direct `python experiments/swe51/runner.py ...` invocations equivalent
+# to module execution when the repository has not been installed as a package.
+CODE_ROOT = Path(__file__).resolve().parents[2]
+if str(CODE_ROOT) not in sys.path:
+    sys.path.insert(0, str(CODE_ROOT))
+
 from reachpatch.models.base import utc_now
 from reachpatch.models.isolation import GenerationInstance, HarnessEvaluationInstance
+from reachpatch.execution.mechanical import execution_environment_blocked
 from reachpatch.reach_avoid.controller import (
     AnalysisBlocked,
     ReachPatchConfig,
@@ -25,7 +32,6 @@ from reachpatch.repair.deepseek_agent import (
 )
 
 
-CODE_ROOT = Path(__file__).resolve().parents[2]
 DATASET_ROOT = CODE_ROOT / "dataset" / "patchpsro_55_unique51"
 PUBLIC_PATH = DATASET_ROOT / "generation_public_instances.jsonl"
 OFFICIAL_PATH = DATASET_ROOT / "official_instances.jsonl"
@@ -780,10 +786,16 @@ def _run_case_subprocess(
     ]
     if force:
         command.append("--force")
+    child_environment = dict(os.environ)
+    child_pythonpath = [str(CODE_ROOT)]
+    if child_environment.get("PYTHONPATH"):
+        child_pythonpath.append(child_environment["PYTHONPATH"])
+    child_environment["PYTHONPATH"] = os.pathsep.join(child_pythonpath)
     try:
         process = subprocess.run(
             command,
             cwd=CODE_ROOT,
+            env=child_environment,
             capture_output=True,
             text=True,
             timeout=None if timeout is None or timeout <= 0 else timeout,
@@ -941,13 +953,9 @@ def _run_command(command: list[str], cwd: Path, timeout: int) -> dict[str, Any]:
             env={**os.environ, "PYTHONHASHSEED": "0", "PYTHONDONTWRITEBYTECODE": "1"},
             check=False,
         )
-        diagnostic = f"{process.stdout}\n{process.stderr}".lower()
-        blocked = any(marker in diagnostic for marker in (
-            "no module named pytest",
-            "command not found",
-            "no such file or directory",
-            "failed to create process",
-        ))
+        blocked = execution_environment_blocked(
+            process.stdout, process.stderr
+        )
         return {
             "command": command,
             "return_code": process.returncode,

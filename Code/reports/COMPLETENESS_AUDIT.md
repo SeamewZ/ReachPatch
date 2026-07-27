@@ -12,7 +12,7 @@ Checks run:
 | Check | Result |
 |---|---|
 | Python compilation | PASS |
-| Unit/integration/conformance suite | 42 passed |
+| Unit/integration/conformance suite | 120 passed |
 | Fresh closed-loop run | PASS as a run, terminal `BUDGET_EXHAUSTED` |
 | Artifact/index/schema verification | PASS |
 | DICC closure replay from stored plan and obligations | PASS |
@@ -90,7 +90,7 @@ behavior by refusing Reach when universal coverage is unproved.
 
 ## Patch-first Audit Addendum (2026-07-27)
 
-The current production path has been verified with **105 passed** tests. It
+The current production path has been verified with **120 passed** tests. It
 uses summary-only `RepositoryIndex`, bounded `ActiveProgramSlice`,
 `compile_requirement_core`, sparse active bindings, priority-bounded
 challenges, paired incumbent/trial public checks, and incremental graph
@@ -103,3 +103,9 @@ comparisons are schema-registered and persisted. Harness results remain outside
 Generator artifacts and resume input. Full-graph APIs remain only as explicit
 environment-gated diagnostics, not normal `run`, `resume`, or SWE generation
 production paths.
+
+The final-turn Generator audit additionally verifies that the production HTTP
+transport can force `apply_edits` after a browse-only revision and that the
+Controller seals repeated no-edit/no-context responses as
+`GENERATOR_NONPROGRESS`; it cannot silently consume the complete revision
+budget in an endless browse loop.

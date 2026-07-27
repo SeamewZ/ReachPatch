@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Iterable
@@ -396,14 +397,18 @@ def execute_challenges(
     patch_repository: str | Path,
     *,
     challenge_ids: Iterable[str] | None = None,
+    max_workers: int = 1,
 ) -> ChallengeExecutionResult:
+    if max_workers < 1:
+        raise ValueError("max_workers must be positive")
     selected = sorted(challenge_ids or challenge_graph.cells)
     bundles: list[PairedTraceBundle] = []
-    execution_cache: dict[tuple[str, str], PairedTraceBundle] = {}
     appended_bundle_ids: set[str] = set()
     executed: list[str] = []
     skipped: list[str] = []
     locations: dict[tuple[str, int, str], dict] = {}
+    challenge_keys: dict[str, tuple[str, str]] = {}
+    jobs: dict[tuple[str, str], tuple[object, object]] = {}
     for challenge_id in selected:
         cell = challenge_graph.cells[challenge_id]
         if cell.terminal_status != ChallengeTerminalStatus.PENDING:
@@ -420,12 +425,47 @@ def execute_challenges(
         recipe = challenge_graph.recipes[cell.trigger_recipe_id]
         scenario = challenge_graph.scenarios[cell.scenario_id]
         cache_key = (recipe.recipe_id, scenario.scenario_id)
-        bundle = execution_cache.get(cache_key)
-        if bundle is None:
-            bundle = executor.execute_paired(
+        challenge_keys[challenge_id] = cache_key
+        jobs.setdefault(cache_key, (recipe, scenario))
+
+    execution_cache: dict[tuple[str, str], PairedTraceBundle] = {}
+    if max_workers == 1 or len(jobs) <= 1:
+        for cache_key in sorted(jobs):
+            recipe, scenario = jobs[cache_key]
+            execution_cache[cache_key] = executor.execute_paired(
                 recipe, base_repository, patch_repository, scenario
             )
-            execution_cache[cache_key] = bundle
+    else:
+        # Each recipe executes in isolated worker subprocesses and a distinct
+        # temporary directory.  Keep graph mutation on this thread so result
+        # ordering and terminal-state updates remain deterministic.
+        with ThreadPoolExecutor(
+            max_workers=min(max_workers, len(jobs)),
+            thread_name_prefix="reachpatch-challenge",
+        ) as pool:
+            futures = {
+                pool.submit(
+                    executor.execute_paired,
+                    recipe,
+                    base_repository,
+                    patch_repository,
+                    scenario,
+                ): cache_key
+                for cache_key, (recipe, scenario) in jobs.items()
+            }
+            try:
+                for future in as_completed(futures):
+                    execution_cache[futures[future]] = future.result()
+            except BaseException:
+                for future in futures:
+                    future.cancel()
+                raise
+
+    for challenge_id in selected:
+        cache_key = challenge_keys.get(challenge_id)
+        if cache_key is None:
+            continue
+        bundle = execution_cache[cache_key]
         record_execution(challenge_graph, challenge_id, bundle)
         executed.append(challenge_id)
         for trace_bundle in (bundle.base_bundle, bundle.patch_bundle):

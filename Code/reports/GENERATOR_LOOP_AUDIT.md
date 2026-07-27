@@ -45,7 +45,7 @@ finish_revision
 
 Official/gold/harness paths are rejected in code. Test reads are allowed only when the Controller marked the path as visible/public for this instance. Test edits are always rejected. Search silently excludes non-public test and official-only paths so their content cannot enter model messages.
 
-The Controller clamps agent tool turns to `max_internal_tool_turns_per_revision`; the outer loop counts context-only, invalid and edited revisions against `max_submitted_revisions`.
+The Controller clamps agent tool turns to `max_internal_tool_turns_per_revision`; the outer loop counts context-only, invalid and edited revisions against `max_submitted_revisions`. The production HTTP transport exposes a constrained final-turn call and requests `apply_edits` explicitly when no edit has yet been staged. If the model still returns consecutive revisions with neither edits nor targeted context requests, the Controller seals `GENERATOR_NONPROGRESS` instead of resetting root recovery and looping through the same browse-only conversation.
 
 ## Context compilation
 
@@ -102,7 +102,7 @@ Public checks are not treated as patched-only mechanical commands. `PASS_PRESERV
 
 HTTP, timeout, decoding and non-object response failures become `GeneratorBlockedExternal`. The Controller persists `generator_failure`, conversation and state, writes a terminal `GENERATOR_BLOCKED_EXTERNAL` certificate and preserves any previous incumbent. It does not report a generic success or restart with a fresh conversation.
 
-Malformed tool arguments are returned to the same model conversation as structured tool errors. Invalid converted revisions are persisted as `generator_action_rejection` rather than becoming `NO_ACTION` or crashing the case.
+Malformed tool arguments are returned to the same model conversation as structured tool errors. A model-invented tool name is checked against the registered schema before dispatch and receives `INVALID_TOOL` plus the allowlist; it cannot reach `getattr` or arbitrary shell. Invalid converted revisions are persisted as `generator_action_rejection` rather than becoming `NO_ACTION` or crashing the case.
 
 ## Behavioral evidence
 
@@ -111,7 +111,13 @@ Malformed tool arguments are returned to the same model conversation as structur
 - Conversation assertions: one ID, one message history, initial count 1, repair count 2, accepted hashes 2, rejected hashes 1.
 - Conversion test covers legal single edit, coordinated edits, requested expansion, invalid operator and forbidden path.
 - External failure test produces no transition or patch, persists a failure artifact and seals `GENERATOR_BLOCKED_EXTERNAL`.
+- Unknown-tool recovery test sends an invented `grep`, receives structured feedback in the same conversation, then uses `apply_edits` and produces a real transition.
+- Final-turn synthesis test verifies the restricted tool schema and the production transport's explicit `apply_edits` choice. A contextless-loop test verifies that three consecutive no-edit/no-context revisions seal before the ten-revision budget is consumed.
 - Production-path test makes the old full builder raise if invoked; the persistent patch-first run still completes.
+
+## Live SWE51 evidence
+
+The latest 51-case generation summary contains 50 `BUDGET_EXHAUSTED` terminals and one explicit `GENERATOR_NONPROGRESS` terminal. Forty-one cases produced nonempty sealed patches. The latter terminal is `pytest-dev__pytest-7220`: after the tail-turn fix it stopped at four submitted revisions and 48 tool turns, with zero transitions and an empty patch, rather than the previous ten revisions and 120 browse-only tool turns. This is recorded as a generator failure, not success.
 
 ## Audit conclusion
 

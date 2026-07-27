@@ -185,9 +185,20 @@ class DeepSeekHTTPTransport:
         self._lock = threading.Lock()
         self.calls: list[dict[str, Any]] = []
 
-    def __call__(self, messages: list[dict], tools: list[dict]) -> dict:
-        payload = {"model": self.model, "temperature": 0, "messages": messages,
-                   "tools": tools, "tool_choice": "auto", "max_tokens": 4000}
+    def _call_with_tool_choice(
+        self,
+        messages: list[dict],
+        tools: list[dict],
+        tool_choice: str | dict,
+    ) -> dict:
+        payload = {
+            "model": self.model,
+            "temperature": 0,
+            "messages": messages,
+            "tools": tools,
+            "tool_choice": tool_choice,
+            "max_tokens": 4000,
+        }
         request = Request(
             f"{self.base_url}/chat/completions",
             data=json.dumps(payload).encode("utf-8"), method="POST",
@@ -221,14 +232,34 @@ class DeepSeekHTTPTransport:
             with self._lock:
                 self.calls.append(record)
 
+    def __call__(self, messages: list[dict], tools: list[dict]) -> dict:
+        return self._call_with_tool_choice(messages, tools, "auto")
 
-def _tool_schema() -> list[dict]:
+    def call_with_tool_choice(
+        self,
+        messages: list[dict],
+        tools: list[dict],
+        tool_choice: str | dict,
+    ) -> dict:
+        """Make a constrained final synthesis request.
+
+        DeepSeek may still emit a tool name that is absent from the advertised
+        schema when ``tool_choice`` is ``auto``.  The final repair turn is
+        therefore sent with an explicit function choice so a browsing loop
+        cannot consume the whole revision budget without staging an edit.
+        """
+        return self._call_with_tool_choice(messages, tools, tool_choice)
+
+
+def _tool_schema(
+    allowed_names: frozenset[str] | None = None,
+) -> list[dict]:
     def tool(name: str, properties: dict, required: list[str] | None = None) -> dict:
         return {"type": "function", "function": {"name": name, "description": name.replace("_", " "),
                 "parameters": {"type": "object", "properties": properties, "required": required or []}}}
     string = {"type": "string"}
     strings = {"type": "array", "items": string}
-    return [
+    schemas = [
         tool("search_code", {"query": string, "paths": strings}, ["query"]),
         tool("read_file", {"path": string, "start_line": {"type": "integer"}, "end_line": {"type": "integer"}}, ["path"]),
         tool("inspect_symbol", {"symbol": string}, ["symbol"]),
@@ -243,6 +274,21 @@ def _tool_schema() -> list[dict]:
             "required": ["relative_path", "start_line", "end_line", "expected_source", "replacement"]}}}, ["mechanism", "edits"]),
         tool("finish_revision", {"summary": string}, ["summary"]),
     ]
+    if allowed_names is None:
+        return schemas
+    return [
+        schema for schema in schemas
+        if schema["function"]["name"] in allowed_names
+    ]
+
+
+_ALLOWED_TOOL_NAMES = frozenset(
+    item["function"]["name"] for item in _tool_schema()
+)
+_FINAL_TURN_TOOL_NAMES = frozenset({
+    "apply_edits", "request_program_slice", "run_public_check",
+    "finish_revision",
+})
 
 
 class PersistentDeepSeekAgent:
@@ -283,10 +329,39 @@ class PersistentDeepSeekAgent:
         summary = ""
         turns = 0
         for turns in range(1, self.max_tool_turns + 1):
+            schemas = _tool_schema()
+            if turns == self.max_tool_turns:
+                conversation.messages.append({
+                    "role": "system",
+                    "content": (
+                        "This is the final tool turn for this revision. Stop "
+                        "browsing. Use apply_edits for the best evidence-constrained "
+                        "repair now; if a required symbol is outside the active "
+                        "slice, use request_program_slice with exact symbols. You "
+                        "may finish_revision only after staging edits or when you "
+                        "can state a concrete blocker. Do not call search/read tools."
+                    ),
+                })
+                schemas = _tool_schema(_FINAL_TURN_TOOL_NAMES)
+            available_names = frozenset(
+                schema["function"]["name"] for schema in schemas
+            )
             try:
-                message = self.transport(
-                    self._request_messages(conversation), _tool_schema()
-                )
+                request_messages = self._request_messages(conversation)
+                if turns == self.max_tool_turns and not tools.staged_edits:
+                    constrained_call = getattr(
+                        self.transport, "call_with_tool_choice", None
+                    )
+                    if callable(constrained_call):
+                        message = constrained_call(
+                            request_messages,
+                            schemas,
+                            {"type": "function", "function": {"name": "apply_edits"}},
+                        )
+                    else:
+                        message = self.transport(request_messages, schemas)
+                else:
+                    message = self.transport(request_messages, schemas)
             except GeneratorBlockedExternal:
                 raise
             except Exception as exc:
@@ -310,7 +385,14 @@ class PersistentDeepSeekAgent:
                 arguments: dict[str, Any] = {}
                 try:
                     arguments = json.loads(function.get("arguments") or "{}")
-                    if name == "apply_edits":
+                    if name not in available_names:
+                        output = {
+                            "error": "INVALID_TOOL",
+                            "requested_tool": name,
+                            "allowed_tools": sorted(available_names),
+                            "instruction": "use one of the registered repository tools",
+                        }
+                    elif name == "apply_edits":
                         mechanism = str(arguments.pop("mechanism", mechanism))
                         edits = tuple(ProposedEdit(**item) for item in arguments["edits"])
                         output = tools.apply_edits(edits)

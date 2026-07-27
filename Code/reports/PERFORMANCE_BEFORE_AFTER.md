@@ -4,7 +4,7 @@
 
 The old generation order called the full precise Program Graph before the first patch, then rebuilt Requirement, Binding and Challenge products, executed an often-empty baseline, and rebuilt products again. Every transition could call the full Program builder once more. Runtime and memory therefore scaled with unrelated repository expressions and repeated products rather than with the repair location.
 
-The new route separates a global summary index from a precise ActiveProgramSlice and generates the first patch before path/product/challenge expansion. Later edits invalidate only touched functions and direct dependents.
+The new route separates a global summary index from a precise ActiveProgramSlice and generates the first patch before Requirement path, Binding and Challenge expansion. Later edits invalidate only touched functions, their derived records and direct dependents.
 
 ## Reproducible synthetic benchmark
 
@@ -58,7 +58,7 @@ MAX_RSS_KIB=487136
 
 Before this refactor, the recorded Astropy Program Graph peak approached 10 GiB and some cases spent hours in repository-scale graph construction. That observation motivated the change but is not presented as a controlled before/after benchmark here. The 51 SWE cases must be regenerated with the new code before claiming a corpus-level speedup.
 
-A later end-to-end public-evidence-only run on `psf__requests-2148` measured: 83 repository files summarized in 0.28 seconds; initial ActiveProgramSlice in 3.47 seconds; 10,414 initial nodes and 21,891 edges; and 86.6 MiB peak RSS. It produced a 918-byte patch and one COMMIT before sealing `BUDGET_EXHAUSTED` because all four bindings lacked executable Oracles. The earlier isolated slice smoke (4,531 nodes, 8,606 edges, 1.783 seconds, 47.1 MiB) used a narrower seed/configuration and is not substituted for the end-to-end measurement. Reaching the file cap no longer disables CFG/def-use for already selected files; file, function, node/edge and RSS budgets are consumed independently.
+A public-evidence-only run on `psf__requests-2148` before the final strict ordering fix measured: 83 repository files summarized in 0.28 seconds; ActiveProgramSlice in 3.47 seconds; 10,414 nodes and 21,891 edges; and 86.6 MiB peak RSS. It produced a 918-byte patch and one COMMIT before sealing `BUDGET_EXHAUSTED` because all four bindings lacked executable Oracles. That run demonstrates a real patch transition, but is not used as proof of the newer “empty products before first generation” ordering. The earlier isolated slice smoke (4,531 nodes, 8,606 edges, 1.783 seconds, 47.1 MiB) used a narrower seed/configuration. Reaching the file cap no longer disables CFG/def-use for already selected files; file, function, node/edge and RSS budgets are consumed independently.
 
 ## Complexity change
 
@@ -77,6 +77,8 @@ A later end-to-end public-evidence-only run on `psf__requests-2148` measured: 83
 
 Repository scan, precise AST creation, CFG, def-use, protocol materialization, path enumeration, domain promotion, binding and challenge loops check their budgets internally. Limits create soft partial-analysis frontiers. They do not sleep, raise the recursion limit, wrap an unchanged full build in a timeout, or claim the unfinished graph is closed.
 
+Incremental admission also applies the file/function/node/edge limits to the cumulative active graph. This closes a live-run defect where individually bounded updates accumulated to 81 precise files and 320 CFGs. Touched files and explicit context requests have priority; lower-priority prior context is evicted and recorded as `ANALYSIS_TRUNCATED` instead of allowing unbounded growth.
+
 The SWE runner records these per case in `run_manifest.json` and result JSON:
 
 ```text
@@ -93,6 +95,12 @@ deepseek_tool_turns / initial / repair / root-recovery counts
 accepted_transitions / rolled_back_transitions
 final_patch_nonempty / final_patch_hash / final_status
 ```
+
+The completed 51-case run recorded these fields for every case. The merged
+generation totals were 50 `BUDGET_EXHAUSTED`, one `GENERATOR_NONPROGRESS`, and
+41 nonempty sealed patches. Active-slice graph construction remained bounded
+by 40 precise files and 200 precise functions; the Astropy-14182 rerun used
+145 precise functions and peaked at about 192 MiB RSS.
 
 ## Interpretation and residual risk
 

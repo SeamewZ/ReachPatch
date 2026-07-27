@@ -298,6 +298,28 @@ def bind_path_obligation(
     return unit, oracle, scenario, tuple(frontiers)
 
 
+def _obligation_references_current_program(
+    obligation: RequirementPathObligation,
+    program_graph: ProgramGraph,
+) -> bool:
+    path_class = program_graph.path_classes.get(obligation.path_class_id)
+    if path_class is None:
+        return False
+    required_nodes = {
+        obligation.observation_id,
+        *obligation.dependence_slice_ids,
+        *path_class.node_ids,
+        *path_class.observation_ids,
+    }
+    if obligation.entrypoint_id:
+        required_nodes.add(obligation.entrypoint_id)
+    return (
+        required_nodes <= set(program_graph.nodes)
+        and set(obligation.path_edge_ids) <= set(program_graph.edges)
+        and set(path_class.edge_ids) <= set(program_graph.edges)
+    )
+
+
 def _build_components(
     binding_graph: BindingGraph,
     program_graph: ProgramGraph,
@@ -574,11 +596,20 @@ def build_active_binding_graph(
     cuts_by_unit: dict[str, CausalRepairCut] = {}
     if previous is not None:
         for unit in previous.units.values():
+            current_obligation = current_paths.get(unit.path_obligation_id)
             if (
                 unit.leaf_id in affected_leaf_ids
                 or unit.path_obligation_id in affected_path_ids
-                or unit.path_obligation_id not in current_paths
+                or current_obligation is None
                 or unit.path_class_id not in program_graph.path_classes
+                or not _obligation_references_current_program(
+                    current_obligation, program_graph
+                )
+                or not set(
+                    unit.interaction_path_ids
+                    + unit.repair_cut_node_ids
+                    + unit.observation_node_ids
+                ) <= set(program_graph.nodes)
             ):
                 continue
             reused = replace(
@@ -593,7 +624,7 @@ def build_active_binding_graph(
                 if scenario_id in previous.scenarios:
                     result.scenarios[scenario_id] = previous.scenarios[scenario_id]
     bound_paths = set(result.by_path_obligation)
-    obligations = [
+    candidate_obligations = [
         item for item in requirement_graph.feasible_path_obligations()
         if item.path_obligation_id not in bound_paths
         and (
@@ -603,6 +634,21 @@ def build_active_binding_graph(
             or item.path_obligation_id in affected_path_ids
         )
     ]
+    obligations: list[RequirementPathObligation] = []
+    for item in candidate_obligations:
+        if _obligation_references_current_program(item, program_graph):
+            obligations.append(item)
+            continue
+        leaf = requirement_graph.leaves[item.leaf_id]
+        result.add_frontier(_binding_frontier(
+            item.path_obligation_id,
+            item.leaf_id,
+            "STALE_PATH_OBLIGATION",
+            "path obligation references nodes or edges invalidated by the active slice update",
+            "refresh this requirement leaf against the current active Program Graph",
+            evidence_ids=leaf.supporting_evidence,
+            hard=False,
+        ))
     bound_leaf_ids = {item.leaf_id for item in obligations}
     for leaf_id in sorted(affected_leaf_ids - bound_leaf_ids):
         if leaf_id not in requirement_graph.leaves:

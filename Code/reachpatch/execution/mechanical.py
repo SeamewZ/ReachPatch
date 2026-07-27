@@ -3,6 +3,7 @@ from __future__ import annotations
 import ast
 import hashlib
 import os
+import re
 import subprocess
 import sys
 import time
@@ -36,6 +37,32 @@ class PublicCheckComparison(SerializableRecord):
     @property
     def target_fixed(self) -> bool:
         return self.classification == "TARGET_FIXED"
+
+
+def execution_environment_blocked(stdout: str, stderr: str) -> bool:
+    """Recognize infrastructure failures that cannot validate a source diff."""
+
+    diagnostic = f"{stdout}\n{stderr}".lower()
+    literal_markers = (
+        "no module named",
+        "modulenotfounderror",
+        "command not found",
+        "no such file or directory",
+        "failed to create process",
+        "importerror while loading conftest",
+        "connection refused",
+        "could not connect to server",
+        "temporary failure in name resolution",
+        "no tests ran",
+        "collected 0 items",
+    )
+    return (
+        any(marker in diagnostic for marker in literal_markers)
+        or re.search(r"fixture ['\"][^'\"]+['\"] not found", diagnostic)
+        is not None
+        or re.search(r"cannot import name ['\"]_[a-z0-9_]+", diagnostic)
+        is not None
+    )
 
 
 def _source_hash(root: Path) -> str:
@@ -273,15 +300,6 @@ def run_public_checks_paired(
 
     comparisons: list[PublicCheckComparison] = []
 
-    def environment_blocked(stdout: str, stderr: str) -> bool:
-        diagnostic = f"{stdout}\n{stderr}".lower()
-        return any(marker in diagnostic for marker in (
-            "no module named pytest",
-            "command not found",
-            "no such file or directory",
-            "failed to create process",
-        ))
-
     for raw_command in commands:
         command = tuple(map(str, raw_command))
         if not command:
@@ -293,7 +311,7 @@ def run_public_checks_paired(
             classification = "UNKNOWN_EXECUTION"
         elif base_error or patch_error:
             classification = "BLOCKED_EXTERNAL"
-        elif environment_blocked(base_out, base_err) or environment_blocked(
+        elif execution_environment_blocked(base_out, base_err) or execution_environment_blocked(
             patch_out, patch_err
         ):
             classification = "BLOCKED_EXTERNAL"

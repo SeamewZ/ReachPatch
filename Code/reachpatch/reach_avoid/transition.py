@@ -42,6 +42,10 @@ from reachpatch.models.controller import (
 )
 from reachpatch.models.core import Frontier
 from reachpatch.models.enums import ChallengeTerminalStatus, ControllerPhase, Decision, OutcomeStatus
+from reachpatch.oracle.discriminator import (
+    discriminator_probe_from_dict,
+    enqueue_discriminator_probes,
+)
 from reachpatch.program_graph.budget import Deadline, GraphBudget
 from reachpatch.program_graph.incremental import update_active_program_slice
 from reachpatch.program_graph.index import update_repository_index
@@ -60,6 +64,37 @@ from reachpatch.requirement_graph import (
     compile_requirement_paths, promote_domains_from_diff,
     refresh_requirement_paths,
 )
+
+
+def _enqueue_pending_discriminators(
+    state: ReachAvoidState,
+    graph: ChallengeGraph,
+) -> dict[str, tuple[str, ...]]:
+    probes = tuple(
+        discriminator_probe_from_dict(raw)
+        for raw in state.runtime_metrics.get("discriminator_probes", ())
+    )
+    return enqueue_discriminator_probes(
+        graph,
+        probes,
+        completed_probe_ids=state.runtime_metrics.get(
+            "executed_discriminator_probe_ids", ()
+        ),
+    )
+
+
+def _executed_discriminator_probe_ids(
+    graph: ChallengeGraph,
+    executed_challenge_ids: Iterable[str],
+) -> set[str]:
+    return {
+        str(probe_id)
+        for challenge_id in executed_challenge_ids
+        if challenge_id in graph.cells
+        for probe_id in graph.cells[challenge_id].diff_dependency.get(
+            "discriminator_probe_ids", ()
+        )
+    }
 
 
 def _reset_for_trial(graph: ChallengeGraph) -> ChallengeGraph:
@@ -1105,11 +1140,15 @@ def evaluate_patch_revision(
         max_challenges=int(config.get("max_active_challenges", 40)),
         deadline=time.monotonic() + float(config.get("challenge_deadline_seconds", 15.0)),
     )
+    discriminator_challenges = _enqueue_pending_discriminators(
+        state, trial_challenges
+    )
     graph_stage_timings["challenge_graph_seconds"] = time.perf_counter() - graph_stage_timings_started
     state.transition_phase(ControllerPhase.CHALLENGE_EXECUTE, event="active_graph_stack_updated")
     executor = TraceExecutor(temporary_root=Path(state.run_root) / "tmp")
     execution = execute_challenges(
-        trial_challenges, executor, state.base_repository, trial_tree
+        trial_challenges, executor, state.base_repository, trial_tree,
+        max_workers=int(config.get("max_parallel_challenge_executions", 2)),
     )
     targeted_expansion = False
     if execution.real_execution_count == 0:
@@ -1153,12 +1192,22 @@ def evaluate_patch_revision(
                 config.get("challenge_deadline_seconds", 15.0)
             ),
         )
+        expanded_discriminators = _enqueue_pending_discriminators(
+            state, expanded_challenges
+        )
         if set(expanded_challenges.cells) - set(trial_challenges.cells):
             trial_challenges = expanded_challenges
+            discriminator_challenges = expanded_discriminators
             execution = execute_challenges(
-                trial_challenges, executor, state.base_repository, trial_tree
+                trial_challenges, executor, state.base_repository, trial_tree,
+                max_workers=int(
+                    config.get("max_parallel_challenge_executions", 2)
+                ),
             )
             targeted_expansion = True
+    executed_discriminator_ids = _executed_discriminator_probe_ids(
+        trial_challenges, execution.executed_challenge_ids
+    )
     if execution.real_execution_count > 0 and execution.trace_delta.get("nonempty"):
         merge_trace_bundles(trial_program, execution, role="PATCH")
         trial_binding = build_active_binding_graph(
@@ -1297,6 +1346,17 @@ def evaluate_patch_revision(
         "high_risk_unknowns": len(high_pending),
         "real_execution_challenge_count": execution.real_execution_count,
         "targeted_challenge_expansion": targeted_expansion,
+        "discriminator_probe_challenges": {
+            probe_id: list(challenge_ids)
+            for probe_id, challenge_ids in sorted(
+                discriminator_challenges.items()
+            )
+        },
+        "executed_discriminator_probe_ids": sorted(
+            set(map(str, state.runtime_metrics.get(
+                "executed_discriminator_probe_ids", ()
+            ))) | executed_discriminator_ids
+        ),
         "last_public_check_comparisons": [
             item.to_dict() for item in public_comparisons
         ],

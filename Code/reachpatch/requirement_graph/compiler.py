@@ -753,6 +753,7 @@ def _account_path_edges(
                 status=status,
                 proof_id=proof_id,
                 frontier_id=frontier_id,
+                leaf_id=leaf.leaf_id,
             )
             requirement_graph.add_ledger(record)
 
@@ -772,11 +773,14 @@ def compile_requirement_paths(
 ) -> RequirementGraph:
     total_started = time.perf_counter()
     timings: dict[str, float] = defaultdict(float)
-    if (
-        (requirement_graph.path_obligations or requirement_graph.edge_ledger)
-        and leaf_ids is None
-    ):
+    if requirement_graph.path_obligations and leaf_ids is None:
         raise ValueError("path compilation requires an unmaterialized requirement graph version")
+    if not requirement_graph.path_obligations and leaf_ids is None:
+        # A ledger without an owning materialized obligation is stale.  This
+        # can occur when a bounded incremental refresh invalidates every path
+        # before it reaches path materialization.  Keeping those records both
+        # misstates coverage and prevents a later context-driven retry.
+        requirement_graph.edge_ledger.clear()
     semantic_hash = requirement_graph.semantic_layer_hash()
     program_hash = program_graph.program_hash()
     observation_reachability_cache: dict[tuple[str, ...], set[str]] = {}
@@ -1086,7 +1090,7 @@ def refresh_requirement_paths(
     requirement_graph.edge_ledger = {
         ledger_id: record
         for ledger_id, record in requirement_graph.edge_ledger.items()
-        if record.path_state_id not in removed
+        if record.leaf_id and record.leaf_id not in selected
     }
     requirement_graph.frontiers = {
         frontier_id: frontier

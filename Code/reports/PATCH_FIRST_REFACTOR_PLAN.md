@@ -4,7 +4,11 @@
 
 | 问题 | 旧函数 | 旧行为 | 新函数 | 新行为 | 验证方式 | 完成状态 |
 |---|---|---|---|---|---|---|
-| 初始生成晚于全量五图 | `ReachPatchController.analyze` | 语义唯一化后全量构建 Program/Requirement/Binding/Challenge，再执行 Generator | 重写 `analyze` | Semantic hypotheses → RepositoryIndex → Requirement Core → Repair Slice → 初始 Generator；diff 后才扩展 Active Graph Stack | patch-first 控制器集成测试；记录首次 patch 与各图时间 | 完成 |
+| 初始生成晚于全量五图 | `ReachPatchController.analyze` | 语义唯一化后全量构建 Program/Requirement/Binding/Challenge，再执行 Generator | 重写 `analyze` | Semantic hypotheses → RepositoryIndex → Requirement Core → Repair Slice → 空稀疏产品 → 初始 Generator；真实 diff 通过机械/公开检查后才物化 Requirement paths、Binding 和 Challenge | 调用顺序行为测试；初始记录断言 `products_materialized=False` | 完成 |
+| 增量图保留悬空派生记录 | `update_active_program_slice`, `refresh_requirement_paths` | touched node 删除后旧 PathClass/ledger 仍引用已删除节点，真实案例抛 `KeyError` 或版本错误 | derived-reference invalidation、leaf-owned ledger、stale obligation frontier | CFG/protocol/path 按节点和边引用失效；ledger 按 leaf 删除；陈旧义务软失败并可由后续 context 重试 | touched-file path 失效和 deadline 后 retry 行为测试 | 完成 |
+| 多轮局部图突破累计预算 | `update_active_program_slice` | 每次增量各自限制 40/200，但合并后真实案例达到 81 文件/320 CFG | cumulative active admission | touched/context/rebuilt 优先，按文件/函数/节点/边总预算接纳；低优先旧范围 eviction/defer 并产生软 frontier | 多模块增量测试断言累计图始终不超过预算 | 完成 |
+| 模型发明工具导致案例崩溃 | `PersistentDeepSeekAgent._invoke` | 未注册 `grep` 进入 `getattr` 并抛 `AttributeError` | registered tool allowlist | 未注册工具返回结构化 `INVALID_TOOL`，同一会话继续，绝不执行任意 shell | unknown-tool→合法 edit→真实 transition 测试 | 完成 |
+| discriminator 未进入执行队列 | probe 持久化逻辑 | 任意后续 trace 被误当作所有 probe 已执行 | `enqueue_discriminator_probes` | probe 绑定兼容的 oracle-locked Challenge；仅关联 bundle 执行后记录结果，无场景时产生软 frontier | ambiguity generation/queue/bundle 断言 | 完成 |
 | 普通语义歧义阻断 | `freeze_assignment`, `analyze` | assignment 不唯一返回 `None` 并产生 `SEMANTIC_BLOCKED` | `HypothesisSet`, `build_hypothesis_set` | 保留最多四个 coherent、authority-complete、非支配解释；提取共同 hard nodes；冲突进入 discriminator queue | 双 hypothesis 行为测试 | 完成 |
 | 全仓库精细扫描 | `build_augmented_program_graph`, `DefinitionScopeAnalyzer` | 所有 Python 文件、表达式、语句和协议均物化 | `build_repository_index`, `recover_repair_slice_seeds`, `build_active_program_slice` | Index 只保存摘要与源码位置；只对局部 active callable 精细分析 | 大量无关模块性能测试；精细文件清单与节点增长断言 | 完成 |
 | 图预算字段未在循环生效 | 原 builder 外层限制 | 到末尾才发现超限，可能先耗尽内存/时间 | `GraphBudget`, `Deadline`, budget checkpoints | 文件、AST、CFG、def-use、protocol、path、domain、binding、challenge 内循环提前停止并产生 soft `ANALYSIS_TRUNCATED` | 低预算测试验证部分图返回且不崩溃 | 完成 |
@@ -30,6 +34,7 @@
 | Repair prompt 传递错误/冗余上下文 | provider prompt | AST 节点列表，缺少真实 lineage 证据 | `build_repair_context` | 紧凑包含 issue、diff、coverage、失败、packet、divergence、slice、cut、impact、PASS、失败机制和预算 | context 快照断言 | 完成 |
 | transition 不控制同一 patch | `evaluate_transition` | 单 action、全图重建，真实 revision 常未进入 | `evaluate_patch_revision` | 从 incumbent 建 trial，应用多 edit，机械/micro/历史 CE、增量图、challenge、gate、局部 rollback/commit、证书 | initial→partial→CE→repair→Reach 轨迹测试 | 完成 |
 | 公开检查把 baseline 既有失败误判为 patch 回归 | transition 中单树 `mechanical_commands` | 只执行 patched tree；任意非零退出立即 Avoid，无法区分目标修复、稳定失败和 preservation 回归 | `run_public_checks_paired`, `_public_check_packet` | 每条公共检查在 incumbent/trial 成对执行并分类；只有 PASS→FAIL 回滚，FAIL→PASS 计入 Progress/Reach，FAIL→FAIL 形成真实 packet 反馈同一会话 | 四种分类参数化测试；ArtifactStore/证书断言 | 完成 |
+| 环境/collection 失败被反馈为语义反例 | public check/harness diagnostic | 缺模块、C 扩展或 fixture/conftest 问题在两棵树均失败仍记 `STABLE_FAIL` | `execution_environment_blocked` | generation 与 harness 共享环境诊断；此类失败进入 `BLOCKED_EXTERNAL`，不生成 Counterexample Packet | 缺模块、conftest、fixture、C 扩展、零测试五类参数测试 | 完成 |
 | Avoid 把分析不完整当回滚原因 | `in_avoid_set` | UNKNOWN、图 closure、语义歧义可能阻断/回滚 | 重写 Avoid gate | 仅 apply/syntax/import/确认回归/非法修改/副作用/确认风险扩大进入 Avoid | gate truth-table 测试 | 完成 |
 | Reach 要求全局 closure/全部 PASS | `in_target_set` | 低风险 UNKNOWN 永久阻止封存 | active Reach gate | 非空 patch、active targets/stable CE/confirmed preservation/diff adequacy/hashes/safe；无高价值 pending | Reach 行为测试 | 完成 |
 | Progress 不能反映真实修复 | metrics | 依赖粗粒度 frontier/count | `progress_metrics` | 目标 PASS、稳定失败/CE 消除、diff adequacy、preservation 回归、高风险 unknown、impact delta | commit/rollback 测试 | 完成 |

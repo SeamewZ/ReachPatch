@@ -111,6 +111,10 @@ class PathEdgeLedgerRecord(SerializableRecord):
     status: LedgerStatus
     proof_id: str | None
     frontier_id: str | None
+    # Incremental refreshes need an explicit owner.  ``path_state_id`` is a
+    # content hash, so it cannot be decoded to determine which leaf was
+    # invalidated after a diff.
+    leaf_id: str = ""
 
 
 @dataclass(frozen=True, slots=True)
