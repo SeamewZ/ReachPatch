@@ -67,7 +67,22 @@ def build_run_report(run_root: str | Path) -> dict[str, Any]:
         "transition_count": len(transitions),
         "commit_count": sum(item.payload.get("decision") == "COMMIT" for item in transitions),
         "rollback_count": sum(item.payload.get("decision") == "ROLLBACK" for item in transitions),
+        "keep_uncertified_count": sum(
+            item.payload.get("decision") == "KEEP_UNCERTIFIED"
+            for item in transitions
+        ),
         "counterexample_count": len(counterexamples),
+        "check_comparison_count": len(
+            state.payload.get("check_comparisons", ()) if state else ()
+        ),
+        "dicc_status": (
+            (state.payload.get("dicc_certificate") or {}).get("status")
+            if state else None
+        ),
+        "root_cause_labels": (
+            state.payload.get("runtime_metrics", {}).get("root_cause_labels", [])
+            if state else []
+        ),
         "outcome_counts": {},
         "artifact_verification": verification.to_dict(),
     }
@@ -89,8 +104,12 @@ def build_run_report(run_root: str | Path) -> dict[str, Any]:
         f"- Checkpoint: `{report['checkpoint_id']}`\n"
         f"- Patch hash: `{report['working_patch_hash']}`\n"
         f"- Transitions: {report['transition_count']} "
-        f"({report['commit_count']} commit, {report['rollback_count']} rollback)\n"
+        f"({report['commit_count']} commit, {report['rollback_count']} rollback, "
+        f"{report['keep_uncertified_count']} keep uncertified)\n"
         f"- Counterexamples: {report['counterexample_count']}\n"
+        f"- Paired check comparisons: {report['check_comparison_count']}\n"
+        f"- DICC: `{report['dicc_status']}`\n"
+        f"- Root causes: `{', '.join(report['root_cause_labels'])}`\n"
         f"- Artifacts valid: `{verification.valid}`\n"
     )
     _atomic_text(report_dir / "run_report.md", markdown)

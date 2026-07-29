@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import shutil
@@ -8,7 +9,7 @@ import subprocess
 import sys
 import time
 import traceback
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, as_completed, wait
 from pathlib import Path
 from typing import Any
 
@@ -18,9 +19,17 @@ CODE_ROOT = Path(__file__).resolve().parents[2]
 if str(CODE_ROOT) not in sys.path:
     sys.path.insert(0, str(CODE_ROOT))
 
-from reachpatch.models.base import utc_now
+from reachpatch.models.base import content_hash, utc_now
 from reachpatch.models.isolation import GenerationInstance, HarnessEvaluationInstance
-from reachpatch.execution.mechanical import execution_environment_blocked
+from reachpatch.execution.official_harness import (
+    OfficialHarnessUnavailable,
+    run_official_swebench_instance,
+)
+from reachpatch.execution.public_docker import (
+    PUBLIC_IMAGE_ENV,
+    PublicDockerExecutionBroker,
+    public_swebench_image,
+)
 from reachpatch.reach_avoid.controller import (
     AnalysisBlocked,
     ReachPatchConfig,
@@ -42,8 +51,122 @@ RUN_ROOT = EXPERIMENT_ROOT / "runs"
 RESULT_ROOT = EXPERIMENT_ROOT / "results"
 HARNESS_ROOT = EXPERIMENT_ROOT / "harness"
 HARNESS_RESULT_ROOT = HARNESS_ROOT / "results"
+HARNESS_CASE_ROOT = HARNESS_ROOT / "cases"
+HARNESS_LOG_ROOT = HARNESS_ROOT / "official_logs"
+HARNESS_PREDICTIONS_PATH = HARNESS_ROOT / "sealed_predictions.jsonl"
 GENERATION_HISTORY_ROOT = RESULT_ROOT / "_history"
 HARNESS_HISTORY_ROOT = HARNESS_ROOT / "_history"
+PUBLIC_RUNTIME_DEPENDENCY_ROOT = CODE_ROOT / ".reachpatch_runtime_deps" / "python"
+GENERATION_ISOLATION_ENV = "REACHPATCH_GENERATION_ISOLATED"
+GENERATION_ISOLATION_ENGINE = "bubblewrap_public_only_v1"
+GENERATION_MEMORY_RESERVE_MIB = 16 * 1024
+GENERATION_MEMORY_PER_WORKER_MIB = 8 * 1024
+
+
+def _memory_snapshot() -> dict[str, float]:
+    values: dict[str, float] = {}
+    try:
+        for line in Path("/proc/meminfo").read_text(encoding="utf-8").splitlines():
+            name, separator, raw = line.partition(":")
+            if not separator or name not in {
+                "MemTotal", "MemAvailable", "SwapTotal", "SwapFree",
+            }:
+                continue
+            values[f"{name.lower()}_mib"] = float(raw.split()[0]) / 1024.0
+    except (OSError, ValueError, IndexError):
+        return {}
+    return values
+
+
+def _safe_generation_worker_count(
+    requested: int,
+    snapshot: dict[str, float] | None = None,
+) -> int:
+    if requested < 1:
+        raise ValueError("generation workers must be positive")
+    observed = snapshot if snapshot is not None else _memory_snapshot()
+    available = observed.get("memavailable_mib")
+    if available is None:
+        return min(requested, 2)
+    headroom = available - GENERATION_MEMORY_RESERVE_MIB
+    if headroom < GENERATION_MEMORY_PER_WORKER_MIB:
+        return 0
+    return min(requested, 10, int(headroom // GENERATION_MEMORY_PER_WORKER_MIB))
+
+
+def _generation_sandbox_command(command: list[str]) -> list[str]:
+    """Hide all official-only inputs and outputs from a generation worker."""
+
+    bubblewrap = shutil.which("bwrap")
+    if bubblewrap is None:
+        raise RuntimeError("bubblewrap is required for isolated patch generation")
+    for path in (DATASET_ROOT, HARNESS_ROOT, REPO_ROOT, RUN_ROOT, RESULT_ROOT):
+        if not path.is_dir():
+            path.mkdir(parents=True, exist_ok=True)
+    if not PUBLIC_PATH.is_file():
+        raise FileNotFoundError(PUBLIC_PATH)
+
+    sandbox = [
+        bubblewrap,
+        "--die-with-parent",
+        "--unshare-pid",
+        "--ro-bind", "/", "/",
+        "--dev-bind", "/dev", "/dev",
+        "--proc", "/proc",
+        "--tmpfs", "/tmp",
+        "--tmpfs", "/run",
+        # Replace the combined dataset with a filesystem containing exactly
+        # the public generation records. Raw cases and official fields do not
+        # exist in the worker namespace.
+        "--tmpfs", str(DATASET_ROOT),
+        "--ro-bind", str(PUBLIC_PATH), str(PUBLIC_PATH),
+        # Git mirrors may contain later public commits, while prior harness
+        # artifacts contain direct oracle outcomes. Neither is generation
+        # evidence, so both trees are absent from the worker namespace.
+        "--tmpfs", str(REPO_ROOT),
+        "--tmpfs", str(HARNESS_ROOT),
+        # Generation state is the only writable persistent surface.
+        "--bind", str(RUN_ROOT), str(RUN_ROOT),
+        "--bind", str(RESULT_ROOT), str(RESULT_ROOT),
+        "--setenv", GENERATION_ISOLATION_ENV, "1",
+        "--setenv", "PYTHONDONTWRITEBYTECODE", "1",
+        "--chdir", str(CODE_ROOT),
+    ]
+    resolver = Path("/etc/resolv.conf").resolve()
+    if resolver.is_file() and resolver.is_relative_to(Path("/run")):
+        relative_parent = resolver.parent.relative_to("/run")
+        current = Path("/run")
+        for part in relative_parent.parts:
+            current /= part
+            sandbox.extend(("--dir", str(current)))
+        sandbox.extend(("--ro-bind", str(resolver), str(resolver)))
+    # These reports can contain official outcomes after a prior harness run.
+    # Mounting /dev/null preserves path resolution while making their contents
+    # unavailable to the generation process.
+    for name in (
+        "harness_summary.json",
+        "experiment_report.json",
+        "experiment_report.md",
+        "failure_report.json",
+        "failure_report.md",
+        "case_process_report.json",
+        "case_process_report.md",
+    ):
+        path = EXPERIMENT_ROOT / name
+        if path.exists():
+            sandbox.extend(("--ro-bind", "/dev/null", str(path)))
+    return [*sandbox, *command]
+
+
+def _public_runtime_pythonpath(existing: str = "") -> str:
+    entries = [str(CODE_ROOT)]
+    if PUBLIC_RUNTIME_DEPENDENCY_ROOT.is_dir():
+        entries.append(str(PUBLIC_RUNTIME_DEPENDENCY_ROOT))
+    entries.extend(
+        item for item in existing.split(os.pathsep)
+        if item and item not in entries
+    )
+    return os.pathsep.join(entries)
 
 
 def _read_jsonl(path: Path) -> list[dict[str, Any]]:
@@ -54,6 +177,16 @@ def _write_json(path: Path, payload: dict[str, Any]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     temporary = path.with_suffix(path.suffix + ".tmp")
     temporary.write_text(json.dumps(payload, sort_keys=True, indent=2) + "\n", encoding="utf-8")
+    os.replace(temporary, path)
+
+
+def _write_jsonl(path: Path, rows: list[dict[str, Any]]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_suffix(path.suffix + ".tmp")
+    temporary.write_text(
+        "".join(json.dumps(row, sort_keys=True) + "\n" for row in rows),
+        encoding="utf-8",
+    )
     os.replace(temporary, path)
 
 
@@ -92,7 +225,7 @@ def _failure_rows(stage_summary: dict[str, Any], stage: str) -> list[dict[str, A
     rows: list[dict[str, Any]] = []
     for item in stage_summary.get("results", []):
         status = str(item.get("status", "UNKNOWN"))
-        success = status == "PASS" or (stage == "generation" and status == "GRAPH_REACHED")
+        success = status == "PASS" or (stage == "generation" and status == "REACHED")
         if success:
             continue
         rows.append({
@@ -188,7 +321,10 @@ def _failure_reason(row: dict[str, Any]) -> str:
             f"preservation={preservation.get('status', 'UNKNOWN')}"
         )
     stats = row.get("analysis_stats", {})
-    if status == "BUDGET_EXHAUSTED":
+    if status in {
+        "REVISION_BUDGET_EXHAUSTED_WITH_TARGET_FAILURE",
+        "REVISION_BUDGET_EXHAUSTED_WITH_UNCERTIFIED_PATCH",
+    }:
         return (
             "revision budget exhausted before Reach: "
             f"submitted={stats.get('submitted_generator_revisions', 0)}, "
@@ -518,7 +654,7 @@ def write_case_process_report(
                 "error": generation.get("error"),
                 "traceback": generation.get("error_traceback"),
                 "worker_stderr": generation.get("worker_stderr"),
-            } if generation.get("status") != "GRAPH_REACHED" else None,
+            } if generation.get("status") != "REACHED" else None,
             "harness": {
                 "patch_apply": harness_result.get("patch_apply"),
                 "fail_to_pass": harness_result.get("fail_to_pass"),
@@ -651,7 +787,7 @@ def _graph_summary(state) -> dict[str, Any]:
         "graph_names": sorted(built),
         "graphs": built,
         "expected_full_closure_graph_count": 5,
-        "full_closure": len(built) == 5,
+        "full_closure": bool(state.checkpoint.graph_reached),
     }
 
 
@@ -679,6 +815,9 @@ def _generate_one(
         "attempt": int((previous or {}).get("attempt", 0)) + 1,
         "started_at": utc_now(),
         "generation_source": "generation_public_instances.jsonl",
+        "generation_isolation": os.environ.get(GENERATION_ISOLATION_ENV, "UNISOLATED"),
+        "generation_isolation_engine": GENERATION_ISOLATION_ENGINE,
+        "public_environment_image": os.environ.get(PUBLIC_IMAGE_ENV, ""),
         "implementation": "patch_first_incremental_v1",
     }
     if not tree.is_dir():
@@ -691,12 +830,12 @@ def _generate_one(
         run_root.rename(interrupted_root)
     try:
         instance = _public_instance(raw, tree)
-        agent = PersistentDeepSeekAgent(transport, max_tool_turns=12)
+        agent = PersistentDeepSeekAgent(transport, max_tool_turns=6)
         controller = ReachPatchController(
             config=ReachPatchConfig(
                 selection_mode="hypothesis_set",
                 max_submitted_revisions=max_revisions,
-                max_internal_tool_turns_per_revision=12,
+                max_internal_tool_turns_per_revision=6,
             ),
             generator_agent=agent,
             implementation_root=CODE_ROOT,
@@ -713,7 +852,7 @@ def _generate_one(
             "transition_count": state.transition_index,
             "reach_avoid": {
                 "termination_status": state.termination_status,
-                "target_deficit": state.target_deficit(),
+                "target_deficit": state.checkpoint.executed_target_deficit,
                 "phase": state.phase.value,
                 "graph_reached": bool(state.graph_reached if hasattr(state, "graph_reached") else certificate.graph_reached),
                 "hard_frontier_count": len(state.challenge_graph.frontiers),
@@ -786,21 +925,59 @@ def _run_case_subprocess(
     ]
     if force:
         command.append("--force")
-    child_environment = dict(os.environ)
-    child_pythonpath = [str(CODE_ROOT)]
-    if child_environment.get("PYTHONPATH"):
-        child_pythonpath.append(child_environment["PYTHONPATH"])
-    child_environment["PYTHONPATH"] = os.pathsep.join(child_pythonpath)
     try:
-        process = subprocess.run(
-            command,
-            cwd=CODE_ROOT,
-            env=child_environment,
-            capture_output=True,
-            text=True,
-            timeout=None if timeout is None or timeout <= 0 else timeout,
-            check=False,
-        )
+        command = _generation_sandbox_command(command)
+    except (OSError, RuntimeError) as exc:
+        result = {
+            "instance_id": case_id,
+            "repo": raw["repo"],
+            "base_commit": raw["base_commit"],
+            "status": "ENVIRONMENT_BLOCKED",
+            "error": f"generation isolation unavailable: {type(exc).__name__}: {exc}",
+            "root_causes": ["HARNESS_ISOLATION_UNAVAILABLE"],
+            "generation_isolation": "UNAVAILABLE",
+            "run_root": str(RUN_ROOT / case_id),
+            "finished_at": utc_now(),
+        }
+        _write_json(result_path, result)
+        return result
+    child_environment = dict(os.environ)
+    child_environment["PYTHONPATH"] = _public_runtime_pythonpath(
+        child_environment.get("PYTHONPATH", "")
+    )
+    broker = PublicDockerExecutionBroker(
+        socket_path=RUN_ROOT / "_brokers" / f"{case_id}.sock",
+        image=public_swebench_image(case_id),
+        case_tree=TREE_ROOT / case_id,
+        case_run_root=RUN_ROOT / case_id,
+    )
+    try:
+        with broker:
+            child_environment.update(broker.worker_environment())
+            process = subprocess.run(
+                command,
+                cwd=CODE_ROOT,
+                env=child_environment,
+                capture_output=True,
+                text=True,
+                timeout=None if timeout is None or timeout <= 0 else timeout,
+                check=False,
+            )
+    except (OSError, RuntimeError) as exc:
+        result = {
+            "instance_id": case_id,
+            "repo": raw["repo"],
+            "base_commit": raw["base_commit"],
+            "status": "ENVIRONMENT_BLOCKED",
+            "error": f"public runner unavailable: {type(exc).__name__}: {exc}",
+            "root_causes": ["INVALID_PUBLIC_RUNNER", "ENVIRONMENT_UNHEALTHY"],
+            "generation_isolation": "1",
+            "public_environment_image": broker.image,
+            "run_root": str(RUN_ROOT / case_id),
+            "finished_at": utc_now(),
+        }
+        _write_json(result_path, result)
+        return result
     except subprocess.TimeoutExpired as exc:
         result = {
             "instance_id": case_id,
@@ -876,28 +1053,69 @@ def generate(
         except (OSError, json.JSONDecodeError, TypeError):
             continue
     results: list[dict[str, Any]] = []
-    with ThreadPoolExecutor(max_workers=min(max_workers, 10), thread_name_prefix="swe51-gen") as pool:
-        futures = [
-            pool.submit(
-                _run_case_subprocess,
-                item,
-                key_path=key_path,
-                model=model,
-                max_revisions=max_revisions,
-                timeout=case_timeout,
-                force=force,
+    memory_observations: list[dict[str, Any]] = []
+    initial_memory = _memory_snapshot()
+    effective_workers = _safe_generation_worker_count(max_workers, initial_memory)
+    memory_observations.append({"event": "start", **initial_memory})
+    if public and effective_workers == 0:
+        raise RuntimeError(
+            "insufficient memory headroom for one isolated generation worker"
+        )
+    pending = iter(public)
+    exhausted = False
+    with ThreadPoolExecutor(
+        max_workers=max(1, effective_workers), thread_name_prefix="swe51-gen",
+    ) as pool:
+        active: dict[Any, dict[str, Any]] = {}
+
+        def submit_available() -> None:
+            nonlocal exhausted
+            if exhausted:
+                return
+            current = _memory_snapshot()
+            current_limit = _safe_generation_worker_count(max_workers, current)
+            while len(active) < min(effective_workers, current_limit):
+                try:
+                    item = next(pending)
+                except StopIteration:
+                    exhausted = True
+                    return
+                future = pool.submit(
+                    _run_case_subprocess,
+                    item,
+                    key_path=key_path,
+                    model=model,
+                    max_revisions=max_revisions,
+                    timeout=case_timeout,
+                    force=force,
+                )
+                active[future] = item
+
+        submit_available()
+        while active:
+            completed, _ = wait(active, return_when=FIRST_COMPLETED)
+            for future in completed:
+                active.pop(future)
+                result = future.result()
+                results.append(result)
+                print(json.dumps({
+                    "instance_id": result["instance_id"],
+                    "status": result.get("status"),
+                    "graph_reached": result.get("graph_reached"),
+                }, sort_keys=True), flush=True)
+                prior_by_id[str(result["instance_id"])] = result
+            memory_observations.append({
+                "event": "case_completed",
+                "completed_cases": len(results),
+                "active_cases": len(active),
+                **_memory_snapshot(),
+            })
+            submit_available()
+        if not exhausted:
+            raise RuntimeError(
+                "generation stopped submitting cases because memory headroom "
+                "remained below the configured safety threshold"
             )
-            for item in public
-        ]
-        for future in as_completed(futures):
-            result = future.result()
-            results.append(result)
-            print(json.dumps({
-                "instance_id": result["instance_id"],
-                "status": result.get("status"),
-                "graph_reached": result.get("graph_reached"),
-            }, sort_keys=True), flush=True)
-            prior_by_id[str(result["instance_id"])] = result
     merged_results = sorted(prior_by_id.values(), key=lambda item: str(item.get("instance_id", "")))
     summary = {
         "stage": "generation",
@@ -906,7 +1124,11 @@ def generate(
         "selected_case_count": len(public),
         "results": merged_results,
         "deepseek_model": model,
-        "deepseek_concurrency": min(max_workers, 10),
+        "requested_concurrency": max_workers,
+        "deepseek_concurrency": effective_workers,
+        "memory_reserve_mib": GENERATION_MEMORY_RESERVE_MIB,
+        "memory_per_worker_mib": GENERATION_MEMORY_PER_WORKER_MIB,
+        "memory_observations": memory_observations,
         "case_timeout_seconds": None if case_timeout is None or case_timeout <= 0 else case_timeout,
         "forced": force,
         "completed_at": utc_now(),
@@ -923,6 +1145,13 @@ def generate_case(
     *,
     force: bool = False,
 ) -> dict[str, Any]:
+    if os.environ.get(GENERATION_ISOLATION_ENV) != "1":
+        raise RuntimeError(
+            "direct case generation is forbidden outside the public-only sandbox"
+        )
+    os.environ["PYTHONPATH"] = _public_runtime_pythonpath(
+        os.environ.get("PYTHONPATH", "")
+    )
     raw = next(
         item for item in _read_jsonl(PUBLIC_PATH)
         if str(item["instance_id"]) == instance_id
@@ -941,61 +1170,6 @@ def generate_case(
     return result
 
 
-def _run_command(command: list[str], cwd: Path, timeout: int) -> dict[str, Any]:
-    started = time.monotonic()
-    try:
-        process = subprocess.run(
-            command,
-            cwd=cwd,
-            capture_output=True,
-            text=True,
-            timeout=timeout,
-            env={**os.environ, "PYTHONHASHSEED": "0", "PYTHONDONTWRITEBYTECODE": "1"},
-            check=False,
-        )
-        blocked = execution_environment_blocked(
-            process.stdout, process.stderr
-        )
-        return {
-            "command": command,
-            "return_code": process.returncode,
-            "stdout": process.stdout[-30000:],
-            "stderr": process.stderr[-30000:],
-            "duration_seconds": time.monotonic() - started,
-            "status": (
-                "PASS" if process.returncode == 0
-                else "BLOCKED_EXTERNAL" if blocked else "FAIL"
-            ),
-        }
-    except subprocess.TimeoutExpired as exc:
-        return {
-            "command": command,
-            "return_code": None,
-            "stdout": str(exc.stdout or "")[-30000:],
-            "stderr": str(exc.stderr or "")[-30000:],
-            "duration_seconds": time.monotonic() - started,
-            "status": "UNKNOWN_EXECUTION",
-        }
-    except OSError as exc:
-        return {
-            "command": command,
-            "return_code": None,
-            "stdout": "",
-            "stderr": str(exc),
-            "duration_seconds": time.monotonic() - started,
-            "status": "BLOCKED_EXTERNAL",
-        }
-
-
-def _apply_patch(base_tree: Path, patch_path: Path, target: Path) -> dict[str, Any]:
-    shutil.copytree(base_tree, target, symlinks=True)
-    patch_text = patch_path.read_text(encoding="utf-8") if patch_path.is_file() else ""
-    if not patch_text.strip():
-        return {"status": "PASS", "stdout": "empty patch", "stderr": "", "return_code": 0}
-    result = _run_command(["patch", "-p1", "--batch", "--forward", "--input", str(patch_path)], target, 120)
-    return result
-
-
 def _harness_one(
     raw: dict[str, Any],
     generation: dict[str, Any],
@@ -1004,13 +1178,21 @@ def _harness_one(
     force: bool = False,
 ) -> dict[str, Any]:
     case_id = str(raw["instance_id"])
-    root = HARNESS_ROOT / case_id
+    root = HARNESS_CASE_ROOT / case_id
     result_path = HARNESS_RESULT_ROOT / f"{case_id}.json"
     patch_hash = str(generation.get("patch_hash") or "")
     cached = _read_json(result_path)
+    official_cache = bool(cached) and (
+        cached.get("harness_engine") == "official_swebench_docker_v1"
+        or (
+            cached.get("official_test_patch_wired") is True
+            and str(cached.get("image", "")).startswith("swebench/")
+        )
+    )
     if (
         cached is not None
         and not force
+        and official_cache
         and str(cached.get("generation_patch_hash") or "") == patch_hash
     ):
         return cached
@@ -1019,52 +1201,89 @@ def _harness_one(
     if root.exists():
         _archive_path(root, HARNESS_HISTORY_ROOT / "trees", case_id)
     root.mkdir(parents=True)
-    base_tree = TREE_ROOT / case_id
     patch_path = Path(str(generation.get("patch_path", "")))
-    evaluation = HarnessEvaluationInstance.from_official_record(
-        raw, patch_path=patch_path
-    )
     result: dict[str, Any] = {
         "instance_id": case_id,
         "generation_status": generation.get("status"),
         "generation_patch_hash": patch_hash,
         "patch_path": str(patch_path),
         "official_source": "official_instances.jsonl (post-generation only)",
+        "harness_engine": "official_swebench_docker_v1",
         "started_at": utc_now(),
     }
-    if not base_tree.is_dir() or not patch_path.is_file():
-        result.update({"status": "BLOCKED_GENERATION", "error": "missing base tree or generated patch"})
+    if not patch_path.is_file():
+        result.update({"status": "BLOCKED_GENERATION", "error": "missing sealed patch"})
         result["finished_at"] = utc_now()
         _write_json(result_path, result)
         return result
-    _write_json(root / "harness_evaluation_instance.json", evaluation.to_dict())
-    patch_result = _apply_patch(base_tree, patch_path, root / "patched")
-    result["patch_apply"] = patch_result
-    if patch_result.get("status") != "PASS":
-        result.update({"status": "FAIL_PATCH_APPLY", "finished_at": utc_now()})
+    patch_text = patch_path.read_text(encoding="utf-8")
+    if not patch_text.strip():
+        result.update({
+            "status": "BLOCKED_GENERATION",
+            "error": "sealed generation produced an empty patch",
+            "finished_at": utc_now(),
+        })
         _write_json(result_path, result)
         return result
-    fail_to_pass = list(evaluation.fail_to_pass)
-    pass_to_pass = list(evaluation.pass_to_pass)
-    repo = evaluation.repository_name
-    if repo == "django/django":
-        runner = [sys.executable, "tests/runtests.py"]
-    else:
-        runner = [sys.executable, "-m", "pytest", "-q"]
-    fail_result = _run_command(runner + fail_to_pass, root / "patched", timeout)
-    pass_result = _run_command(runner + pass_to_pass, root / "patched", timeout)
-    result.update({"fail_to_pass": fail_result, "pass_to_pass": pass_result})
-    if fail_result["status"] == "PASS" and pass_result["status"] == "PASS":
-        status = "PASS"
-    elif fail_result["status"] in {"UNKNOWN_EXECUTION", "BLOCKED_EXTERNAL"} or pass_result["status"] in {"UNKNOWN_EXECUTION", "BLOCKED_EXTERNAL"}:
-        status = "UNKNOWN_EXECUTION"
-    elif pass_result["status"] != "PASS":
-        status = "FAIL_PRESERVATION_REGRESSION"
-    else:
-        status = "FAIL_TARGET"
-    result.update({"status": status, "finished_at": utc_now()})
+    actual_patch_hash = content_hash(patch_text)
+    patch_file_sha256 = hashlib.sha256(patch_text.encode("utf-8")).hexdigest()
+    if patch_hash and patch_hash != actual_patch_hash:
+        result.update({
+            "status": "BLOCKED_GENERATION",
+            "error": "sealed patch hash does not match generation summary",
+            "actual_patch_hash": actual_patch_hash,
+            "patch_file_sha256": patch_file_sha256,
+            "finished_at": utc_now(),
+        })
+        _write_json(result_path, result)
+        return result
+    evaluation = HarnessEvaluationInstance.from_official_record(
+        raw, patch_path=patch_path
+    )
+    _write_json(root / "harness_evaluation_instance.json", evaluation.to_dict())
+    run_id = f"sealed-{actual_patch_hash[:16]}"
+    if force:
+        run_id += f"-{time.time_ns()}"
+    try:
+        official = run_official_swebench_instance(
+            raw,
+            patch_text=patch_text,
+            log_root=HARNESS_LOG_ROOT,
+            run_id=run_id,
+            timeout=timeout,
+        )
+    except (OfficialHarnessUnavailable, OSError, RuntimeError) as exc:
+        official = {"status": "HARNESS_NOT_RUN", "error": str(exc)}
+    result.update(official)
+    if result.get("status") == "HARNESS_NOT_RUN":
+        result["root_cause_labels"] = ["HARNESS_NOT_OFFICIAL"]
+    result.update({
+        "generation_patch_hash": actual_patch_hash,
+        "patch_file_sha256": patch_file_sha256,
+        "official_run_id": run_id,
+        "finished_at": utc_now(),
+    })
     _write_json(result_path, result)
     return result
+
+
+def _sealed_predictions(
+    generated: dict[str, dict[str, Any]],
+) -> list[dict[str, str]]:
+    predictions: list[dict[str, str]] = []
+    for case_id, generation in sorted(generated.items()):
+        patch_path = Path(str(generation.get("patch_path", "")))
+        if not patch_path.is_file():
+            continue
+        patch_text = patch_path.read_text(encoding="utf-8")
+        if not patch_text.strip():
+            continue
+        predictions.append({
+            "instance_id": case_id,
+            "model_name_or_path": "reachpatch",
+            "model_patch": patch_text,
+        })
+    return predictions
 
 
 def harness(
@@ -1079,6 +1298,8 @@ def harness(
     summary_path = EXPERIMENT_ROOT / "generation_summary.json"
     summary = json.loads(summary_path.read_text(encoding="utf-8")) if summary_path.is_file() else {}
     generated = {str(item["instance_id"]): item for item in summary.get("results", [])}
+    predictions = _sealed_predictions(generated)
+    _write_jsonl(HARNESS_PREDICTIONS_PATH, predictions)
     selected = {
         case_id: item for case_id, item in official.items()
         if not only or case_id in only
@@ -1113,6 +1334,8 @@ def harness(
         "case_count": len(official),
         "observed_case_count": len(prior_by_id),
         "selected_case_count": len(selected),
+        "sealed_prediction_count": len(predictions),
+        "predictions_path": str(HARNESS_PREDICTIONS_PATH),
         "forced": force,
         "results": sorted(prior_by_id.values(), key=lambda item: item["instance_id"]),
         "completed_at": utc_now(),
@@ -1126,7 +1349,7 @@ def main() -> int:
     sub = parser.add_subparsers(dest="command", required=True)
     gen = sub.add_parser("generate")
     gen.add_argument("--workers", type=int, default=4)
-    gen.add_argument("--max-revisions", type=int, default=10)
+    gen.add_argument("--max-revisions", type=int, default=6)
     gen.add_argument("--model", default=os.environ.get("DEEPSEEK_MODEL", "deepseek-chat"))
     gen.add_argument("--key-path", default="/home/slt/ReachPatch/ds_pwd.txt")
     gen.add_argument("--only", action="append", default=[])
@@ -1144,7 +1367,7 @@ def main() -> int:
     case.add_argument("--instance-id", required=True)
     case.add_argument("--key-path", default="/home/slt/ReachPatch/ds_pwd.txt")
     case.add_argument("--model", default=os.environ.get("DEEPSEEK_MODEL", "deepseek-chat"))
-    case.add_argument("--max-revisions", type=int, default=10)
+    case.add_argument("--max-revisions", type=int, default=6)
     case.add_argument("--force", action="store_true")
     har = sub.add_parser("harness")
     har.add_argument("--workers", type=int, default=4)

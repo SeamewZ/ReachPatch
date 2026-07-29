@@ -14,6 +14,10 @@ class BindingStatus(StrEnum):
     ACTIVE = "ACTIVE"
     DEFERRED = "DEFERRED"
     INFEASIBLE = "INFEASIBLE"
+    EXECUTABLE_TARGET = "EXECUTABLE_TARGET"
+    EXECUTABLE_PRESERVATION = "EXECUTABLE_PRESERVATION"
+    CHALLENGE_CANDIDATE = "CHALLENGE_CANDIDATE"
+    DEFERRED_NORMATIVE = "DEFERRED_NORMATIVE"
 
 
 @dataclass(frozen=True, slots=True)
@@ -87,6 +91,40 @@ class BindingClosure(SerializableRecord):
     blocked_unit_ids: tuple[str, ...]
     frontier_ids: tuple[str, ...]
     graph_hash: str
+
+
+@dataclass(frozen=True, slots=True)
+class ExecutableBindingUnit(SerializableRecord):
+    unit_id: str
+    kind: BindingStatus
+    executable_requirement_id: str | None
+    normative_requirement_id: str | None
+    check_id: str | None
+    baseline_execution_id: str | None
+    failure_location: dict[str, Any] | None
+    entrypoint: str | None
+    observation_contract_id: str | None
+    causal_slice_id: str | None
+    repair_cut_node_ids: tuple[str, ...]
+    candidate_repair_cut_ids: tuple[str, ...]
+    impact_node_ids: tuple[str, ...]
+    cut_status: str
+
+
+@dataclass(frozen=True, slots=True)
+class ExecutableBindingGraph(SerializableRecord):
+    units: tuple[ExecutableBindingUnit, ...]
+    executable_requirement_overlay_hash: str
+    target_slice_id: str
+    impact_slice_id: str | None
+    graph_hash: str
+
+    @property
+    def executable_targets(self) -> tuple[ExecutableBindingUnit, ...]:
+        return tuple(
+            item for item in self.units
+            if item.kind == BindingStatus.EXECUTABLE_TARGET
+        )
 
 
 class BindingGraph(SerializableRecord):

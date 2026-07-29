@@ -3,7 +3,14 @@
 from typing import Any
 
 from .domains import promote_program_predicates, symbolic_scenario_partitions
-from .models import RequirementGraph, RequirementLeaf, RequirementPathObligation
+from .models import (
+    ExecutableRequirement,
+    ExecutableRequirementOverlay,
+    NormativeRequirement,
+    RequirementGraph,
+    RequirementLeaf,
+    RequirementPathObligation,
+)
 
 
 def compile_assignment_overlay(*args: Any, **kwargs: Any) -> RequirementGraph:
@@ -23,6 +30,11 @@ def compile_requirement_core(*args: Any, **kwargs: Any) -> RequirementGraph:
     return implementation(*args, **kwargs)
 
 
+def compile_executable_requirement_overlay(*args: Any, **kwargs: Any):
+    from .compiler import compile_executable_requirement_overlay as implementation
+    return implementation(*args, **kwargs)
+
+
 def refresh_requirement_paths(*args: Any, **kwargs: Any):
     from .compiler import refresh_requirement_paths as implementation
     return implementation(*args, **kwargs)
@@ -36,8 +48,12 @@ __all__ = [
     "RequirementGraph",
     "RequirementLeaf",
     "RequirementPathObligation",
+    "NormativeRequirement",
+    "ExecutableRequirement",
+    "ExecutableRequirementOverlay",
     "compile_assignment_overlay",
     "compile_requirement_core",
+    "compile_executable_requirement_overlay",
     "compile_requirement_paths",
     "refresh_requirement_paths",
     "promote_domains_from_diff",

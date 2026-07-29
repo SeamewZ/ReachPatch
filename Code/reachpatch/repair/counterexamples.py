@@ -7,6 +7,9 @@ from typing import Any, Iterable
 from reachpatch.challenge_graph.models import ChallengeGraph
 from reachpatch.challenge_graph.recipes import InputRecipe
 from reachpatch.execution.models import PairedTraceBundle
+from reachpatch.execution.models import (
+    CheckClassification, CheckComparison, ExecutableCheck,
+)
 from reachpatch.execution.reconcile import ActualDiff
 from reachpatch.models.base import stable_id
 from reachpatch.models.controller import CounterexamplePacket, ReachAvoidState
@@ -210,6 +213,119 @@ def counterexample_from_challenge(
         ),
         uncertain_information=tuple(uncertain),
         mechanism_fingerprint_hash=str(actual_diff.fingerprint.get("hash")),
+        reproduction_command=(),
+        baseline_status=(
+            paired.base_bundle.stable_status.value if paired is not None else None
+        ),
+        patched_status=(
+            paired.patch_bundle.stable_status.value if paired is not None else None
+        ),
+        failure_signature=stable_id("challenge-failure", actual) if paired is not None else None,
+        first_project_frame=first_divergence,
+        relevant_source_ranges=(),
+        causal_cut_candidates=(),
+        previous_diff=state.checkpoint.patch.canonical_diff,
+        protected_behavior=tuple(sorted(
+            item.path_obligation_id for item in state.outcomes.values()
+            if item.status == OutcomeStatus.PASS
+        )),
+        environment_valid=cell.terminal_status not in {
+            ChallengeTerminalStatus.BLOCKED_EXTERNAL,
+            ChallengeTerminalStatus.UNKNOWN_EXECUTION,
+            ChallengeTerminalStatus.UNSUPPORTED,
+        },
+    )
+
+
+def counterexample_from_check_comparison(
+    state,
+    check: ExecutableCheck,
+    comparison: CheckComparison,
+    actual_diff: ActualDiff,
+    *,
+    transition_id: str,
+    repair_cuts=(),
+) -> CounterexamplePacket | None:
+    """Create repair feedback only for stable behavior failures."""
+
+    if comparison.classification in {
+        CheckClassification.SAME_INFRA_FAILURE,
+        CheckClassification.NEW_INFRA_FAILURE,
+        CheckClassification.FLAKY_RESULT,
+        CheckClassification.UNSUPPORTED_CHECK,
+        CheckClassification.PASS_PRESERVED,
+        CheckClassification.TARGET_FIXED,
+    }:
+        return None
+    ranges = tuple({
+        "relative_path": item.relative_path,
+        "start_line": item.start_line,
+        "end_line": item.end_line,
+        "symbol": item.symbol,
+    } for item in repair_cuts)
+    cuts = tuple(item.to_dict() for item in repair_cuts)
+    protected = tuple(sorted(
+        item.check_id
+        for item in getattr(state, "check_comparisons", ())
+        if item.classification == CheckClassification.PASS_PRESERVED
+    ))
+    frame = comparison.patched.first_project_frame
+    failure_origin = {
+        CheckClassification.PRESERVATION_REGRESSION: "PUBLIC_PRESERVATION_REGRESSION",
+        CheckClassification.TARGET_STILL_FAILING: "PUBLIC_TARGET_STILL_FAILING",
+        CheckClassification.TARGET_REGRESSED: "PUBLIC_TARGET_REGRESSION",
+    }.get(comparison.classification, "PUBLIC_EXECUTABLE_CHECK")
+    return CounterexamplePacket(
+        counterexample_id=stable_id(
+            "check-counterexample", transition_id, comparison.comparison_id,
+            actual_diff.canonical_diff_hash,
+        ),
+        transition_id=transition_id,
+        path_obligation_id=None,
+        binding_unit_id=None,
+        challenge_id=None,
+        public_trigger_id=check.check_id,
+        entrypoint_id=str(frame.get("symbol")) if frame else None,
+        guarded_path_edge_ids=(),
+        exit_kind="process_exit",
+        trusted_oracle_id=check.authority,
+        expected_observation={"status": "PASS"},
+        actual_observation={
+            "status": comparison.patched.status.value,
+            "stdout": comparison.patched.stdout,
+            "stderr": comparison.patched.stderr,
+            "return_code": comparison.patched.return_code,
+        },
+        minimal_input={"command": list(check.command), "selector": check.selector},
+        reproduction_recipe_id=None,
+        raw_execution_ids=(
+            comparison.baseline.execution_id, comparison.patched.execution_id,
+        ),
+        relevant_source_slice_ids=tuple(
+            f"{item.relative_path}:{item.start_line}:{item.end_line}"
+            for item in repair_cuts
+        ),
+        causal_touch_witness_ids=(),
+        candidate_repair_cut_ids=tuple(item.cut_id for item in repair_cuts),
+        protected_sibling_path_ids=(),
+        preservation_path_ids=(),
+        forbidden_behavior_ids=protected,
+        source_hash=comparison.patched.tree_hash,
+        diff_hash=actual_diff.canonical_diff_hash,
+        failure_origin=failure_origin,
+        frontier_kind=comparison.classification.value,
+        uncertain_information=(),
+        mechanism_fingerprint_hash=str(actual_diff.fingerprint.get("hash")),
+        reproduction_command=check.command,
+        baseline_status=comparison.baseline.status.value,
+        patched_status=comparison.patched.status.value,
+        failure_signature=comparison.patched.failure_signature,
+        first_project_frame=frame,
+        relevant_source_ranges=ranges,
+        causal_cut_candidates=cuts,
+        previous_diff=state.checkpoint.patch.canonical_diff,
+        protected_behavior=protected,
+        environment_valid=True,
     )
 
 
@@ -230,6 +346,12 @@ def packets_for_nonpass_challenges(
     for challenge_id in sorted(selected):
         cell = challenge_graph.cells[challenge_id]
         if cell.terminal_status == ChallengeTerminalStatus.PASS:
+            continue
+        if cell.terminal_status in {
+            ChallengeTerminalStatus.BLOCKED_EXTERNAL,
+            ChallengeTerminalStatus.UNKNOWN_EXECUTION,
+            ChallengeTerminalStatus.UNSUPPORTED,
+        }:
             continue
         minimized_recipe = None
         minimized_bundle = None

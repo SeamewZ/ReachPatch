@@ -4,6 +4,7 @@ import ast
 import copy
 import re
 from dataclasses import replace
+from pathlib import Path
 from typing import Any, Callable, Iterable
 
 from reachpatch.binding_graph.models import BindingGraph, BindingUnit
@@ -14,7 +15,12 @@ from reachpatch.challenge_graph.models import (
     DiffChallengePlan,
     DiffClosureCertificate,
     DiffObligation,
+    DICCCertificate,
+    DICCStatus,
+    ExecutableChallengeEvidence,
 )
+from reachpatch.binding_graph.models import BindingStatus
+from reachpatch.execution.models import CheckClassification, CheckStatus
 from reachpatch.challenge_graph.recipes import InputRecipe, recipe_from_scenario
 from reachpatch.execution.reconcile import ActualDiff, ChangedRelation
 from reachpatch.models.base import content_hash, stable_id
@@ -24,6 +30,236 @@ from reachpatch.program_graph.models import ProgramGraph
 from reachpatch.requirement_graph.compiler import compile_requirement_paths
 from reachpatch.requirement_graph.domains import ConstraintCompiler, default_domain_values
 from reachpatch.requirement_graph.models import RequirementGraph, RequirementPathObligation
+
+
+def evaluate_dicc(
+    executable_targets,
+    comparisons,
+    actual_diff,
+    impact_slice,
+    challenge_results,
+    *,
+    path_obligation_count: int = 0,
+    active_binding_count: int = 0,
+) -> DICCCertificate:
+    """Close diff risk only from real target and preservation executions."""
+
+    targets = tuple(executable_targets)
+    paired = tuple(comparisons)
+    target_ids = {
+        str(getattr(item, "check_id", "")) for item in targets
+        if getattr(item, "check_id", None)
+    }
+    target_pairs = tuple(item for item in paired if item.check_id in target_ids)
+    stable_failures = tuple(sorted(
+        item.check_id for item in target_pairs
+        if item.classification in {
+            CheckClassification.TARGET_STILL_FAILING,
+            CheckClassification.TARGET_REGRESSED,
+        }
+    ))
+    regressions = tuple(sorted(
+        item.check_id for item in paired
+        if item.classification == CheckClassification.PRESERVATION_REGRESSION
+    ))
+    environment = tuple(sorted(
+        item.check_id for item in paired
+        if item.classification in {
+            CheckClassification.SAME_INFRA_FAILURE,
+            CheckClassification.NEW_INFRA_FAILURE,
+            CheckClassification.UNSUPPORTED_CHECK,
+            CheckClassification.FLAKY_RESULT,
+        }
+    ))
+    uncovered = tuple(sorted(
+        getattr(impact_slice, "uncovered_branch_partition_ids", ()) or ()
+    ))
+    real_challenge_count = int(
+        getattr(challenge_results, "real_execution_count", 0) or 0
+    )
+    executed_challenge_ids = tuple(sorted(set(map(
+        str, getattr(challenge_results, "executed_challenge_ids", ())
+        or getattr(challenge_results, "challenge_ids", ()) or (),
+    ))))
+    if not targets:
+        status = DICCStatus.NOT_EVALUABLE
+        reason = "no executable target"
+    elif path_obligation_count <= 0:
+        status = DICCStatus.NOT_EVALUABLE
+        reason = "no executable requirement path obligation"
+    elif active_binding_count <= 0:
+        status = DICCStatus.NOT_EVALUABLE
+        reason = "no active executable binding"
+    elif not target_pairs:
+        status = DICCStatus.NOT_EVALUABLE
+        reason = "no real target execution"
+    elif environment:
+        status = DICCStatus.BLOCKED_EXTERNAL
+        reason = "required check environment is unavailable or unstable"
+    elif stable_failures:
+        status = DICCStatus.OPEN
+        reason = "stable target failure remains"
+    elif regressions:
+        status = DICCStatus.OPEN
+        reason = "preservation regression remains"
+    elif uncovered:
+        status = DICCStatus.OPEN
+        reason = "touched branch partition is uncovered"
+    elif any(
+        item.classification != CheckClassification.TARGET_FIXED
+        for item in target_pairs
+    ):
+        status = DICCStatus.OPEN
+        reason = "not every target is fixed"
+    elif real_challenge_count == 0:
+        status = DICCStatus.NOT_EVALUABLE
+        reason = "no real challenge execution"
+    else:
+        status = DICCStatus.CLOSED
+        reason = "all executable targets and required impact checks passed"
+    return DICCCertificate(
+        certificate_id=stable_id(
+            "dicc-certificate", status.value, sorted(target_ids),
+            [item.comparison_id for item in paired],
+            getattr(actual_diff, "canonical_diff_hash", ""), uncovered,
+            path_obligation_count, active_binding_count,
+            executed_challenge_ids,
+        ),
+        status=status,
+        executable_target_count=len(targets),
+        real_target_execution_count=len(target_pairs),
+        real_challenge_execution_count=real_challenge_count,
+        stable_target_failure_ids=stable_failures,
+        preservation_regression_ids=regressions,
+        environment_blocked_check_ids=environment,
+        uncovered_touched_branch_partition_ids=uncovered,
+        reason=reason,
+        path_obligation_count=path_obligation_count,
+        active_binding_count=active_binding_count,
+        executed_challenge_ids=executed_challenge_ids,
+    )
+
+
+def compile_executable_challenge_evidence(
+    executable_bindings,
+    comparisons,
+    actual_diff,
+    impact_slice,
+    trace_results=(),
+    *,
+    checks=(),
+    repository_index=None,
+) -> ExecutableChallengeEvidence:
+    """Collect real graph and preservation executions for the current diff.
+
+    Target checks establish reach progress and are deliberately excluded from
+    the preservation side. A preservation check becomes a challenge only after
+    a non-empty project diff exists, an executable preservation binding exists,
+    and both sides of its paired execution are stable project results. Trace
+    challenges count only when ``execute_challenges`` reports their IDs.
+    """
+
+    changed_files = tuple(getattr(actual_diff, "changed_files", ()) or ())
+    diff_hash = str(getattr(actual_diff, "canonical_diff_hash", ""))
+    impact_files = tuple(getattr(impact_slice, "changed_files", ()) or ())
+    if not diff_hash or not changed_files or not impact_files:
+        return ExecutableChallengeEvidence((), (), 0)
+
+    if hasattr(trace_results, "executed_challenge_ids"):
+        trace_results = (trace_results,)
+    trace_challenge_ids = {
+        str(challenge_id)
+        for result in trace_results
+        for challenge_id in (
+            getattr(result, "executed_challenge_ids", ()) or ()
+        )
+    }
+
+    preservation_check_ids = {
+        str(unit.check_id)
+        for unit in getattr(executable_bindings, "units", ())
+        if unit.kind == BindingStatus.EXECUTABLE_PRESERVATION and unit.check_id
+    }
+    checks_by_id = {
+        str(check.check_id): check for check in checks
+        if getattr(check, "check_id", None)
+    }
+    changed_symbol_leaves = {
+        part.lower()
+        for symbol in (
+            getattr(impact_slice, "changed_symbol_names", ()) or ()
+        )
+        for part in str(symbol).split(".")
+        if len(part) >= 4 and not part.startswith("__")
+    }
+
+    def impact_related(check_id: str) -> bool:
+        check = checks_by_id.get(check_id)
+        if check is None or repository_index is None or not changed_symbol_leaves:
+            return False
+        paths = []
+        for evidence in getattr(check, "source_evidence_ids", ()):
+            if str(evidence).startswith("selector:"):
+                paths.append(str(evidence).split(":", 1)[1])
+        selector = str(getattr(check, "selector", ""))
+        if selector.endswith(".py"):
+            paths.append(selector)
+        root = Path(str(getattr(check, "cwd", "") or ".")).resolve()
+        for raw_path in paths:
+            candidate = Path(raw_path)
+            if candidate.is_absolute():
+                try:
+                    relative = str(candidate.resolve().relative_to(root))
+                except ValueError:
+                    parts = candidate.parts
+                    if "tests" not in parts:
+                        continue
+                    relative = str(Path(*parts[parts.index("tests"):]))
+            else:
+                relative = str(candidate)
+            relative = relative.replace("\\", "/")
+            references = {
+                str(item).lower() for item in (
+                    repository_index.test_references.get(relative, ())
+                )
+            }
+            if references & changed_symbol_leaves:
+                return True
+        return False
+    valid_statuses = {CheckStatus.PASS, CheckStatus.FAIL}
+    selected = []
+    for comparison in comparisons:
+        if comparison.check_id not in preservation_check_ids:
+            continue
+        if not impact_related(comparison.check_id):
+            continue
+        if comparison.classification not in {
+            CheckClassification.PASS_PRESERVED,
+            CheckClassification.PRESERVATION_REGRESSION,
+        }:
+            continue
+        if (
+            not comparison.baseline.stable
+            or not comparison.patched.stable
+            or comparison.baseline.status not in valid_statuses
+            or comparison.patched.status not in valid_statuses
+            or comparison.baseline.execution_id == comparison.patched.execution_id
+            or comparison.baseline.tree_hash == comparison.patched.tree_hash
+        ):
+            continue
+        selected.append(comparison)
+
+    check_ids = tuple(sorted({item.check_id for item in selected}))
+    public_challenge_ids = {
+        stable_id("executable-impact-challenge", diff_hash, check_id)
+        for check_id in check_ids
+    }
+    challenge_ids = tuple(sorted(trace_challenge_ids | public_challenge_ids))
+    return ExecutableChallengeEvidence(
+        challenge_ids=challenge_ids,
+        executed_check_ids=check_ids,
+        real_execution_count=len(challenge_ids),
+    )
 
 
 class DiffOperatorRegistry:

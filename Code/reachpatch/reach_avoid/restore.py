@@ -3,11 +3,18 @@ from __future__ import annotations
 from typing import Any
 
 from reachpatch.binding_graph.models import (
-    BindingGraph, BindingUnit, OracleFrontier, ProjectionWitness, RepairComponent,
+    BindingGraph, BindingStatus, BindingUnit, ExecutableBindingGraph,
+    ExecutableBindingUnit, OracleFrontier, ProjectionWitness, RepairComponent,
 )
 from reachpatch.challenge_graph.models import (
-    ChallengeCell, ChallengeGraph, ChallengePriority,
+    ChallengeCell, ChallengeGraph, ChallengePriority, DICCCertificate, DICCStatus,
 )
+from reachpatch.execution.models import (
+    CheckClassification, CheckComparison, CheckExecution, CheckRole, CheckStatus,
+    EnvironmentFrontier, EnvironmentHealth, EnvironmentHealthStatus,
+    ExecutableCheck, RejectedCheck,
+)
+from reachpatch.execution.target_recovery import TargetRecoveryResult
 from reachpatch.challenge_graph.recipes import (
     InputRecipe, ResourceLimits, TraceSpec,
 )
@@ -21,13 +28,16 @@ from reachpatch.models.enums import (
 from reachpatch.models.graph import GraphEdge, GraphNode
 from reachpatch.oracle.models import ExecutableScenario, ObservationContract, Oracle
 from reachpatch.program_graph.index import ModuleSummary, RepositoryIndex, SymbolLocation
-from reachpatch.program_graph.models import CFGRecord, PathClass, ProgramGraph, ProtocolOperation
+from reachpatch.program_graph.models import (
+    CFGRecord, CausalSlice, ImpactSlice, PathClass, ProgramGraph,
+    ProtocolOperation, TargetSlice,
+)
 from reachpatch.program_graph.slice import ContextRequest
 from reachpatch.repair.deepseek_agent import GeneratorConversation
 from reachpatch.requirement_graph.models import (
     DomainPartition, DomainSpec, PathEdgeLedgerRecord, QuantifiedVariable,
-    RequirementGraph, RequirementHyperEdge, RequirementLeaf,
-    RequirementPathObligation,
+    ExecutableRequirement, ExecutableRequirementOverlay, NormativeRequirement,
+    RequirementGraph, RequirementHyperEdge, RequirementLeaf, RequirementPathObligation,
 )
 
 
@@ -120,6 +130,13 @@ def program_graph_from_dict(raw: dict[str, Any]) -> ProgramGraph:
         graph.add_path_class(record)
     for item in raw.get("frontiers", ()):
         graph.add_frontier(Frontier(**_tuple_fields(item, ("evidence_ids",))))
+    # Some observation/external/test membership is promoted after node
+    # construction and cannot be inferred from node kind alone. Restore the
+    # persisted semantic indexes exactly so graph hashes survive a resume.
+    graph.external_surface_ids = set(raw.get("external_surface_ids", ()))
+    graph.test_node_ids = set(raw.get("test_node_ids", ()))
+    graph.observation_node_ids = set(raw.get("observation_node_ids", ()))
+    graph.invalidate_hash()
     expected = raw.get("graph_hash")
     if expected and graph.program_hash() != expected:
         raise ValueError("persisted active Program Graph hash mismatch")
@@ -330,7 +347,167 @@ def conversation_from_dict(raw: dict[str, Any]) -> GeneratorConversation:
             )))
             for item in raw.get("pending_context_requests", ())
         ],
+        current_working_diff=str(raw.get("current_working_diff", "")),
+        inspected_line_ranges=set(raw.get("inspected_line_ranges", ())),
+        mechanism_failure_signatures={
+            str(key): list(map(str, values))
+            for key, values in raw.get("mechanism_failure_signatures", {}).items()
+        },
+        rolled_back_diffs=list(map(str, raw.get("rolled_back_diffs", ()))),
+        eliminated_counterexamples=set(raw.get("eliminated_counterexamples", ())),
+        unresolved_counterexamples=set(raw.get("unresolved_counterexamples", ())),
+        passed_preservation_checks=set(raw.get("passed_preservation_checks", ())),
+        last_evidence_fingerprint=raw.get("last_evidence_fingerprint"),
+        revision_count=int(raw.get("revision_count", 0)),
     )
+
+
+def executable_check_from_dict(raw: dict[str, Any]) -> ExecutableCheck:
+    values = _tuple_fields(raw, (
+        "command", "source_evidence_ids", "target_requirement_ids",
+        "temporary_artifact_paths",
+    ))
+    values["role"] = CheckRole(values["role"])
+    values["environment"] = dict(values.get("environment", {}))
+    return ExecutableCheck(**values)
+
+
+def check_execution_from_dict(raw: dict[str, Any]) -> CheckExecution:
+    values = dict(raw)
+    values["status"] = CheckStatus(values["status"])
+    frame = values.get("first_project_frame")
+    values["first_project_frame"] = dict(frame) if frame is not None else None
+    return CheckExecution(**values)
+
+
+def check_comparison_from_dict(raw: dict[str, Any]) -> CheckComparison:
+    values = dict(raw)
+    values["baseline"] = check_execution_from_dict(values["baseline"])
+    values["patched"] = check_execution_from_dict(values["patched"])
+    values["classification"] = CheckClassification(values["classification"])
+    return CheckComparison(**values)
+
+
+def environment_health_from_dict(raw: dict[str, Any]) -> EnvironmentHealth:
+    values = dict(raw)
+    values["status"] = EnvironmentHealthStatus(values["status"])
+    execution = values.get("execution")
+    values["execution"] = (
+        check_execution_from_dict(execution) if execution is not None else None
+    )
+    return EnvironmentHealth(**values)
+
+
+def environment_frontier_from_dict(raw: dict[str, Any]) -> EnvironmentFrontier:
+    values = dict(raw)
+    values["health_status"] = EnvironmentHealthStatus(values["health_status"])
+    return EnvironmentFrontier(**values)
+
+
+def target_recovery_from_dict(raw: dict[str, Any]) -> TargetRecoveryResult:
+    return TargetRecoveryResult(
+        targets=tuple(executable_check_from_dict(item) for item in raw.get("targets", ())),
+        preservation_checks=tuple(
+            executable_check_from_dict(item)
+            for item in raw.get("preservation_checks", ())
+        ),
+        rejected_checks=tuple(
+            RejectedCheck(**item) for item in raw.get("rejected_checks", ())
+        ),
+        environment_frontiers=tuple(
+            environment_frontier_from_dict(item)
+            for item in raw.get("environment_frontiers", ())
+        ),
+        baseline_executions=tuple(
+            check_execution_from_dict(item)
+            for item in raw.get("baseline_executions", ())
+        ),
+        health_checks=tuple(
+            environment_health_from_dict(item)
+            for item in raw.get("health_checks", ())
+        ),
+        directed_reproduction_requests=int(raw.get("directed_reproduction_requests", 0)),
+    )
+
+
+def executable_overlay_from_dict(raw: dict[str, Any]) -> ExecutableRequirementOverlay:
+    normative = []
+    for item in raw.get("normative_requirements", ()):
+        values = _tuple_fields(item, ("witnesses",))
+        values["quantified_variables"] = tuple(
+            QuantifiedVariable(**_tuple_fields(value, ("type_hints",)))
+            for value in item.get("quantified_variables", ())
+        )
+        values["expected_relation"] = dict(values.get("expected_relation", {}))
+        values["observation_contract"] = dict(values.get("observation_contract", {}))
+        normative.append(NormativeRequirement(**values))
+    return ExecutableRequirementOverlay(
+        normative_requirements=tuple(normative),
+        executable_requirements=tuple(
+            ExecutableRequirement(**item)
+            for item in raw.get("executable_requirements", ())
+        ),
+        unresolved_normative_requirement_ids=tuple(
+            raw.get("unresolved_normative_requirement_ids", ())
+        ),
+        hypothesis_assignment_ids=tuple(raw.get("hypothesis_assignment_ids", ())),
+        overlay_hash=str(raw["overlay_hash"]),
+    )
+
+
+def target_slice_from_dict(raw: dict[str, Any]) -> TargetSlice:
+    values = _tuple_fields(raw, (
+        "check_ids", "file_paths", "symbol_names", "node_ids", "source_locations",
+    ))
+    values["source_locations"] = tuple(map(dict, values["source_locations"]))
+    return TargetSlice(**values)
+
+
+def causal_slice_from_dict(raw: dict[str, Any]) -> CausalSlice:
+    values = _tuple_fields(raw, (
+        "node_ids", "edge_ids", "branch_predicate_ids", "dispatch_edge_ids",
+        "exception_edge_ids", "candidate_cut_node_ids",
+    ))
+    location = values.get("failure_location")
+    values["failure_location"] = dict(location) if location is not None else None
+    return CausalSlice(**values)
+
+
+def impact_slice_from_dict(raw: dict[str, Any]) -> ImpactSlice:
+    return ImpactSlice(**_tuple_fields(raw, (
+        "changed_files", "changed_symbol_names", "node_ids", "direct_caller_ids",
+        "sibling_path_ids", "state_consumer_ids", "dispatch_alternative_ids",
+        "exception_consumer_ids", "uncovered_branch_partition_ids",
+    )))
+
+
+def executable_binding_graph_from_dict(raw: dict[str, Any]) -> ExecutableBindingGraph:
+    units = []
+    for item in raw.get("units", ()):
+        values = _tuple_fields(item, (
+            "repair_cut_node_ids", "candidate_repair_cut_ids", "impact_node_ids",
+        ))
+        values["kind"] = BindingStatus(values["kind"])
+        location = values.get("failure_location")
+        values["failure_location"] = dict(location) if location is not None else None
+        units.append(ExecutableBindingUnit(**values))
+    return ExecutableBindingGraph(
+        units=tuple(units),
+        executable_requirement_overlay_hash=str(raw["executable_requirement_overlay_hash"]),
+        target_slice_id=str(raw["target_slice_id"]),
+        impact_slice_id=raw.get("impact_slice_id"),
+        graph_hash=str(raw["graph_hash"]),
+    )
+
+
+def dicc_certificate_from_dict(raw: dict[str, Any]) -> DICCCertificate:
+    values = _tuple_fields(raw, (
+        "stable_target_failure_ids", "preservation_regression_ids",
+        "environment_blocked_check_ids", "uncovered_touched_branch_partition_ids",
+        "executed_challenge_ids",
+    ))
+    values["status"] = DICCStatus(values["status"])
+    return DICCCertificate(**values)
 
 
 def outcome_from_dict(raw: dict[str, Any]) -> UnitOutcome:

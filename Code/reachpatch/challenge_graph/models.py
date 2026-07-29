@@ -2,12 +2,46 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field, replace
 from typing import Any, Iterable
+from enum import StrEnum
 
 from reachpatch.challenge_graph.recipes import InputRecipe
 from reachpatch.models.base import SerializableRecord, content_hash
 from reachpatch.models.core import Frontier
 from reachpatch.models.enums import ChallengeTerminalStatus
 from reachpatch.oracle.models import ExecutableScenario
+
+
+class DICCStatus(StrEnum):
+    CLOSED = "CLOSED"
+    OPEN = "OPEN"
+    NOT_EVALUABLE = "NOT_EVALUABLE"
+    BLOCKED_EXTERNAL = "BLOCKED_EXTERNAL"
+
+
+@dataclass(frozen=True, slots=True)
+class DICCCertificate(SerializableRecord):
+    certificate_id: str
+    status: DICCStatus
+    executable_target_count: int
+    real_target_execution_count: int
+    real_challenge_execution_count: int
+    stable_target_failure_ids: tuple[str, ...]
+    preservation_regression_ids: tuple[str, ...]
+    environment_blocked_check_ids: tuple[str, ...]
+    uncovered_touched_branch_partition_ids: tuple[str, ...]
+    reason: str
+    path_obligation_count: int = 0
+    active_binding_count: int = 0
+    executed_challenge_ids: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True, slots=True)
+class ExecutableChallengeEvidence(SerializableRecord):
+    """Real project-check executions selected as diff-impact challenges."""
+
+    challenge_ids: tuple[str, ...]
+    executed_check_ids: tuple[str, ...]
+    real_execution_count: int
 
 
 @dataclass(frozen=True, slots=True)

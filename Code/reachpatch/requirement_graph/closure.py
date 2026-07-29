@@ -43,7 +43,10 @@ def requirement_path_closure(graph: RequirementGraph) -> RequirementClosure:
     )
     coverage = numerator / denominator if denominator else (1.0 if not graph.leaves else 0.0)
     return RequirementClosure(
-        closed=not missing and not nonterminal and not hard_frontiers,
+        closed=(
+            bool(graph.path_obligations)
+            and not missing and not nonterminal and not hard_frontiers
+        ),
         path_coverage=coverage,
         missing_leaf_ids=missing,
         nonterminal_ledger_ids=nonterminal,

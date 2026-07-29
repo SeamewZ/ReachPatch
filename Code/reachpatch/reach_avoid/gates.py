@@ -6,6 +6,8 @@ from reachpatch.binding_graph.closure import compute_binding_path_closure
 from reachpatch.models.controller import MechanicalCheck, ReachAvoidState, UnitOutcome
 from reachpatch.models.enums import OutcomeStatus
 from reachpatch.requirement_graph.closure import requirement_path_closure
+from reachpatch.challenge_graph.models import DICCStatus
+from reachpatch.execution.models import CheckClassification
 
 
 def _hard_frontiers(state: ReachAvoidState) -> tuple[str, ...]:
@@ -67,6 +69,59 @@ def in_safe_set(state: ReachAvoidState) -> bool:
 def in_target_set(state: ReachAvoidState) -> bool:
     if not state.checkpoint.patch.canonical_diff:
         return False
+    target_recovery = getattr(state, "target_recovery", None)
+    if target_recovery is not None:
+        targets = tuple(target_recovery.targets)
+        target_ids = {item.check_id for item in targets}
+        comparisons = tuple(state.check_comparisons)
+        target_comparisons = tuple(
+            item for item in comparisons if item.check_id in target_ids
+        )
+        preservation_regression = any(
+            item.classification == CheckClassification.PRESERVATION_REGRESSION
+            for item in comparisons
+        )
+        environment_invalid = any(
+            item.classification in {
+                CheckClassification.SAME_INFRA_FAILURE,
+                CheckClassification.NEW_INFRA_FAILURE,
+                CheckClassification.FLAKY_RESULT,
+                CheckClassification.UNSUPPORTED_CHECK,
+            }
+            for item in target_comparisons
+        )
+        current_failure_signatures = {
+            item.patched.failure_signature for item in comparisons
+            if item.patched.failure_signature
+        }
+        stable_counterexamples_pass = not any(
+            item.environment_valid
+            and item.failure_signature
+            and item.failure_signature in current_failure_signatures
+            for item in state.counterexamples
+        )
+        return all((
+            bool(targets),
+            bool(target_comparisons),
+            len(target_comparisons) == len(targets),
+            all(
+                item.classification == CheckClassification.TARGET_FIXED
+                for item in target_comparisons
+            ),
+            not preservation_regression,
+            stable_counterexamples_pass,
+            state.dicc_certificate is not None,
+            state.dicc_certificate.status == DICCStatus.CLOSED
+            if state.dicc_certificate is not None else False,
+            state.dicc_certificate.path_obligation_count > 0
+            if state.dicc_certificate is not None else False,
+            state.dicc_certificate.active_binding_count > 0
+            if state.dicc_certificate is not None else False,
+            state.dicc_certificate.real_challenge_execution_count > 0
+            if state.dicc_certificate is not None else False,
+            not environment_invalid,
+            state.checkpoint.safe,
+        ))
     active_target_ids = {
         unit.unit_id for unit in state.binding_graph.units.values()
         if unit.status in {"ACTIVE", "READY"}
@@ -125,10 +180,16 @@ def in_target_set(state: ReachAvoidState) -> bool:
 
 def terminal_avoid_reason(state: ReachAvoidState) -> str | None:
     if not state.remaining_budget.available() and not in_target_set(state):
-        return "BUDGET_EXHAUSTED"
+        if state.target_recovery is None or not state.target_recovery.targets:
+            return "TARGET_RECOVERY_BLOCKED"
+        if state.checkpoint.patch.canonical_diff:
+            return "REVISION_BUDGET_EXHAUSTED_WITH_UNCERTIFIED_PATCH"
+        return "REVISION_BUDGET_EXHAUSTED_WITH_TARGET_FAILURE"
     if state.termination_status in {
         "NO_LEGAL_ACTION", "ENVIRONMENT_BLOCKED", "SEMANTIC_BLOCKED",
         "ORACLE_BLOCKED", "LOCALIZATION_BLOCKED", "GENERATOR_BLOCKED_EXTERNAL",
+        "TARGET_RECOVERY_BLOCKED", "GENERATOR_NONPROGRESS",
+        "NO_NEW_REPAIR_EVIDENCE", "MECHANICAL_FAILURE",
     }:
         return state.termination_status
     return None

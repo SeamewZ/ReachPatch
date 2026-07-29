@@ -10,6 +10,7 @@ from types import SimpleNamespace
 
 import pytest
 
+from reachpatch.artifacts.store import ArtifactStore
 from reachpatch.binding_graph import build_active_binding_graph
 from reachpatch.challenge_graph.materialize import (
     execute_challenges, materialize_active_challenges,
@@ -41,6 +42,7 @@ from reachpatch.repair.deepseek_agent import (
     ActionConversionStatus, GeneratorRevision, PersistentDeepSeekAgent,
     convert_revision_action,
 )
+from reachpatch.repair.context import _issue_text
 from reachpatch.repair.tools import ProposedEdit, RepairToolExecutor
 from reachpatch.requirement_graph import (
     compile_assignment_overlay, compile_requirement_core,
@@ -50,6 +52,25 @@ from reachpatch.requirement_graph import (
 
 
 FIXTURE = Path(__file__).parents[1] / "fixtures" / "simple_repo"
+
+
+def test_repair_context_keeps_primary_issue_ahead_of_public_discussion() -> None:
+    state = SimpleNamespace(
+        runtime_config={
+            "primary_issue": "PRIMARY CONTRACT",
+            "generation_hints": "DISCUSSION DETAIL",
+        },
+        semantic_graph=SimpleNamespace(evidence={
+            "witness": SimpleNamespace(
+                content="SHUFFLED WITNESS",
+                kind=SimpleNamespace(value="ISSUE_WITNESS"),
+            ),
+        }),
+    )
+
+    assert _issue_text(state) == (
+        "PRIMARY CONTRACT\n\nPublic hints:\nDISCUSSION DETAIL"
+    )
 
 
 def _budget(*, files: int = 8, functions: int = 16) -> GraphBudget:
@@ -443,7 +464,7 @@ class _BrowseUntilFinalTurnTransport:
 class _ForcedChoiceTransport:
     def __init__(self) -> None:
         self.turn = 0
-        self.forced_choices: list[dict] = []
+        self.forced_choices: list[str | dict] = []
 
     def __call__(self, messages, schemas):
         self.turn += 1
@@ -461,18 +482,11 @@ class _ForcedChoiceTransport:
         self.forced_choices.append(tool_choice)
         return {
             "role": "assistant", "content": "", "tool_calls": [{
-                "id": "forced-final-edit", "type": "function",
+                "id": "allowed-final-blocker", "type": "function",
                 "function": {
-                    "name": "apply_edits",
+                    "name": "declare_blocker",
                     "arguments": json.dumps({
-                        "mechanism": "initial_issue_repair",
-                        "edits": [{
-                            "relative_path": "pkg/api.py",
-                            "start_line": 40,
-                            "end_line": 40,
-                            "expected_source": "    return normalize(value)",
-                            "replacement": "    return []",
-                        }],
+                        "reason": "the available evidence does not ground an edit",
                     }),
                 },
             }],
@@ -488,7 +502,7 @@ class _ContextlessTransport:
         return {"role": "assistant", "content": "insufficient evidence"}
 
 
-def test_generator_final_turn_forces_revision_synthesis(tmp_path):
+def test_generator_final_turn_limits_browsing_without_forcing_an_edit(tmp_path):
     repository = tmp_path / "repo"
     shutil.copytree(FIXTURE, repository, ignore=shutil.ignore_patterns("__pycache__"))
     shutil.rmtree(repository / "tests")
@@ -511,21 +525,21 @@ def test_generator_final_turn_forces_revision_synthesis(tmp_path):
     assert "search_code" in transport.available_tools[0]
     assert "search_code" not in transport.available_tools[-1]
     assert transport.available_tools[-1] == {
-        "apply_edits", "request_program_slice", "run_public_check",
-        "finish_revision",
+        "apply_edits", "request_program_slice", "finish_revision",
+        "declare_blocker",
     }
     assert state.transition_index == 1
     assert state.checkpoint.patch.canonical_diff
 
 
-def test_production_final_turn_requests_apply_edits_explicitly(tmp_path):
+def test_production_final_turn_does_not_force_apply_edits(tmp_path):
     repository = tmp_path / "repo"
     shutil.copytree(FIXTURE, repository, ignore=shutil.ignore_patterns("__pycache__"))
     shutil.rmtree(repository / "tests")
     transport = _ForcedChoiceTransport()
     controller = ReachPatchController(
         config=ReachPatchConfig(max_submitted_revisions=1),
-        generator_agent=PersistentDeepSeekAgent(transport, max_tool_turns=3),
+        generator_agent=PersistentDeepSeekAgent(transport, max_tool_turns=4),
         implementation_root=tmp_path,
     )
 
@@ -537,11 +551,22 @@ def test_production_final_turn_requests_apply_edits_explicitly(tmp_path):
         run_root=tmp_path / "run",
     )
 
-    assert transport.forced_choices == [{
+    assert transport.forced_choices == ["required"]
+    assert all(choice != {
         "type": "function", "function": {"name": "apply_edits"},
-    }]
-    assert state.transition_index == 1
-    assert state.checkpoint.patch.canonical_diff
+    } for choice in transport.forced_choices)
+    assert state.transition_index == 0
+    assert state.checkpoint.patch.canonical_diff == ""
+    assert not any(
+        call.get("function", {}).get("name") == "apply_edits"
+        for message in state.generator_conversation.messages
+        for call in message.get("tool_calls", ())
+    )
+    assert any(
+        call.get("function", {}).get("name") == "declare_blocker"
+        for message in state.generator_conversation.messages
+        for call in message.get("tool_calls", ())
+    )
 
 
 def test_contextless_generator_stops_before_revision_budget_is_exhausted(tmp_path):
@@ -566,11 +591,36 @@ def test_contextless_generator_stops_before_revision_budget_is_exhausted(tmp_pat
         run_root=tmp_path / "run",
     )
 
-    assert certificate.status == "GENERATOR_NONPROGRESS"
-    assert state.termination_status == "GENERATOR_NONPROGRESS"
-    assert state.runtime_metrics["generator_contextless_revisions"] == 3
-    assert state.runtime_metrics["submitted_generator_revisions"] == 4
-    assert transport.calls == 4
+    assert certificate.status == "NO_NEW_REPAIR_EVIDENCE"
+    assert state.termination_status == "NO_NEW_REPAIR_EVIDENCE"
+    assert state.runtime_metrics["submitted_generator_revisions"] == 2
+    assert transport.calls == 1
+
+
+def test_target_recovery_blocked_does_not_call_generator(tmp_path):
+    repository = tmp_path / "repo"
+    shutil.copytree(FIXTURE, repository, ignore=shutil.ignore_patterns("__pycache__"))
+    transport = _ContextlessTransport()
+    controller = ReachPatchController(
+        config=ReachPatchConfig(max_submitted_revisions=10),
+        generator_agent=PersistentDeepSeekAgent(transport, max_tool_turns=6),
+        implementation_root=tmp_path,
+    )
+
+    state, certificate = controller.run(
+        Instance(
+            "target-recovery-blocked", str(repository), "base",
+            "Improve the public API documentation wording.",
+        ),
+        run_root=tmp_path / "run",
+    )
+
+    assert certificate.status == "TARGET_RECOVERY_BLOCKED"
+    assert state.termination_status == "TARGET_RECOVERY_BLOCKED"
+    assert not state.target_recovery.targets
+    assert state.target_recovery.directed_reproduction_requests <= 1
+    assert transport.calls == 0
+    assert state.transition_index == 0
 
 
 def test_unknown_generator_tool_is_reported_without_crashing_or_executing_shell(
@@ -635,7 +685,7 @@ def test_single_working_patch_is_repaired_in_one_persistent_conversation(
         run_root=tmp_path / "run",
     )
 
-    assert certificate.status == "GRAPH_REACHED"
+    assert certificate.status == "REACHED"
     assert state.transition_index == 3
     assert [item.decision for item in state.repair_history] == [
         Decision.COMMIT, Decision.ROLLBACK, Decision.COMMIT,
@@ -1067,7 +1117,13 @@ def test_generation_instance_rejects_official_fields():
         "instance_id": "public-only", "repo": "owner/repo",
         "base_commit": "base", "problem_statement": "fix public behavior",
     }
-    assert GenerationInstance.from_public_record(public).issue == "fix public behavior"
+    generation = GenerationInstance.from_public_record(public)
+    assert generation.issue == "fix public behavior"
+    for field in (
+        "FAIL_TO_PASS", "PASS_TO_PASS", "test_patch", "gold_patch",
+        "official_harness_output",
+    ):
+        assert not hasattr(generation, field)
     with pytest.raises(ValueError, match="official-only field"):
         GenerationInstance(
             "leak", "owner/repo", "base", "issue",
@@ -1155,8 +1211,15 @@ class _RegressingTransport:
 def test_public_preservation_regression_rolls_back_only_trial(tmp_path):
     repository = tmp_path / "repo"
     shutil.copytree(FIXTURE, repository, ignore=shutil.ignore_patterns("__pycache__"))
+    target_check = (
+        sys.executable, "-c",
+        "import sys; from pkg.api import public; sys.exit(public([1]) != [])",
+    )
     controller = ReachPatchController(
-        config=ReachPatchConfig(max_submitted_revisions=1),
+        config=ReachPatchConfig(
+            max_submitted_revisions=1,
+            mechanical_commands=(target_check,),
+        ),
         generator_agent=PersistentDeepSeekAgent(
             _RegressingTransport(), max_tool_turns=3,
         ),
@@ -1166,7 +1229,7 @@ def test_public_preservation_regression_rolls_back_only_trial(tmp_path):
     state = controller.analyze(
         Instance(
             "public-regression", str(repository), "base",
-            "For every x, pkg.api.public(x) must return a list.",
+            "For every x, pkg.api.public(x) must return [].",
         ),
         run_root=tmp_path / "run",
     )
@@ -1212,26 +1275,105 @@ def test_public_target_fix_contributes_transition_progress(tmp_path):
     assert state.checkpoint.patch.canonical_diff
     assert state.repair_history[-1].decision == Decision.COMMIT
     assert state.repair_history[-1].progress
+    assert state.repair_history[-1].old_target_deficit == float(
+        len(state.target_recovery.targets)
+    )
+    assert state.repair_history[-1].new_target_deficit == 0.0
+    assert state.target_deficit() == 0.0
     comparisons = state.repair_history[-1].graph_delta["public_check_comparisons"]
     assert {item["classification"] for item in comparisons} == {"TARGET_FIXED"}
     assert state.runtime_metrics["public_target_fixed_commands"]
     assert state.runtime_metrics["public_target_evidence_unit_ids"]
+    assert any(item.candidate_cut_node_ids for item in state.causal_slices)
+    assert any(
+        unit.cut_status == "CUT_RESOLVED"
+        for unit in state.executable_binding_graph.executable_targets
+    )
+    assert state.runtime_metrics["dicc_status"] == state.dicc_certificate.status.value
+    persisted_dicc = ArtifactStore(tmp_path / "run" / "artifacts").latest(
+        "public-target", "dicc_certificate",
+    )
+    assert persisted_dicc is not None
+    assert persisted_dicc.payload == state.dicc_certificate.to_dict()
+
+    restored = controller.rebuild(tmp_path / "run")
+    assert len(restored.target_recovery.targets) == len(state.target_recovery.targets)
+    assert tuple(item.to_dict() for item in restored.check_comparisons) == tuple(
+        item.to_dict() for item in state.check_comparisons
+    )
+    assert restored.dicc_certificate.status == state.dicc_certificate.status
+    assert restored.dicc_certificate.executed_challenge_ids == (
+        state.dicc_certificate.executed_challenge_ids
+    )
+    assert restored.checkpoint.executed_target_deficit == (
+        state.checkpoint.executed_target_deficit
+    )
+    assert restored.generator_conversation.current_working_diff == (
+        state.checkpoint.patch.canonical_diff
+    )
+
+
+def test_edit_ablation_reexecutes_targets_before_retaining_removal(tmp_path):
+    repository = tmp_path / "repo"
+    shutil.copytree(FIXTURE, repository, ignore=shutil.ignore_patterns("__pycache__"))
+    shutil.rmtree(repository / "tests")
+    target_check = (
+        sys.executable, "-c",
+        "import sys; from pkg.api import public; sys.exit(public([1]) != [])",
+    )
+    instance_id = "ablation-public-recheck"
+    run_root = tmp_path / "run"
+    controller = ReachPatchController(
+        config=ReachPatchConfig(
+            max_submitted_revisions=1,
+            mechanical_commands=(target_check,),
+            enable_ablation=True,
+            max_ablation_groups=1,
+        ),
+        generator_agent=PersistentDeepSeekAgent(
+            _RegressingTransport(), max_tool_turns=3,
+        ),
+        implementation_root=tmp_path,
+    )
+
+    state, certificate = controller.run(
+        Instance(
+            instance_id, str(repository), "base",
+            "For every x, pkg.api.public(x) must return [].",
+        ),
+        run_root=run_root,
+    )
+
+    artifact = ArtifactStore(run_root / "artifacts").latest(
+        instance_id, "edit_retention_ablation",
+    )
+    assert certificate.status == "REACHED"
+    assert state.checkpoint.patch.status == "REACHED"
+    assert artifact is not None
+    attempt = artifact.payload["attempts"][0]
+    details = attempt["validation"]["details"]
+    assert attempt["decision"] == "RETAIN"
+    assert {
+        item["classification"] for item in details["public_check_comparisons"]
+    } == {"TARGET_STILL_FAILING"}
+    assert details["dicc_status"] == "OPEN"
 
 
 def test_semantic_ambiguity_still_reaches_initial_generator(tmp_path):
     repository = tmp_path / "repo"
     shutil.copytree(FIXTURE, repository, ignore=shutil.ignore_patterns("__pycache__"))
+    shutil.rmtree(repository / "tests")
     controller = ReachPatchController(
         config=ReachPatchConfig(max_submitted_revisions=2),
         generator_agent=PersistentDeepSeekAgent(
-            _CorrectInitialTransport(), max_tool_turns=3,
+            _RegressingTransport(), max_tool_turns=3,
         ),
         implementation_root=tmp_path,
     )
     state = controller.analyze(
         Instance(
             "ambiguous-generation", str(repository), "base",
-            "For every x, pkg.api.public(x) must return a list. "
+            "For every x, pkg.api.public(x) must return []. "
             "The result could preserve identity? The result could create a copy?",
         ),
         run_root=tmp_path / "run",

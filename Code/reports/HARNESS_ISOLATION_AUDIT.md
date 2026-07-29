@@ -1,100 +1,86 @@
 # Harness Isolation Audit
 
-## Boundary
+## Process and data boundary
 
-Generation and official evaluation are separate commands and data types:
+Generation reads `generation_public_instances.jsonl` into `GenerationInstance`.
+That type has no FAIL_TO_PASS, PASS_TO_PASS, test patch, gold patch, or official
+harness output fields. Public metadata is recursively checked for official-only
+keys. The controller, repair context, tool executor, artifact store, and resume
+path accept only generation-side state.
 
-```text
-generation_public_instances.jsonl
-  -> GenerationInstance
-  -> ReachPatchController / PersistentDeepSeekAgent
-  -> sealed final_patch.diff
+Each production generation worker additionally runs inside a bubblewrap mount
+namespace. The combined dataset directory is replaced with a temporary
+filesystem containing only `generation_public_instances.jsonl`; raw per-case
+records and `official_instances.jsonl` do not exist in that namespace. Git
+mirrors, prior harness logs/results, combined reports that may contain harness
+outcomes, `/run` (including Docker/containerd sockets), and the official harness
+tree are also masked. The base case export and ReachPatch implementation are
+read-only. Only generation run/result roots are writable. If bubblewrap is not
+available, the case returns `ENVIRONMENT_BLOCKED` with
+`HARNESS_ISOLATION_UNAVAILABLE`; it never falls back to an unisolated worker.
+Direct invocation of the internal `case` command outside this namespace is
+rejected.
 
-official_instances.jsonl
-  -> HarnessEvaluationInstance
-  -> independent patched tree and official tests
-  -> experiments/swe51/harness/<case>/...
-```
+After generation seals `final_patch.diff`, the separate `harness` command reads
+`official_instances.jsonl` and creates `HarnessEvaluationInstance`. Official
+records and results are stored under the experiment harness roots, outside the
+generation `RunArtifacts` store. A sealed generation run cannot be resumed.
 
-`generate` and `case` read only `PUBLIC_PATH`. `harness` is the only command that reads `OFFICIAL_PATH`, and it runs after a patch file already exists. Harness results are never passed to `ReachPatchController`, `GeneratorConversation`, `RepairContext`, `ArtifactStore` or `resume()`.
+## Official runner
 
-## Type-level controls
+`run_official_swebench_instance()` calls the upstream SWE-bench test-spec and
+`run_instance` Docker flow. The upstream test spec owns base-commit checkout,
+candidate patch application, official test patch application, official
+FAIL_TO_PASS/PASS_TO_PASS selection, per-instance image, and report production.
+Each `_harness_one()` call has a case-specific result and official log path.
 
-`GenerationInstance.from_public_record` selects an allowlist:
+There is no host pytest fallback. Missing Docker SDK/daemon/image or SWE-bench
+runtime results in `HARNESS_NOT_RUN` and root-cause label
+`HARNESS_NOT_OFFICIAL`. Timeouts from a started official container remain an
+official unknown execution, not a local validation result.
 
-```text
-instance_id
-repo
-base_commit
-problem_statement
-hints_text
-version
-environment_setup_commit
-visible_tests
-```
+## Tool and path boundary
 
-It recursively rejects official-only keys including `test_patch`, `patch`, `gold_patch`, `hidden_tests`, `harness_logs`, `FAIL_TO_PASS` and `PASS_TO_PASS` in nested public metadata.
+`RepairToolExecutor` rejects path traversal, repository metadata, test patch,
+gold patch, hidden test, and harness result/log paths. Only controller-declared
+public test paths can be read, all test edits are forbidden, and revision action
+conversion repeats the forbidden-path check. The DeepSeek system prompt also
+forbids official evidence, but enforcement does not depend on the prompt.
 
-`HarnessEvaluationInstance.from_official_record` is a separate type whose official test identifiers and sealed patch path are used only by `_harness_one`. The Generator accepts no `HarnessEvaluationInstance` parameter.
+## Cache boundary
 
-## Tool-level controls
-
-The model cannot run arbitrary shell. `RepairToolExecutor` is rooted at the incumbent repository snapshot and:
-
-- rejects path escape and metadata directories;
-- rejects test_patch, gold_patch, hidden-test and harness-result/log paths;
-- permits test reads only for Controller-declared visible/public paths;
-- excludes forbidden evidence from default or explicit search;
-- rejects every test edit;
-- runs only Controller-registered public commands with `shell=False`.
-
-`convert_revision_action` independently rechecks absolute/parent escapes, tests, `.git`, gold, hidden and test_patch edit targets before a trial is created. Diff reconciliation additionally marks forbidden and Oracle-contamination paths.
-
-## Storage controls
-
-Generation artifacts live under each generation `run_root/artifacts`. They contain public evidence, active graphs, recipes, public executions, revisions, working patches and certificates.
-
-Harness state lives under `experiments/swe51/harness/<instance_id>`. `harness_evaluation_instance.json`, patch application output and official test output are written there and to harness/experiment reports, never through `RunArtifacts` or `ArtifactStore`.
-
-`ReachPatchController.rebuild` reads only generation run manifest, worktree checkpoints and ArtifactStore objects. It has no harness directory or official-record argument. `resume()` rejects a sealed run and therefore cannot use post-seal harness feedback for another Generator revision.
-
-## Evaluation behavior
-
-The harness copies the base tree into its own directory, applies the sealed pure patch with `patch -p1`, then invokes the project runner on official fail-to-pass and pass-to-pass identifiers. It records patch application, target and preservation outcomes independently. Those outcomes may be used for experiment reporting only; they cannot alter the generated patch or conversation.
+Harness cache entries are reused only when they identify the official
+SWE-bench Docker engine (or carry equivalent official image/test-patch wiring)
+and match the sealed patch hash. Historical host-harness cache entries are
+ignored and re-evaluated through the official adapter.
 
 ## Verification
 
-- Unit test constructs an allowed public test and a forbidden `test_patch.py`; the public read succeeds, forbidden read/search fails to expose content, and test edit is rejected.
-- GenerationInstance tests reject official-only fields.
-- Static call audit finds `OFFICIAL_PATH` reads only in `harness()` and `HarnessEvaluationInstance` construction only in `_harness_one`.
-- DeepSeek system prompt explicitly forbids hidden tests, gold patches, test_patch and harness outcomes; enforcement does not rely on the prompt because path/type checks are mechanical.
-- No production source reads a gold patch or official harness result during generation.
+- `test_generation_instance_rejects_official_fields`: official-only fields are
+  absent and nested leaks are rejected.
+- `test_generation_sandbox_hides_official_inputs_and_harness_outputs`: a real
+  bubblewrap worker can read the public JSONL but cannot see official/raw case
+  records or harness logs, cannot read a prior harness summary, and has no
+  Docker daemon socket.
+- `test_direct_case_generation_requires_public_only_sandbox`: the internal
+  worker entrypoint cannot be called without the isolation marker.
+- `test_official_harness_parses_upstream_report`: official patch, target, and
+  preservation report parsing.
+- `test_official_harness_distinguishes_patch_apply_failure`: patch application
+  failure is distinct from target failure.
+- `test_official_harness_reports_missing_exact_image`: exact image missing gives
+  `HARNESS_NOT_RUN`.
+- `test_host_harness_cache_is_not_treated_as_official`: local cache cannot be
+  promoted to an official result.
+- `test_harness_uses_sealed_patch_with_official_adapter`: only sealed patch text
+  crosses into the post-generation official call.
 
-## Residual considerations
+Focused runner, project-runner, and harness tests: `20 passed in 7.04s` before
+the `/run` hardening; the two direct isolation probes pass after that hardening.
 
-Repository maintainers may have ordinary public tests whose filenames include broad words such as “golden”. The hard path filter targets explicit official/gold-patch/hidden/harness evidence names; Controller-declared public tests remain readable unless they match an official-only path. Project network/database tests remain public evidence but may be `BLOCKED_EXTERNAL`; blocked status is not converted to PASS.
+## Current official status
 
-## Current sealed evaluation
-
-The latest generation merge yielded 41 nonempty sealed patches. The harness
-evaluated exactly those patches in independent trees with four workers. It
-recorded 38 `UNKNOWN_EXECUTION` results caused by missing dependencies,
-collection/build failures or other external execution blockers, and 3
-`FAIL_PRESERVATION_REGRESSION` results. No patch was selected or modified
-based on these outcomes, and no harness result was copied into an ArtifactStore
-or Generator conversation.
-
-## Conclusion
-
-No harness/gold feedback path into the Generator was found. The sealed patch is evaluated in an independent tree and result namespace, and the persistent Generator cannot resume from those results.
-
-## Observed Sealed Evaluation
-
-The sealed `psf__requests-2148` patch was evaluated after generation in the
-independent harness process. Patch application passed. Its historical target
-and preservation command groups were `BLOCKED_EXTERNAL` because that harness
-Python environment did not provide pytest, so the aggregate status was
-`UNKNOWN_EXECUTION`. Pytest has since been installed in the harness interpreter;
-sealed patches are re-evaluated independently after generation completes. The
-historical result remains under `experiments/swe51/harness` and was not read by
-Generator or `resume()`.
+Docker and exact SWE-bench instance images are available. Official evaluation
+will run only after the newly isolated generation batch has sealed its patches;
+no result from the earlier unisolated batch is eligible for the final
+Resolved@1 claim.

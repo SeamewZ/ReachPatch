@@ -103,7 +103,16 @@ class RequirementAuthorityClass(StrEnum):
 class Decision(StrEnum):
     COMMIT = "COMMIT"
     ROLLBACK = "ROLLBACK"
+    KEEP_UNCERTIFIED = "KEEP_UNCERTIFIED"
     ENVIRONMENT_BLOCKED = "ENVIRONMENT_BLOCKED"
+
+
+class PatchStatus(StrEnum):
+    EMPTY = "EMPTY"
+    WORKING_UNCERTIFIED = "WORKING_UNCERTIFIED"
+    WORKING_IMPROVED = "WORKING_IMPROVED"
+    REACHED = "REACHED"
+    ROLLED_BACK = "ROLLED_BACK"
 
 
 class ControllerPhase(StrEnum):

@@ -50,6 +50,25 @@ def test_commit_publishes_one_immutable_checkpoint_and_closes_trial(tmp_path):
     assert not manager.lease.exists()
 
 
+def test_keep_uncertified_archives_trial_without_replacing_incumbent(tmp_path):
+    repository = _repository(tmp_path)
+    manager = WorktreeManager(tmp_path / "worktrees")
+    initialized = manager.initialize(repository, "checkpoint-0")
+    trial = manager.begin_trial("checkpoint-0")
+    Path(trial.tree, "module.py").write_text("VALUE = 2\n", encoding="utf-8")
+
+    receipt = manager.keep_uncertified(trial)
+
+    incumbent = manager.checkpoint_tree("checkpoint-0")
+    archived = Path(receipt.snapshot_tree)
+    assert receipt.operation == "KEEP_UNCERTIFIED"
+    assert receipt.result_checkpoint_id is None
+    assert tree_hash(incumbent) == initialized.after_tree_hash
+    assert Path(incumbent, "module.py").read_text(encoding="utf-8") == "VALUE = 1\n"
+    assert Path(archived, "module.py").read_text(encoding="utf-8") == "VALUE = 2\n"
+    assert not manager.lease.exists()
+
+
 def test_checkpoint_compatibility_primitives_delegate_transactionally(tmp_path):
     repository = _repository(tmp_path)
     manager = WorktreeManager(tmp_path / "worktrees")

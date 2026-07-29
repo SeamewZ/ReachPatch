@@ -143,6 +143,58 @@ class ImpactCone(SerializableRecord):
     frontier_ids: tuple[str, ...]
 
 
+@dataclass(frozen=True, slots=True)
+class TargetSlice(SerializableRecord):
+    slice_id: str
+    check_ids: tuple[str, ...]
+    file_paths: tuple[str, ...]
+    symbol_names: tuple[str, ...]
+    node_ids: tuple[str, ...]
+    source_locations: tuple[dict[str, Any], ...]
+
+
+@dataclass(frozen=True, slots=True)
+class CausalSlice(SerializableRecord):
+    slice_id: str
+    execution_id: str
+    failure_location: dict[str, Any] | None
+    enclosing_callable: str | None
+    node_ids: tuple[str, ...]
+    edge_ids: tuple[str, ...]
+    branch_predicate_ids: tuple[str, ...]
+    dispatch_edge_ids: tuple[str, ...]
+    exception_edge_ids: tuple[str, ...]
+    candidate_cut_node_ids: tuple[str, ...]
+    truncated_reason: str | None
+
+
+@dataclass(frozen=True, slots=True)
+class ImpactSlice(SerializableRecord):
+    slice_id: str
+    changed_files: tuple[str, ...]
+    changed_symbol_names: tuple[str, ...]
+    node_ids: tuple[str, ...]
+    direct_caller_ids: tuple[str, ...]
+    sibling_path_ids: tuple[str, ...]
+    state_consumer_ids: tuple[str, ...]
+    dispatch_alternative_ids: tuple[str, ...]
+    exception_consumer_ids: tuple[str, ...]
+    uncovered_branch_partition_ids: tuple[str, ...]
+    truncated_reason: str | None
+
+
+@dataclass(frozen=True, slots=True)
+class RepairCut(SerializableRecord):
+    cut_id: str
+    relative_path: str
+    start_line: int
+    end_line: int
+    symbol: str
+    reason: str
+    failure_distance: int
+    protected_sibling_paths: tuple[str, ...]
+
+
 class ProgramGraph(TypedMultiGraph):
     _SUFFIX_INDEX_KINDS = frozenset({
         "module",

@@ -49,6 +49,7 @@ class WorkingPatch(SerializableRecord):
     working_tree_hash: str
     parent_patch_hash: str | None
     checkpoint_id: str
+    status: str = "EMPTY"
 
 
 @dataclass(frozen=True, slots=True)
@@ -187,6 +188,16 @@ class CounterexamplePacket(SerializableRecord):
     uncertain_information: tuple[str, ...]
     mechanism_fingerprint_hash: str | None
     delivered_session_cursor: str | None = None
+    reproduction_command: tuple[str, ...] = ()
+    baseline_status: str | None = None
+    patched_status: str | None = None
+    failure_signature: str | None = None
+    first_project_frame: dict[str, Any] | None = None
+    relevant_source_ranges: tuple[dict[str, Any], ...] = ()
+    causal_cut_candidates: tuple[dict[str, Any], ...] = ()
+    previous_diff: str = ""
+    protected_behavior: tuple[str, ...] = ()
+    environment_valid: bool = True
 
 
 @dataclass(frozen=True, slots=True)
@@ -336,6 +347,16 @@ class ReachAvoidState:
     termination_status: str | None = None
     transition_index: int = 0
     phase_history: list[dict[str, Any]] = field(default_factory=list)
+    target_recovery: Any | None = None
+    executable_requirement_overlay: Any | None = None
+    target_slice: Any | None = None
+    causal_slices: tuple[Any, ...] = ()
+    impact_slice: Any | None = None
+    executable_binding_graph: Any | None = None
+    check_comparisons: tuple[Any, ...] = ()
+    dicc_certificate: Any | None = None
+    environment_frontiers: tuple[Any, ...] = ()
+    working_trial: dict[str, Any] | None = None
 
     def graph_hashes(self) -> dict[str, str]:
         return {
@@ -354,6 +375,25 @@ class ReachAvoidState:
         ))
 
     def target_deficit(self) -> float:
+        # Patch-first production measures deficit from paired executions.  The
+        # graph-derived fallback is retained only for explicitly enabled legacy
+        # runs that do not have a TargetRecoveryResult.
+        if self.target_recovery is not None:
+            from reachpatch.execution.models import CheckClassification
+
+            target_ids = {
+                item.check_id for item in self.target_recovery.targets
+            }
+            latest = {
+                item.check_id: item for item in self.check_comparisons
+                if item.check_id in target_ids
+            }
+            return float(sum(
+                check_id not in latest
+                or latest[check_id].classification
+                != CheckClassification.TARGET_FIXED
+                for check_id in target_ids
+            ))
         target_units = {
             unit.unit_id
             for unit in self.binding_graph.units.values()
@@ -421,6 +461,28 @@ class ReachAvoidState:
             "termination_status": self.termination_status,
             "transition_index": self.transition_index,
             "phase_history": self.phase_history,
+            "target_recovery": (
+                self.target_recovery.to_dict() if self.target_recovery else None
+            ),
+            "executable_requirement_overlay": (
+                self.executable_requirement_overlay.to_dict()
+                if self.executable_requirement_overlay else None
+            ),
+            "target_slice": self.target_slice.to_dict() if self.target_slice else None,
+            "causal_slices": [item.to_dict() for item in self.causal_slices],
+            "impact_slice": self.impact_slice.to_dict() if self.impact_slice else None,
+            "executable_binding_graph": (
+                self.executable_binding_graph.to_dict()
+                if self.executable_binding_graph else None
+            ),
+            "check_comparisons": [item.to_dict() for item in self.check_comparisons],
+            "dicc_certificate": (
+                self.dicc_certificate.to_dict() if self.dicc_certificate else None
+            ),
+            "environment_frontiers": [
+                item.to_dict() for item in self.environment_frontiers
+            ],
+            "working_trial": self.working_trial,
         }
         body["content_hash"] = content_hash(body)
         return body

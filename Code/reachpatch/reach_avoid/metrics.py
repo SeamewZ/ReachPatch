@@ -4,6 +4,7 @@ from dataclasses import dataclass
 
 from reachpatch.models.controller import ReachAvoidState, UnitOutcome
 from reachpatch.models.enums import OutcomeStatus
+from reachpatch.execution.models import CheckClassification, CheckComparison
 
 
 def target_deficit(
@@ -149,6 +150,146 @@ class ProgressMetrics:
             or self.eliminated_counterexamples > 0
             or self.new_diff_adequacy_coverage > 0
         ) and not self.has_confirmed_regression
+
+
+@dataclass(frozen=True, slots=True)
+class ProgressVector:
+    target_fixed_gain: int
+    target_deficit_reduction: float
+    counterexamples_eliminated: int
+    preservation_pass_retained: int
+    high_risk_unknown_reduction: int
+    new_regressions: int
+
+    @property
+    def meaningful(self) -> bool:
+        return self.new_regressions == 0 and any((
+            self.target_fixed_gain > 0,
+            self.target_deficit_reduction > 0,
+            self.counterexamples_eliminated > 0,
+            self.high_risk_unknown_reduction > 0,
+        ))
+
+
+@dataclass(frozen=True, slots=True)
+class RevisionEvidence:
+    progress: ProgressVector
+    safe: bool
+    real_execution_count: int
+    environment_blocked: bool = False
+
+    @property
+    def new_regressions(self) -> int:
+        return self.progress.new_regressions
+
+    @property
+    def target_fixed_gain(self) -> int:
+        return self.progress.target_fixed_gain
+
+    @property
+    def target_deficit_reduction(self) -> float:
+        return self.progress.target_deficit_reduction
+
+    @property
+    def counterexamples_eliminated(self) -> int:
+        return self.progress.counterexamples_eliminated
+
+    @property
+    def high_risk_unknown_reduction(self) -> int:
+        return self.progress.high_risk_unknown_reduction
+
+
+def progress_vector_from_comparisons(
+    previous: tuple[CheckComparison, ...] | list[CheckComparison],
+    current: tuple[CheckComparison, ...] | list[CheckComparison],
+    *,
+    target_weights: dict[str, float] | None = None,
+) -> ProgressVector:
+    """Measure progress only from actual paired check executions."""
+
+    if not current:
+        return ProgressVector(0, 0.0, 0, 0, 0, 0)
+    weights = target_weights or {}
+    old = {item.check_id: item for item in previous}
+    new = {item.check_id: item for item in current}
+    fixed = {
+        check_id for check_id, item in new.items()
+        if item.classification == CheckClassification.TARGET_FIXED
+    }
+    old_fixed = {
+        check_id for check_id, item in old.items()
+        if item.classification == CheckClassification.TARGET_FIXED
+    }
+    old_unresolved = {
+        check_id for check_id, item in old.items()
+        if item.classification in {
+            CheckClassification.TARGET_STILL_FAILING,
+            CheckClassification.TARGET_REGRESSED,
+        }
+    }
+    if not old:
+        old_unresolved = {
+            check_id for check_id, item in new.items()
+            if item.baseline.status.value == "FAIL"
+        }
+    deficit_reduction = sum(
+        weights.get(check_id, 1.0) for check_id in fixed & old_unresolved
+    )
+    old_failure_signatures = {
+        item.patched.failure_signature for item in old.values()
+        if item.patched.failure_signature
+        and item.classification == CheckClassification.TARGET_STILL_FAILING
+    }
+    if not old:
+        old_failure_signatures = {
+            item.baseline.failure_signature for item in new.values()
+            if item.baseline.failure_signature and item.baseline.status.value == "FAIL"
+        }
+    new_failure_signatures = {
+        item.patched.failure_signature for item in new.values()
+        if item.patched.failure_signature
+        and item.classification == CheckClassification.TARGET_STILL_FAILING
+    }
+    unknown_classes = {
+        CheckClassification.SAME_INFRA_FAILURE,
+        CheckClassification.NEW_INFRA_FAILURE,
+        CheckClassification.FLAKY_RESULT,
+        CheckClassification.UNSUPPORTED_CHECK,
+    }
+    old_unknown = sum(item.classification in unknown_classes for item in old.values())
+    new_unknown = sum(item.classification in unknown_classes for item in new.values())
+    regression_classes = {
+        CheckClassification.TARGET_REGRESSED,
+        CheckClassification.PRESERVATION_REGRESSION,
+        CheckClassification.NEW_INFRA_FAILURE,
+    }
+    return ProgressVector(
+        target_fixed_gain=len(fixed - old_fixed),
+        target_deficit_reduction=deficit_reduction,
+        counterexamples_eliminated=len(old_failure_signatures - new_failure_signatures),
+        preservation_pass_retained=sum(
+            item.classification == CheckClassification.PASS_PRESERVED
+            for item in new.values()
+        ),
+        high_risk_unknown_reduction=max(0, old_unknown - new_unknown),
+        new_regressions=sum(
+            item.classification in regression_classes for item in new.values()
+        ),
+    )
+
+
+def should_commit(previous, trial) -> bool:
+    del previous
+    if getattr(trial, "real_execution_count", 0) <= 0:
+        return False
+    if trial.new_regressions > 0 or not trial.safe:
+        return False
+    return any((
+        trial.target_fixed_gain > 0,
+        trial.target_deficit_reduction > 0,
+        trial.counterexamples_eliminated > 0,
+        trial.high_risk_unknown_reduction > 0,
+    ))
 
 
 def progress_metrics(old_state, trial_state, causal_touch=None, **legacy_graphs):

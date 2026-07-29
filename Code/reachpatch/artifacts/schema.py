@@ -62,8 +62,19 @@ for _artifact_type, _fields in {
     "challenge_graph": ("cells", "graph_hash"),
     "trace_bundle": ("recipe_id", "runs", "stability_status"),
     "public_check_comparison": (
-        "check_id", "command", "classification",
-        "baseline_return_code", "patched_return_code",
+        "check_id", "classification",
+    ),
+    "target_recovery": (
+        "targets", "preservation_checks", "rejected_checks",
+        "environment_frontiers", "baseline_executions",
+    ),
+    "executable_requirement_overlay": (
+        "normative_requirements", "executable_requirements", "overlay_hash",
+    ),
+    "executable_binding_graph": ("units", "graph_hash"),
+    "dicc_certificate": (
+        "certificate_id", "status", "executable_target_count",
+        "real_target_execution_count",
     ),
     "counterexample": ("counterexample_id", "failure_origin", "raw_execution_ids"),
     "repair_action": ("action_id", "operator", "causal_cut_ids"),

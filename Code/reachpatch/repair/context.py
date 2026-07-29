@@ -12,6 +12,18 @@ class RepairContext(SerializableRecord):
     mode: str
     issue: str
     working_diff: str
+    active_target_check: dict[str, Any] | None
+    baseline_output: dict[str, Any] | None
+    patched_output: dict[str, Any] | None
+    failure_signature: str | None
+    first_project_frame: dict[str, Any] | None
+    reproduction_command: tuple[str, ...]
+    relevant_source_snippets: tuple[dict[str, Any], ...]
+    causal_cut_candidates: tuple[dict[str, Any], ...]
+    previous_revision: dict[str, Any] | None
+    previous_failure_reason: str | None
+    preservation_checks: tuple[dict[str, Any], ...]
+    semantic_ambiguities: tuple[str, ...]
     requirement_coverage: tuple[dict[str, Any], ...]
     failed_checks: tuple[dict[str, Any], ...]
     counterexamples: tuple[dict[str, Any], ...]
@@ -25,12 +37,13 @@ class RepairContext(SerializableRecord):
 
 
 def _issue_text(state) -> str:
+    primary_issue = str(state.runtime_config.get("primary_issue", "")).strip()
     values = [
         evidence.content
         for evidence in state.semantic_graph.evidence.values()
         if evidence.kind.value in {"ISSUE_NORMATIVE", "ISSUE_WITNESS"}
     ]
-    issue = "\n".join(dict.fromkeys(values))
+    issue = primary_issue or "\n".join(dict.fromkeys(values))
     hints = str(state.runtime_config.get("generation_hints", "")).strip()
     if hints and hints not in issue:
         issue += f"\n\nPublic hints:\n{hints}"
@@ -42,6 +55,35 @@ def build_repair_context(
     *,
     mode: Literal["INITIAL", "COUNTEREXAMPLE_REPAIR", "ROOT_RECOVERY"],
 ) -> RepairContext:
+    target_checks = tuple(
+        getattr(getattr(state, "target_recovery", None), "targets", ())
+    )
+    target_ids = {item.check_id for item in target_checks}
+    comparisons = tuple(getattr(state, "check_comparisons", ()))
+    priority = {
+        "TARGET_STILL_FAILING": 0,
+        "TARGET_REGRESSED": 1,
+        "TARGET_FIXED": 2,
+    }
+    active_comparison = min(
+        (item for item in comparisons if item.check_id in target_ids),
+        key=lambda item: priority.get(item.classification.value, 9),
+        default=None,
+    )
+    active_check = next(
+        (
+            item for item in target_checks
+            if active_comparison is not None and item.check_id == active_comparison.check_id
+        ),
+        target_checks[0] if target_checks else None,
+    )
+    baseline_execution = (
+        active_comparison.baseline if active_comparison is not None
+        else getattr(getattr(state, "target_recovery", None), "execution_for", lambda _: None)(
+            active_check.check_id
+        ) if active_check is not None else None
+    )
+    patched_execution = active_comparison.patched if active_comparison is not None else None
     coverage = []
     outcomes_by_leaf: dict[str, list] = {}
     for outcome in state.outcomes.values():
@@ -106,7 +148,7 @@ def build_repair_context(
             {"kind": item.kind, "reason": item.reason, "hard": item.hard}
             for item in state.program_graph.frontiers.values()
         ][:20],
-        "symbols": sorted(state.program_graph.symbol_index)[:200],
+        "symbols": sorted(state.program_graph.symbol_index)[:40],
     }
     cuts = tuple({
         "unit_id": unit.unit_id,
@@ -128,9 +170,95 @@ def build_repair_context(
         for attempts in state.mechanism_memory.values() for attempt in attempts
         if attempt.result != "COMMIT"
     } | set(state.runtime_metrics.get("failed_generator_mechanisms", ()))))
+    source_snippets = []
+    source_root = __import__("pathlib").Path(state.checkpoint.snapshot_tree)
+    candidate_nodes = tuple(dict.fromkeys(
+        node_id for causal in getattr(state, "causal_slices", ())
+        for node_id in causal.candidate_cut_node_ids
+    ))[:5]
+    cut_candidates = []
+    for node_id in candidate_nodes:
+        node = state.program_graph.nodes.get(node_id)
+        if node is None:
+            continue
+        relative = str(node.attributes.get("file", ""))
+        line = int(node.attributes.get("line", 1))
+        end = int(node.attributes.get("end_line", line))
+        cut = {
+            "node_id": node_id,
+            "relative_path": relative,
+            "start_line": line,
+            "end_line": end,
+            "symbol": str(node.attributes.get("qualified_name", node.label)),
+            "reason": "backward causal slice from stable target failure",
+        }
+        cut_candidates.append(cut)
+        path = source_root / relative
+        if path.is_file():
+            lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
+            start = max(1, line - 3)
+            stop = min(len(lines), end + 3)
+            source_snippets.append({
+                **cut,
+                "snippet_start_line": start,
+                "snippet_end_line": stop,
+                "content": "\n".join(lines[start - 1:stop]),
+            })
+    if active_check is not None:
+        run_root = __import__("pathlib").Path(state.run_root).resolve()
+        for raw_path in active_check.temporary_artifact_paths[:1]:
+            path = __import__("pathlib").Path(raw_path).resolve()
+            try:
+                path.relative_to(run_root)
+            except ValueError:
+                continue
+            if not path.is_file():
+                continue
+            content = path.read_text(
+                encoding="utf-8", errors="replace"
+            ).splitlines()[:160]
+            source_snippets.append({
+                "relative_path": str(path.relative_to(run_root)),
+                "start_line": 1,
+                "end_line": len(content),
+                "symbol": "<public-target-reproduction>",
+                "reason": "stable public target reproduction",
+                "origin": "TARGET_REPRODUCTION_ARTIFACT",
+                "content": "\n".join(content),
+            })
+    preservation_checks = tuple({
+        "check_id": item.check_id,
+        "command": list(item.command),
+        "selector": item.selector,
+    } for item in getattr(
+        getattr(state, "target_recovery", None), "preservation_checks", ()
+    ))
+    previous = state.repair_history[-1] if state.repair_history else None
     return RepairContext(
         mode=mode, issue=_issue_text(state),
         working_diff=state.checkpoint.patch.canonical_diff,
+        active_target_check=(active_check.to_dict() if active_check else None),
+        baseline_output=(baseline_execution.to_dict() if baseline_execution else None),
+        patched_output=(patched_execution.to_dict() if patched_execution else None),
+        failure_signature=(
+            patched_execution.failure_signature if patched_execution
+            else baseline_execution.failure_signature if baseline_execution else None
+        ),
+        first_project_frame=(
+            patched_execution.first_project_frame if patched_execution
+            else baseline_execution.first_project_frame if baseline_execution else None
+        ),
+        reproduction_command=(active_check.command if active_check else ()),
+        relevant_source_snippets=tuple(source_snippets),
+        causal_cut_candidates=tuple(cut_candidates),
+        previous_revision=(previous.graph_delta if previous else None),
+        previous_failure_reason=(
+            str(previous.graph_delta.get("avoid_reasons", "")) if previous else None
+        ),
+        preservation_checks=preservation_checks,
+        semantic_ambiguities=tuple(
+            getattr(getattr(state, "hypothesis_set", None), "unresolved_decision_ids", ())
+        ),
         requirement_coverage=tuple(coverage), failed_checks=failed,
         counterexamples=packets, first_trace_divergences=divergences,
         active_program_slice=slice_summary, causal_repair_cuts=cuts,

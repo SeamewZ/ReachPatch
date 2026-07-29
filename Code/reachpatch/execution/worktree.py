@@ -70,9 +70,12 @@ class WorktreeManager:
         self.root = Path(run_root).resolve()
         self.checkpoints = self.root / "checkpoints"
         self.transaction = self.root / "transaction"
+        self.uncertified = self.root / "uncertified"
         self.receipts = self.root / "receipts"
         self.lease = self.transaction / "active.json"
-        for path in (self.checkpoints, self.transaction, self.receipts):
+        for path in (
+            self.checkpoints, self.transaction, self.uncertified, self.receipts,
+        ):
             path.mkdir(parents=True, exist_ok=True)
 
     @staticmethod
@@ -195,6 +198,37 @@ class WorktreeManager:
             created_at=utc_now(),
         )
         self._finish_trial(trial)
+        self._atomic_json(self.receipts / f"{receipt.receipt_id}.json", receipt.to_dict())
+        return receipt
+
+    def keep_uncertified(self, trial: TransactionalTrial) -> WorktreeReceipt:
+        """Archive a trial without replacing the last verified checkpoint."""
+
+        self._verify_active(trial)
+        trial_tree = Path(trial.tree)
+        destination = self.uncertified / trial.trial_id
+        if destination.exists():
+            raise FileExistsError(destination)
+        before = tree_hash(self.checkpoint_tree(trial.source_checkpoint_id))
+        after = tree_hash(trial_tree)
+        if before != trial.source_tree_hash:
+            raise RuntimeError("accepted checkpoint changed while trial was active")
+        os.replace(trial_tree.parent, destination)
+        self.lease.unlink(missing_ok=True)
+        snapshot = destination / "tree"
+        receipt = WorktreeReceipt(
+            receipt_id=stable_id(
+                "worktree-receipt", "keep-uncertified", trial.trial_id, after,
+            ),
+            operation="KEEP_UNCERTIFIED",
+            source_checkpoint_id=trial.source_checkpoint_id,
+            result_checkpoint_id=None,
+            trial_id=trial.trial_id,
+            before_tree_hash=before,
+            after_tree_hash=after,
+            snapshot_tree=str(snapshot),
+            created_at=utc_now(),
+        )
         self._atomic_json(self.receipts / f"{receipt.receipt_id}.json", receipt.to_dict())
         return receipt
 

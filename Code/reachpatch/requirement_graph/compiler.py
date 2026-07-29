@@ -31,6 +31,9 @@ from reachpatch.requirement_graph.models import (
     QuantifiedVariable,
     RequirementGraph,
     RequirementLeaf,
+    NormativeRequirement,
+    ExecutableRequirement,
+    ExecutableRequirementOverlay,
     RequirementPathObligation,
     requirement_hyperedge,
 )
@@ -309,27 +312,44 @@ def compile_requirement_core(
 
     if not hypothesis_set.alternatives or hypothesis_set.preferred_assignment_id is None:
         raise ValueError("no coherent authority-complete semantic hypothesis")
-    preferred = next(
-        item for item in hypothesis_set.alternatives
-        if item.assignment_id == hypothesis_set.preferred_assignment_id
-    )
+    alternatives = tuple(hypothesis_set.alternatives)
+    common_assignments = set(alternatives[0].assignment_node_ids)
+    common_preservation = set(alternatives[0].preservation_node_ids)
+    for alternative in alternatives[1:]:
+        common_assignments.intersection_update(alternative.assignment_node_ids)
+        common_preservation.intersection_update(alternative.preservation_node_ids)
     high_confidence = tuple(sorted(
-        claim_id for claim_id in preferred.assignment_node_ids
+        claim_id for claim_id in common_assignments
         if claim_id in semantic_graph.claims
         and semantic_graph.claims[claim_id].authority.trusted
     ))
+    shared_choices = {
+        decision_id: next(iter(values))
+        for decision_id in {
+            key for alternative in alternatives
+            for key in alternative.choice_by_decision
+        }
+        if len(values := {
+            alternative.choice_by_decision.get(decision_id)
+            for alternative in alternatives
+        }) == 1
+    }
     core_assignment = HypothesisAssignment(
         assignment_id=stable_id(
             "requirement-core-assignment", hypothesis_set.active_assignment_ids,
             hypothesis_set.common_hard_node_ids, high_confidence,
         ),
-        choice_by_decision=dict(preferred.choice_by_decision),
+        choice_by_decision=shared_choices,
         common_hard_node_ids=hypothesis_set.common_hard_node_ids,
         assignment_node_ids=high_confidence,
-        preservation_node_ids=preferred.preservation_node_ids,
-        contradiction_ids=preferred.contradiction_ids,
+        preservation_node_ids=tuple(sorted(common_preservation)),
+        contradiction_ids=tuple(sorted(set.intersection(*(
+            set(item.contradiction_ids) for item in alternatives
+        )))) if alternatives else (),
         coherent=True, authority_complete=True,
-        selection_mode="hypothesis_set", score=preferred.score,
+        selection_mode="hypothesis_set_unfrozen", score=min(
+            item.score for item in alternatives
+        ),
     )
     graph = compile_assignment_overlay(semantic_graph, core_assignment)
     graph.build_stats.update({
@@ -337,7 +357,129 @@ def compile_requirement_core(
         "repository_index_symbol_count": len(repository_index.symbols),
         "unresolved_semantic_decision_count": len(hypothesis_set.unresolved_decision_ids),
     })
+    for leaf in graph.leaves.values():
+        quantified_language = re.search(
+            r"\b(?:for\s+all|every|any)\b", leaf.formula, re.IGNORECASE,
+        )
+        if quantified_language and not leaf.quantified_variables:
+            graph.add_frontier(Frontier(
+                frontier_id=stable_id(
+                    "requirement-frontier", leaf.leaf_id,
+                    "QUANTIFIER_RECOVERY_INCOMPLETE",
+                ),
+                kind="NO_REQUIREMENT_LEAF",
+                owner_id=leaf.leaf_id,
+                reason="quantified language has no recoverable quantified variable",
+                resolution_action="retain normative ambiguity until an executable check discriminates it",
+                hard=False,
+                evidence_ids=leaf.supporting_evidence,
+            ))
     return graph
+
+
+def compile_executable_requirement_overlay(
+    normative_graph: RequirementGraph,
+    target_recovery_result,
+    *,
+    hypothesis_assignment_ids: Iterable[str] = (),
+) -> ExecutableRequirementOverlay:
+    """Project stable baseline checks onto unresolved normative obligations."""
+
+    normative = tuple(
+        NormativeRequirement(
+            requirement_id=leaf.leaf_id,
+            quantified_variables=leaf.quantified_variables,
+            precondition=leaf.precondition,
+            trigger=leaf.trigger,
+            expected_relation=dict(leaf.required_trace_relation),
+            observation_contract=dict(leaf.observation_contract),
+            authority=leaf.authority.value,
+            witnesses=leaf.witnesses,
+            status=(
+                "NORMATIVE_FRONTIER"
+                if any(
+                    frontier.owner_id == leaf.leaf_id and frontier.status == "OPEN"
+                    for frontier in normative_graph.frontiers.values()
+                )
+                else "NORMATIVE"
+            ),
+        )
+        for leaf in sorted(normative_graph.leaves.values(), key=lambda item: item.leaf_id)
+    )
+    baseline_by_check = {
+        item.check_id: item for item in target_recovery_result.baseline_executions
+    }
+
+    def match_leaf(check) -> RequirementLeaf | None:
+        text = " ".join((
+            check.selector, *check.command, *check.source_evidence_ids,
+        )).lower()
+        candidates = []
+        for leaf in normative_graph.leaves.values():
+            symbols = set(leaf.entrypoint_hypotheses)
+            symbols.update(re.findall(r"[A-Za-z_]\w*(?:\.[A-Za-z_]\w*)+", leaf.formula))
+            score = sum(
+                symbol.lower() in text or symbol.rsplit(".", 1)[-1].lower() in text
+                for symbol in symbols
+            )
+            if score:
+                candidates.append((score, leaf.weight, leaf.leaf_id, leaf))
+        return max(candidates)[-1] if candidates else None
+
+    executable = []
+    for check in (
+        *target_recovery_result.targets,
+        *target_recovery_result.preservation_checks,
+    ):
+        execution = baseline_by_check.get(check.check_id)
+        if execution is None:
+            continue
+        leaf = match_leaf(check)
+        observation_contract_id = (
+            str(leaf.observation_contract.get("contract_id"))
+            if leaf is not None
+            else stable_id("process-exit-observation", check.check_id)
+        )
+        status = (
+            "BASELINE_FAILING_TARGET"
+            if check.role.value == "TARGET"
+            else "BASELINE_PASSING_PRESERVATION"
+        )
+        executable.append(ExecutableRequirement(
+            executable_requirement_id=stable_id(
+                "executable-requirement", check.check_id,
+                execution.execution_id, leaf.leaf_id if leaf else None,
+            ),
+            normative_requirement_id=leaf.leaf_id if leaf else None,
+            check_id=check.check_id,
+            baseline_execution_id=execution.execution_id,
+            observation_contract_id=observation_contract_id,
+            status=status,
+        ))
+    resolved_normative = {
+        item.normative_requirement_id for item in executable
+        if item.normative_requirement_id is not None
+    }
+    unresolved = tuple(sorted(
+        item.requirement_id for item in normative
+        if item.requirement_id not in resolved_normative
+    ))
+    assignment_ids = tuple(sorted(set(map(str, hypothesis_assignment_ids))))
+    body = {
+        "normative": [item.to_dict() for item in normative],
+        "executable": [item.to_dict() for item in executable],
+        "unresolved": unresolved,
+        "hypotheses": assignment_ids,
+    }
+    from reachpatch.models.base import content_hash
+
+    return ExecutableRequirementOverlay(
+        normative_requirements=normative,
+        executable_requirements=tuple(executable),
+        unresolved_normative_requirement_ids=unresolved,
+        hypothesis_assignment_ids=assignment_ids,
+        overlay_hash=content_hash(body),
+    )
 
 
 def _predicate_names(predicates: Iterable[str]) -> set[str]:

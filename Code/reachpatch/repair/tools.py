@@ -3,6 +3,7 @@ from __future__ import annotations
 import re
 import subprocess
 from dataclasses import dataclass, field
+from typing import Any
 from pathlib import Path
 from typing import Iterable
 
@@ -29,6 +30,18 @@ class RepairToolExecutor:
     allowed_test_paths: set[str] = field(default_factory=set)
     staged_edits: list[ProposedEdit] = field(default_factory=list)
     context_requests: list[ContextRequest] = field(default_factory=list)
+    current_tree_hash: str = ""
+    public_check_results: dict[str, dict[str, Any]] = field(default_factory=dict)
+    max_search_calls: int = 2
+    max_read_calls: int = 4
+    max_public_checks: int = 3
+    search_calls: int = 0
+    read_calls: int = 0
+    public_check_calls: int = 0
+    result_cache: dict[tuple[str, str, int | None, int | None], dict] = field(
+        default_factory=dict
+    )
+    blocker: dict[str, Any] | None = None
 
     @staticmethod
     def _is_test_path(relative_path: str) -> bool:
@@ -60,6 +73,9 @@ class RepairToolExecutor:
         return path
 
     def search_code(self, query: str, paths: Iterable[str] | None = None) -> dict:
+        if self.search_calls >= self.max_search_calls:
+            raise ValueError("search budget exhausted for this revision")
+        self.search_calls += 1
         if not query or len(query) > 300:
             raise ValueError("invalid search query")
         expression = re.compile(re.escape(query), re.IGNORECASE)
@@ -80,13 +96,21 @@ class RepairToolExecutor:
         return {"matches": matches, "truncated": False}
 
     def read_file(self, path: str, start_line: int | None = None, end_line: int | None = None) -> dict:
+        key = (self.current_tree_hash, path, start_line, end_line)
+        if key in self.result_cache:
+            return dict(self.result_cache[key])
+        if self.read_calls >= self.max_read_calls:
+            raise ValueError("read budget exhausted for this revision")
+        self.read_calls += 1
         source = self._path(path).read_text(encoding="utf-8", errors="replace").splitlines()
         start = max(1, start_line or 1)
         end = min(len(source), end_line or min(len(source), start + 399))
         if end < start or end - start > 500:
             raise ValueError("read range must contain at most 501 lines")
-        return {"path": path, "start_line": start, "end_line": end,
-                "content": "\n".join(source[start - 1:end])}
+        result = {"path": path, "start_line": start, "end_line": end,
+                  "content": "\n".join(source[start - 1:end])}
+        self.result_cache[key] = dict(result)
+        return result
 
     def inspect_symbol(self, symbol: str) -> dict:
         locations = self.repository_index.symbols.get(symbol, ()) or self.repository_index.symbols.get(symbol.rsplit(".", 1)[-1], ())
@@ -108,6 +132,11 @@ class RepairToolExecutor:
         return {"diff": self.current_diff}
 
     def run_public_check(self, check_id: str) -> dict:
+        if self.public_check_calls >= self.max_public_checks:
+            raise ValueError("public check budget exhausted for this revision")
+        self.public_check_calls += 1
+        if check_id in self.public_check_results:
+            return dict(self.public_check_results[check_id])
         command = self.public_checks.get(check_id)
         if command is None:
             raise ValueError("unknown public check id")
@@ -180,7 +209,10 @@ class RepairToolExecutor:
             lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
             actual = "\n".join(lines[edit.start_line - 1:edit.end_line])
             if actual != edit.expected_source.rstrip("\n"):
-                raise ValueError(f"expected source mismatch: {edit.relative_path}:{edit.start_line}")
+                raise ValueError(
+                    f"expected source mismatch: {edit.relative_path}:{edit.start_line}; "
+                    f"actual source at requested range: {actual!r}"
+                )
             ranges = occupied.setdefault(edit.relative_path, [])
             if any(not (edit.end_line < start or edit.start_line > end) for start, end in ranges):
                 raise ValueError("overlapping edits in one revision")
@@ -195,3 +227,12 @@ class RepairToolExecutor:
             raise ValueError("revision has no staged edits")
         return {"finished": True, "summary": summary,
                 "edit_count": len(self.staged_edits)}
+
+    def declare_blocker(self, reason: str, missing_evidence: Iterable[str] = ()) -> dict:
+        if self.staged_edits:
+            raise ValueError("cannot declare a blocker after staging edits")
+        self.blocker = {
+            "reason": str(reason),
+            "missing_evidence": tuple(map(str, missing_evidence)),
+        }
+        return {"blocked": True, **self.blocker}

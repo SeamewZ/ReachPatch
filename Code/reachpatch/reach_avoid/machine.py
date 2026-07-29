@@ -80,6 +80,7 @@ _ALLOWED = {
         ControllerPhase.COUNTEREXAMPLE_FEEDBACK,
         ControllerPhase.REPAIR_GENERATION,
         ControllerPhase.MECHANICAL_VALIDATE,
+        ControllerPhase.INCUMBENT_CLOSE,
         ControllerPhase.SEALED,
     },
     ControllerPhase.COUNTEREXAMPLE_FEEDBACK: {

@@ -127,6 +127,38 @@ class RequirementClosure(SerializableRecord):
     graph_hash: str
 
 
+@dataclass(frozen=True, slots=True)
+class NormativeRequirement(SerializableRecord):
+    requirement_id: str
+    quantified_variables: tuple[QuantifiedVariable, ...]
+    precondition: str
+    trigger: str
+    expected_relation: dict[str, Any]
+    observation_contract: dict[str, Any]
+    authority: str
+    witnesses: tuple[str, ...]
+    status: str
+
+
+@dataclass(frozen=True, slots=True)
+class ExecutableRequirement(SerializableRecord):
+    executable_requirement_id: str
+    normative_requirement_id: str | None
+    check_id: str
+    baseline_execution_id: str
+    observation_contract_id: str
+    status: str
+
+
+@dataclass(frozen=True, slots=True)
+class ExecutableRequirementOverlay(SerializableRecord):
+    normative_requirements: tuple[NormativeRequirement, ...]
+    executable_requirements: tuple[ExecutableRequirement, ...]
+    unresolved_normative_requirement_ids: tuple[str, ...]
+    hypothesis_assignment_ids: tuple[str, ...]
+    overlay_hash: str
+
+
 class RequirementGraph(TypedMultiGraph):
     def __init__(self, *, assignment_id: str, version: int = 1) -> None:
         super().__init__(graph_kind="requirement", version=version)
