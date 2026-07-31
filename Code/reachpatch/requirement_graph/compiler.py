@@ -307,6 +307,7 @@ def compile_requirement_core(
     semantic_graph: SemanticGraph,
     hypothesis_set: HypothesisSet,
     repository_index: RepositoryIndex,
+    issue_text: str = "",
 ) -> RequirementGraph:
     """Compile only authoritative issue/test obligations needed before generation."""
 
@@ -352,6 +353,36 @@ def compile_requirement_core(
         ),
     )
     graph = compile_assignment_overlay(semantic_graph, core_assignment)
+    if not graph.leaves:
+        # A semantic parser may legitimately produce no shared claim when the
+        # issue is short or ambiguous. Keep one normative leaf so generation
+        # still has a concrete checklist; this fallback never certifies Reach.
+        formula = str(issue_text).strip() or "Interpret the issue statement as the complete required behavior."
+        fallback_id = stable_id("fallback-requirement", formula)
+        graph.add_leaf(RequirementLeaf(
+            leaf_id=fallback_id,
+            objective_id=stable_id("fallback-objective", fallback_id),
+            formula=formula,
+            quantified_variables=(),
+            domains=(),
+            precondition="True",
+            trigger="issue-described inputs",
+            entrypoint_hypotheses=(),
+            required_trace_relation={},
+            observation_contract={},
+            exception_contract={},
+            state_contract={},
+            preservation_contract={},
+            witnesses=(),
+            authority=Authority.A,
+            authority_class=RequirementAuthorityClass.HARD,
+            supporting_evidence=(),
+            hypothesis_id=None,
+            coverage_status="NEEDS_GENERATOR_INTERPRETATION",
+            mandatory=True,
+            weight=4.0,
+        ))
+        graph.build_stats["fallback_used"] = 1
     graph.build_stats.update({
         "core_leaf_count": len(graph.leaves),
         "repository_index_symbol_count": len(repository_index.symbols),

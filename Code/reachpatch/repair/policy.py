@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 from collections import defaultdict
+from dataclasses import dataclass
+from typing import Any
 
 from reachpatch.models.base import stable_id
 from reachpatch.models.controller import LosingCore, ReachAvoidState, RepairIntent, UnitOutcome
@@ -17,6 +19,126 @@ _STATUS_PRESSURE = {
     OutcomeStatus.BLOCKED_EXTERNAL: 2.0,
     OutcomeStatus.UNSUPPORTED: 2.0,
 }
+
+
+@dataclass(frozen=True, slots=True)
+class EditScopeDecision:
+    allowed: bool
+    touched_causal_cut: bool
+    unexplained_files: tuple[str, ...]
+    unexplained_symbols: tuple[str, ...]
+    public_api_changes: tuple[str, ...]
+    signature_changes: tuple[str, ...]
+    shared_utility_changes: tuple[str, ...]
+    base_class_changes: tuple[str, ...]
+
+
+def accept_edit_scope(action: Any, trial_diff: Any, state: ReachAvoidState) -> EditScopeDecision:
+    """Validate that one revision remains inside its execution-backed component."""
+
+    action_data = action if isinstance(action, dict) else (
+        action.to_dict() if hasattr(action, "to_dict") else {}
+    )
+    allowed_files = set(map(str, action_data.get("files_to_modify", ())))
+    causal_cut_ids = set(map(str, (
+        *action_data.get("repair_cut_ids", ()),
+        *action_data.get("causal_cut_ids", ()),
+    )))
+    graph = getattr(state, "program_graph", None)
+    cut_nodes = tuple(
+        graph.nodes[node_id]
+        for node_id in causal_cut_ids
+        if graph is not None and node_id in getattr(graph, "nodes", {})
+    )
+    cut_files = {
+        str(node.attributes.get("file", ""))
+        for node in cut_nodes if node.attributes.get("file")
+    }
+    cut_symbols = {
+        str(node.attributes.get("qualified_name", node.label))
+        for node in cut_nodes
+    }
+    allowed_files.update(cut_files)
+    changed_files = set(map(str, getattr(trial_diff, "changed_files", ())))
+    changed_relations = tuple(getattr(trial_diff, "changed_relations", ()))
+    relation_ids = {str(getattr(item, "relation_id", "")) for item in changed_relations}
+    relation_scopes = {
+        str(getattr(item, "qualified_scope", "")) for item in changed_relations
+        if getattr(item, "qualified_scope", "")
+    }
+    def same_symbol(left: str, right: str) -> bool:
+        return bool(left and right) and (
+            left == right
+            or left.startswith(right + ".")
+            or right.startswith(left + ".")
+            or left.endswith("." + right)
+            or right.endswith("." + left)
+        )
+
+    touched = bool(
+        causal_cut_ids & relation_ids
+        or changed_files & cut_files
+        or any(
+            same_symbol(scope, symbol)
+            for scope in relation_scopes for symbol in cut_symbols
+        )
+    )
+    unexplained_files = tuple(sorted(changed_files - allowed_files)) if allowed_files else ()
+    allowed_symbols = set(map(str, action_data.get("symbols_to_modify", ())))
+    allowed_symbols.update(cut_symbols)
+    unexplained_symbols = tuple(sorted(
+        scope for scope in relation_scopes
+        if allowed_symbols and not any(
+            same_symbol(scope, symbol)
+            for symbol in allowed_symbols
+        )
+    ))
+    # A failure-localized action may use a changed-relation cut from an older
+    # checkpoint. Its relation ID changes when the expression changes, while
+    # the qualified source scope remains the same. Treat an execution-backed
+    # edit to that explicitly allowed symbol as touching the causal component.
+    if not touched and causal_cut_ids and action_data.get(
+        "actual_failure_execution_ids", ()
+    ):
+        touched = any(
+            same_symbol(scope, symbol)
+            for scope in relation_scopes for symbol in allowed_symbols
+        )
+    public_api = tuple(sorted(
+        str(getattr(item, "relation_id", "")) for item in changed_relations
+        if "public" in str(getattr(item, "kind", "")).lower()
+    ))
+    signatures = tuple(sorted(
+        str(getattr(item, "relation_id", "")) for item in changed_relations
+        if "signature" in str(getattr(item, "kind", "")).lower()
+    ))
+    shared_utility = tuple(sorted(
+        path for path in changed_files
+        if any(part in {"utils", "util", "common", "shared"} for part in __import__("pathlib").Path(path).parts)
+        and path not in allowed_files
+    ))
+    base_classes = tuple(sorted(
+        str(getattr(item, "relation_id", "")) for item in changed_relations
+        if any(token in str(getattr(item, "kind", "")).lower() for token in (
+            "base_class", "inheritance", "mro",
+        ))
+    ))
+    execution_justified = bool(action_data.get("actual_failure_execution_ids", ()))
+    privileged_risk = bool(public_api or signatures or base_classes)
+    risky_unjustified = bool(
+        unexplained_files or unexplained_symbols or shared_utility
+        or (privileged_risk and not execution_justified)
+    )
+    return EditScopeDecision(
+        allowed=touched and not risky_unjustified,
+        touched_causal_cut=touched,
+        unexplained_files=unexplained_files,
+        unexplained_symbols=unexplained_symbols,
+        public_api_changes=public_api,
+        signature_changes=signatures,
+        shared_utility_changes=shared_utility,
+        base_class_changes=base_classes,
+    )
 
 
 def _unit_statuses(state: ReachAvoidState) -> dict[str, list[UnitOutcome]]:
@@ -122,22 +244,33 @@ def next_untried_repair_intent(
 ) -> RepairIntent | None:
     active_graph = getattr(state, "active_binding_graph", None)
     if active_graph is not None and hasattr(active_graph, "diff_hash"):
+        from reachpatch.reach_avoid.trajectory import select_confirmed_failure
+
+        # Older unit fixtures predate PatchTrajectory and exercise only the
+        # mechanical intent formatter. Production ReachAvoidState always has
+        # ``confirmed_failures`` and therefore takes the strict path below.
+        legacy_fixture = not hasattr(state, "confirmed_failures")
+        confirmed_failure = (
+            select_confirmed_failure(state) if not legacy_fixture else None
+        )
+        if confirmed_failure is None and not legacy_fixture:
+            return None
         priority = {
             "PRESERVATION_RISK": 0,
-            "FAILING": 1,
+            "TARGET_FAILING": 1,
             "COUNTEREXAMPLE_OPEN": 2,
-            "UNBOUND": 3,
-            "UNKNOWN": 4,
-            "ORACLE_UNAVAILABLE": 5,
-            "BOUND_EXECUTABLE": 6,
-            "BOUND_STATIC": 7,
-            "PASSING": 9,
+            "EXECUTION_CONFIRMED": 6,
+            "STATIC_ACTIONABLE": 7,
+            "TARGET_PASSING": 9,
         }
         units = sorted(
-            state.active_binding_graph.units.values(),
+            (
+                unit for unit in state.active_binding_graph.units.values()
+                if legacy_fixture or unit.binding_id == confirmed_failure.binding_unit_id
+            ),
             key=lambda unit: (priority.get(unit.status, 8), unit.binding_id),
         )
-        unit = next((item for item in units if item.status != "PASSING"), None)
+        unit = next(iter(units), None)
         if unit is None:
             # A mechanically rejected first patch can precede executable graph
             # bindings. Its concrete check output still defines a causal repair
@@ -145,6 +278,10 @@ def next_untried_repair_intent(
             packet = next((
                 item for item in reversed(state.counterexamples)
                 if item.suggested_action_families
+                and (
+                    legacy_fixture
+                    or item.public_trigger_id == confirmed_failure.check_id
+                )
             ), None)
             if packet is None:
                 return None
@@ -212,7 +349,14 @@ def next_untried_repair_intent(
             )
         packets = tuple(
             packet for packet in state.counterexamples
-            if packet.binding_unit_id in {None, unit.binding_id}
+            if (
+                packet.binding_unit_id in {None, unit.binding_id}
+                and (
+                    legacy_fixture
+                    or packet.public_trigger_id == confirmed_failure.check_id
+                    or packet.binding_unit_id == confirmed_failure.binding_unit_id
+                )
+            )
         )[-10:]
         candidates: list[str] = [
             family for packet in reversed(packets)
@@ -237,9 +381,13 @@ def next_untried_repair_intent(
         )
         if mechanism is None:
             return None
+        localized_node_ids = tuple(
+            node_id for node_id in unit.causal_cut_ids
+            if node_id in state.program_graph.nodes
+        ) or unit.program_symbol_ids
         files = tuple(dict.fromkeys(
             str(state.program_graph.nodes[symbol_id].attributes.get("file", ""))
-            for symbol_id in unit.program_symbol_ids
+            for symbol_id in localized_node_ids
             if symbol_id in state.program_graph.nodes
             and state.program_graph.nodes[symbol_id].attributes.get("file")
         ))
@@ -247,7 +395,7 @@ def next_untried_repair_intent(
             str(state.program_graph.nodes[symbol_id].attributes.get(
                 "qualified_name", state.program_graph.nodes[symbol_id].label,
             ))
-            for symbol_id in unit.program_symbol_ids
+            for symbol_id in localized_node_ids
             if symbol_id in state.program_graph.nodes
         ))
         unresolved_requirement_ids = tuple(

@@ -45,10 +45,18 @@ from reachpatch.execution.worktree import tree_hash
 from reachpatch.models.base import SerializableRecord, content_hash, stable_id, utc_now
 from reachpatch.models.budget import BudgetVector
 from reachpatch.models.controller import (
+    ConfirmedFailure,
     CounterexamplePacket,
+    ExecutableOracle,
+    FailureHistory,
     GeneratorSessionRecord,
     IncumbentCheckpoint,
+    LockedCheck,
+    LockedCheckSet,
     MechanismAttempt,
+    PatchCheckpoint,
+    PatchTrajectory,
+    RevisionRecord,
     ReachAvoidState,
     TerminalCertificate,
     TransitionCertificate,
@@ -62,7 +70,8 @@ from reachpatch.oracle.discriminator import (
     discriminator_probe_from_dict,
 )
 from reachpatch.program_graph import (
-    Deadline, GraphBudget, build_active_program_slice, build_diff_impact_slice,
+    ContextRequest, Deadline, GraphBudget,
+    build_active_program_slice, build_diff_impact_slice,
     build_repository_index, build_target_slice, recover_causal_slice,
     prioritize_target_repair_seeds, recover_repair_slice_seeds,
     update_active_program_slice,
@@ -72,6 +81,13 @@ from reachpatch.reach_avoid.gates import (
     evidence_limited_complete, in_target_set, terminal_avoid_reason,
 )
 from reachpatch.reach_avoid.persistence import RunArtifacts
+from reachpatch.reach_avoid.trajectory import (
+    build_locked_check_set,
+    finalize_best_patch,
+    initialize_patch_trajectory,
+    refresh_confirmed_failures,
+    select_confirmed_failure,
+)
 from reachpatch.reach_avoid.state import outcomes_from_challenges
 from reachpatch.reach_avoid.observations import ObservationBundle
 from reachpatch.reach_avoid.transition import evaluate_patch_revision
@@ -116,15 +132,19 @@ class ReachPatchConfig(SerializableRecord):
     selection_mode: str = "hypothesis_set"
     max_submitted_revisions: int = 6
     max_total_revisions: int = 6
-    initial_generator_max_turns: int = 10
-    revision_generator_max_turns: int = 6
+    initial_generator_max_turns: int = 14
+    revision_generator_max_turns: int = 8
     root_recovery_max_turns: int = 8
+    initial_generator_wall_time_s: float = 300.0
+    revision_generator_wall_time_s: float = 180.0
+    initial_generator_token_budget: int = 32_000
+    revision_generator_token_budget: int = 16_000
     max_internal_tool_turns_per_revision: int = 6
     equivalent_failures_before_new_mechanism: int = 2
     nonprogress_before_root_recovery: int = 3
     max_same_mechanism_failures: int = 2
     max_distinct_mechanisms_per_failure: int = 3
-    target_recovery_wall_time_s: float = 90.0
+    target_recovery_wall_time_s: float = 45.0
     target_recovery_max_candidates: int = 3
     max_llm_reproduction_attempts: int = 2
     max_stability_runs: int = 2
@@ -169,6 +189,10 @@ class ReachPatchConfig(SerializableRecord):
             self.initial_generator_max_turns,
             self.revision_generator_max_turns,
             self.root_recovery_max_turns,
+            self.initial_generator_wall_time_s,
+            self.revision_generator_wall_time_s,
+            self.initial_generator_token_budget,
+            self.revision_generator_token_budget,
             self.equivalent_failures_before_new_mechanism,
             self.nonprogress_before_root_recovery,
             self.max_same_mechanism_failures,
@@ -244,7 +268,7 @@ def default_budget() -> BudgetVector:
     return BudgetVector(
         semantic_tokens=10_000,
         graph_tokens=20_000,
-        initial_generator_tokens=20_000,
+        initial_generator_tokens=32_000,
         repair_generator_tokens=80_000,
         challenge_materializer_tokens=10_000,
         discriminator_tokens=5_000,
@@ -271,6 +295,136 @@ def _checkpoint(raw: dict) -> IncumbentCheckpoint:
             for item in values.get(name, ())
         )
     return IncumbentCheckpoint(**values)
+
+
+def _execution(raw: dict | None) -> Any:
+    if not raw:
+        return None
+    from reachpatch.execution.models import CheckExecution, CheckStatus
+    values = dict(raw)
+    values["status"] = CheckStatus(values["status"])
+    return CheckExecution(**values)
+
+
+def _oracle(raw: dict) -> ExecutableOracle:
+    return ExecutableOracle(**dict(raw))
+
+
+def _locked_check(raw: dict) -> LockedCheck:
+    from reachpatch.oracle.models import ObservationContract
+    values = dict(raw)
+    values["command"] = tuple(values.get("command", ()))
+    values["requirement_ids"] = tuple(values.get("requirement_ids", ()))
+    values["source_evidence_ids"] = tuple(values.get("source_evidence_ids", ()))
+    values["oracle"] = _oracle(values["oracle"])
+    contract = values.get("observation_contract")
+    values["observation_contract"] = (
+        ObservationContract(**contract) if isinstance(contract, dict) else contract
+    )
+    values["baseline_observation"] = _execution(values.get("baseline_observation"))
+    if isinstance(values.get("input_recipe"), dict):
+        from reachpatch.reach_avoid.restore import _recipe
+        values["input_recipe"] = _recipe(values["input_recipe"])
+    if isinstance(values.get("executable_scenario"), dict):
+        from reachpatch.reach_avoid.restore import _scenario
+        values["executable_scenario"] = _scenario(values["executable_scenario"])
+    return LockedCheck(**values)
+
+
+def _locked_check_set(raw: dict | None) -> LockedCheckSet | None:
+    if not raw:
+        return None
+    return LockedCheckSet(
+        lock_id=str(raw["lock_id"]),
+        target_checks=tuple(_locked_check(item) for item in raw.get("target_checks", ())),
+        preservation_checks=tuple(_locked_check(item) for item in raw.get("preservation_checks", ())),
+        counterexample_checks=tuple(_locked_check(item) for item in raw.get("counterexample_checks", ())),
+        mechanical_checks=tuple(_locked_check(item) for item in raw.get("mechanical_checks", ())),
+    )
+
+
+def _patch_checkpoint(raw: dict) -> PatchCheckpoint:
+    from reachpatch.models.controller import EvidenceVector
+    values = dict(raw)
+    values["patch"] = _working_patch(values["patch"])
+    values["evidence_vector"] = EvidenceVector(**values.get("evidence_vector", {}))
+    for name in (
+        "executed_check_ids", "confirmed_target_pass_ids",
+        "confirmed_target_failure_ids", "preservation_regression_ids",
+        "mechanical_failure_ids",
+    ):
+        values[name] = tuple(values.get(name, ()))
+    return PatchCheckpoint(**values)
+
+
+def _trajectory(raw: dict | None) -> PatchTrajectory | None:
+    if not raw:
+        return None
+    return PatchTrajectory(
+        first_patch=_patch_checkpoint(raw["first_patch"]),
+        best_evidence_patch=_patch_checkpoint(raw["best_evidence_patch"]),
+        working_patch=_patch_checkpoint(raw["working_patch"]),
+        trial_patch=(
+            _patch_checkpoint(raw["trial_patch"])
+            if raw.get("trial_patch") else None
+        ),
+        locked_checks={
+            key: _locked_check(value)
+            for key, value in raw.get("locked_checks", {}).items()
+        },
+        confirmed_failures=[
+            _confirmed_failure(value)
+            for value in raw.get("confirmed_failures", ())
+        ],
+        revision_history=[
+            RevisionRecord(
+                **{
+                    **dict(value),
+                    "executed_check_ids": tuple(value.get("executed_check_ids", ())),
+                }
+            )
+            for value in raw.get("revision_history", ())
+        ],
+        regression_repair_attempts=int(raw.get("regression_repair_attempts", 0)),
+        checkpoint_archive={
+            key: _patch_checkpoint(value)
+            for key, value in raw.get("checkpoint_archive", {}).items()
+        },
+    )
+
+
+def _confirmed_failure(raw: dict) -> ConfirmedFailure:
+    values = dict(raw)
+    values["expected_relation"] = _oracle(values["expected_relation"])
+    values["baseline_observation"] = _execution(values.get("baseline_observation"))
+    values["before_patch_observation"] = _execution(values.get("before_patch_observation"))
+    for name in ("causal_cut_ids", "impact_risk_ids"):
+        values[name] = tuple(values.get(name, ()))
+    return ConfirmedFailure(**values)
+
+
+def _failure_history(raw: dict) -> FailureHistory:
+    values = dict(raw)
+    values.setdefault(
+        "failure_signature", values.pop("signature", ""),
+    )
+    values.setdefault(
+        "attempted_mechanism_ids", values.pop("attempted_mechanisms", ()),
+    )
+    legacy_revisions = values.pop("revisions", ())
+    values.setdefault(
+        "revision_ids", tuple(map(str, legacy_revisions)),
+    )
+    values.setdefault("confirmed_outcomes", ())
+    values.setdefault(
+        "affected_symbol_ids", values.pop("affected_symbols", ()),
+    )
+    for name in (
+        "attempted_mechanism_ids", "causal_cut_ids", "revision_ids",
+        "confirmed_outcomes", "affected_symbol_ids",
+    ):
+        values[name] = tuple(values.get(name, ()))
+    return FailureHistory(**values)
 
 
 def _generator_record(raw: dict) -> GeneratorSessionRecord:
@@ -367,7 +521,14 @@ class ReachPatchController:
         self.action_provider = action_provider
         self.generator_agent = generator_agent
         if self.generator_agent is not None:
-            self.generator_agent.max_revisions = self.config.max_total_revisions
+            # PersistentDeepSeekAgent counts the initial generation in
+            # ``revision_count``.  Controller revision budgets count only
+            # ConfirmedFailure-driven repair attempts.  Reserve one invocation
+            # for the permanent first patch and one bounded continuation when
+            # that pass requests a real program-slice expansion.
+            self.generator_agent.max_revisions = (
+                2 + self.config.max_total_revisions
+            )
         self.implementation_root = Path(
             implementation_root or Path(__file__).parents[2]
         ).resolve()
@@ -459,6 +620,8 @@ class ReachPatchController:
             "deepseek_initial_generation_count": 0,
             "deepseek_repair_count": 0,
             "deepseek_tool_turns": 0,
+            "confirmed_revision_count": 0,
+            "submitted_generator_revisions": 0,
             "accepted_transitions": 0,
             "rolled_back_transitions": 0,
         }
@@ -504,6 +667,7 @@ class ReachPatchController:
         requirement_started = time.perf_counter()
         requirements = compile_requirement_core(
             semantic_result.graph, hypothesis_set, repository_index,
+            issue_text=instance.issue,
         )
         executable_overlay = compile_executable_requirement_overlay(
             requirements,
@@ -835,38 +999,97 @@ class ReachPatchController:
         )
         first_patch_started = time.perf_counter()
         if self.generator_agent is not None:
-            self.generator_agent.max_tool_turns = self.config.initial_generator_max_turns
-            tools = self._repair_tools(state)
             revision = None
             initial_error: GeneratorBlockedExternal | None = None
-            for initial_attempt in range(2):
-                try:
-                    revision = self.generator_agent.generate_initial_patch(
-                        state, conversation, tools
-                    )
-                    initial_error = None
+            initial_invocations = 0
+            initial_tool_turns = 0
+            context_continuations = 0
+            tools = None
+            while initial_invocations < 2:
+                self.generator_agent.max_tool_turns = (
+                    self.config.initial_generator_max_turns
+                    if initial_invocations == 0
+                    else self.config.root_recovery_max_turns
+                )
+                self.generator_agent.max_wall_time_seconds = (
+                    self.config.initial_generator_wall_time_s
+                )
+                self.generator_agent.max_completion_tokens = (
+                    self.config.initial_generator_token_budget
+                )
+                tools = self._repair_tools(state, initial=True)
+                for api_attempt in range(2):
+                    try:
+                        revision = self.generator_agent.generate_initial_patch(
+                            state, conversation, tools
+                        )
+                        initial_error = None
+                        break
+                    except GeneratorBlockedExternal as exc:
+                        initial_error = exc
+                        state.runtime_metrics["initial_generator_retry_count"] = (
+                            api_attempt + 1
+                        )
+                initial_invocations += 1
+                if revision is not None:
+                    initial_tool_turns += revision.tool_turns
+                if initial_error is not None or revision is None or revision.edits:
                     break
-                except GeneratorBlockedExternal as exc:
-                    initial_error = exc
-                    state.runtime_metrics["initial_generator_retry_count"] = (
-                        initial_attempt + 1
-                    )
+                if not revision.context_requests or context_continuations >= 1:
+                    break
+                expanded = self._expand_generator_context(
+                    state, tuple(revision.context_requests),
+                )
+                state.runtime_metrics["initial_context_expansion_requested"] = True
+                state.runtime_metrics["initial_context_expansion_succeeded"] = expanded
+                if not expanded:
+                    break
+                context_continuations += 1
+                state.runtime_metrics["initial_context_continuation_count"] = (
+                    context_continuations
+                )
             if initial_error is not None:
                 self._record_generator_block(state, initial_error)
             timings["first_patch_generation_seconds"] = (
                 time.perf_counter() - first_patch_started
             )
             state.runtime_metrics["deepseek_initial_generation_count"] = 1
+            state.runtime_metrics["deepseek_initial_invocation_count"] = (
+                initial_invocations
+            )
             if revision is not None:
-                state.runtime_metrics["deepseek_tool_turns"] = revision.tool_turns
+                state.runtime_metrics["deepseek_tool_turns"] = initial_tool_turns
                 state.generator_session = replace(
                     state.generator_session,
-                    cursor=state.generator_session.cursor + 1,
+                    cursor=state.generator_session.cursor + initial_invocations,
                     internal_tool_turns=(
                         state.generator_session.internal_tool_turns
-                        + revision.tool_turns
+                        + initial_tool_turns
                     ),
                 )
+                readiness = dict(
+                    state.runtime_metrics.get("first_patch_readiness", {})
+                )
+                required_readiness = (
+                    "target_definition_read",
+                    "root_cause_identified",
+                    "requirements_accounted_for",
+                    "preservation_risks_identified",
+                    "final_diff_reviewed",
+                )
+                missing_readiness = tuple(
+                    key for key in required_readiness if not readiness.get(key, False)
+                )
+                state.runtime_metrics["first_patch_readiness_passed"] = not missing_readiness
+                state.runtime_metrics["first_patch_readiness_missing"] = list(
+                    missing_readiness
+                )
+                if revision.edits and missing_readiness:
+                    state.termination_status = "FIRST_PATCH_READINESS_BLOCKED"
+                    state.runtime_metrics.setdefault("root_cause_labels", []).append(
+                        "FIRST_PATCH_READINESS_INCOMPLETE"
+                    )
+                    revision = None
             recovery_started = time.perf_counter()
             try:
                 target_recovery = recover_executable_targets_bounded(
@@ -996,6 +1219,27 @@ class ReachPatchController:
                             "failed_generator_mechanisms", []
                         ).append(revision.mechanism)
                     self._persist_transition(state, result)
+                    if (
+                        state.checkpoint.patch.canonical_diff
+                        and state.patch_trajectory is None
+                    ):
+                        trajectory = initialize_patch_trajectory(state)
+                        for trajectory_checkpoint in (
+                            trajectory.checkpoint_archive.values()
+                        ):
+                            artifacts.put(
+                                "patch_checkpoint", trajectory_checkpoint,
+                                state=state,
+                                producer="reachpatch.patch-trajectory",
+                                confidence=Confidence.CONFIRMED,
+                                status=trajectory_checkpoint.status,
+                            )
+                        artifacts.put(
+                            "patch_trajectory", trajectory, state=state,
+                            producer="reachpatch.patch-trajectory",
+                            confidence=Confidence.CONFIRMED,
+                        )
+                        artifacts.persist_state(state)
                 else:
                     self._record_action_rejection(state, revision, conversion)
             elif revision is not None and revision.context_requests:
@@ -1521,6 +1765,21 @@ class ReachPatchController:
             producer="reachpatch.checkpoint",
             confidence=Confidence.CONFIRMED,
         )
+        if state.patch_trajectory is not None:
+            for trajectory_checkpoint in (
+                state.patch_trajectory.checkpoint_archive.values()
+            ):
+                artifacts.put(
+                    "patch_checkpoint", trajectory_checkpoint, state=state,
+                    producer="reachpatch.patch-trajectory",
+                    confidence=Confidence.CONFIRMED,
+                    status=trajectory_checkpoint.status,
+                )
+            artifacts.put(
+                "patch_trajectory", state.patch_trajectory, state=state,
+                producer="reachpatch.patch-trajectory",
+                confidence=Confidence.CONFIRMED,
+            )
         if state.mechanism_memory:
             artifacts.put(
                 "mechanism_memory",
@@ -1909,7 +2168,23 @@ class ReachPatchController:
                 _working_patch(state_raw["verified_safe_patch"])
                 if state_raw.get("verified_safe_patch") else None
             ),
+            patch_trajectory=_trajectory(state_raw.get("patch_trajectory")),
+            checkpoint_history={
+                key: _checkpoint(value)
+                for key, value in state_raw.get("checkpoint_history", {}).items()
+            },
+            confirmed_failures=[
+                _confirmed_failure(value)
+                for value in state_raw.get("confirmed_failures", ())
+            ],
+            current_locked_check_set=_locked_check_set(
+                state_raw.get("current_locked_check_set")
+            ),
             prohibited_mechanisms=set(state_raw.get("prohibited_mechanisms", ())),
+            failure_histories={
+                key: _failure_history(value)
+                for key, value in state_raw.get("failure_histories", {}).items()
+            },
             reach_status=str(state_raw.get("reach_status", "NOT_REACHED")),
             avoid_status=str(state_raw.get("avoid_status", "NOT_AVOIDED")),
             generation_run_id=str(state_raw.get("generation_run_id", root.name)),
@@ -1976,7 +2251,9 @@ class ReachPatchController:
         artifacts.persist_state(state)
         return state
 
-    def _repair_tools(self, state: ReachAvoidState) -> RepairToolExecutor:
+    def _repair_tools(
+        self, state: ReachAvoidState, *, initial: bool = False,
+    ) -> RepairToolExecutor:
         if state.repository_index is None:
             raise RuntimeError("patch-first repair requires RepositoryIndex")
         public_checks = _named_public_checks(state)
@@ -1996,6 +2273,8 @@ class ReachPatchController:
             ),
             current_tree_hash=state.checkpoint.patch.working_tree_hash,
             public_check_results=baseline_results,
+            max_search_calls=4 if initial else 2,
+            max_read_calls=8 if initial else 4,
         )
 
     def _expand_generator_context(
@@ -2196,32 +2475,114 @@ class ReachPatchController:
     ) -> tuple[ReachAvoidState, TerminalCertificate]:
         if self.generator_agent is None or state.generator_conversation is None:
             raise RuntimeError("patch-first drive requires a persistent generator agent")
+        if state.termination_status == "GENERATOR_BLOCKED_EXTERNAL":
+            # The initial call already exhausted its one structural retry and
+            # persisted the external API failure.  It is a permitted hard stop,
+            # not generator non-progress and not a revision trigger.
+            return state, self.seal(state, session)
         conversation = state.generator_conversation
-        nonprogress = 0
+        if state.checkpoint.patch.canonical_diff and state.patch_trajectory is None:
+            initialize_patch_trajectory(state)
         submitted = int(state.runtime_metrics.get(
-            "submitted_generator_revisions",
-            state.runtime_metrics.get("deepseek_initial_generation_count", 0),
+            "confirmed_revision_count", 0,
         ))
-        # analyze() owns the initial generation. A context-only initial answer
-        # reaches this loop with transition_index == 0 and is retried after the
-        # requested local slice has been materialized.
         revision_limit = min(
             self.config.max_submitted_revisions, self.config.max_total_revisions
         )
         while submitted < revision_limit:
             if in_target_set(state):
                 break
+            if state.patch_trajectory is None:
+                state.termination_status = (
+                    "GENERATOR_NONPROGRESS"
+                    if not state.checkpoint.patch.canonical_diff
+                    else "EVIDENCE_LIMITED_COMPLETE"
+                )
+                break
+            refresh_confirmed_failures(state)
+            failure = select_confirmed_failure(state)
+            if failure is None:
+                state.termination_status = "EVIDENCE_LIMITED_COMPLETE"
+                state.reach_status = "EVIDENCE_LIMITED_COMPLETE"
+                state.runtime_metrics["revision_stopped_without_confirmed_failure"] = True
+                break
             terminal = terminal_avoid_reason(state)
             if terminal:
                 state.termination_status = terminal
                 break
-            pending_requests = tuple(conversation.pending_context_requests)
-            if pending_requests:
-                self._expand_generator_context(state, pending_requests)
-                conversation.pending_context_requests.clear()
+            state.runtime_metrics["selected_confirmed_failure_id"] = failure.failure_id
+            state.runtime_metrics["selected_confirmed_failure_kind"] = failure.kind
+            failure_history = state.failure_histories.get(failure.failure_signature)
+            failed_outcomes = tuple(
+                item for item in (
+                    failure_history.confirmed_outcomes
+                    if failure_history is not None else ()
+                )
+                if not item.startswith("PROMOTE:")
+            )
+            if (
+                failure_history is not None
+                and len(set(failure_history.attempted_mechanism_ids))
+                >= self.config.max_distinct_mechanisms_per_failure
+                and len(failed_outcomes)
+                >= self.config.max_distinct_mechanisms_per_failure
+            ):
+                state.patch_trajectory.working_patch = (
+                    state.patch_trajectory.best_evidence_patch
+                )
+                state.termination_status = "NO_NEW_REPAIR_EVIDENCE"
+                break
+            root_recovery_signatures = set(state.runtime_metrics.get(
+                "root_recovery_completed_signatures", (),
+            ))
+            use_root_recovery = bool(
+                failure_history is not None
+                and len(failed_outcomes) >= 3
+                and failure.failure_signature not in root_recovery_signatures
+            )
+            if use_root_recovery:
+                unit = state.active_binding_graph.units.get(
+                    failure.binding_unit_id or ""
+                )
+                symbols = tuple(dict.fromkeys(
+                    str(state.program_graph.nodes[node_id].attributes.get(
+                        "qualified_name", state.program_graph.nodes[node_id].label,
+                    ))
+                    for node_id in (
+                        unit.program_symbol_ids if unit is not None else ()
+                    )
+                    if node_id in state.program_graph.nodes
+                ))[: self.config.active_slice_max_symbols]
+                if symbols:
+                    self._expand_generator_context(state, (ContextRequest(
+                        symbols=symbols,
+                        relation_kinds=(
+                            "calls", "dispatch", "state_read", "state_write",
+                            "return_flow", "exception_flow",
+                        ),
+                        reason=(
+                            "third repeated ConfirmedFailure bounded root recovery"
+                        ),
+                    ),))
+                root_recovery_signatures.add(failure.failure_signature)
+                state.runtime_metrics["root_recovery_completed_signatures"] = sorted(
+                    root_recovery_signatures
+                )
+            build_locked_check_set(
+                state, failure, state.patch_trajectory.working_patch,
+            )
             packets = tuple(
                 packet for packet in state.counterexamples
-                if packet.counterexample_id not in conversation.delivered_counterexamples
+                if (
+                    (
+                        packet.public_trigger_id == failure.check_id
+                        or packet.counterexample_id == failure.failure_id
+                        or (
+                            failure.binding_unit_id is not None
+                            and packet.binding_unit_id == failure.binding_unit_id
+                        )
+                    )
+                )
             )
             intent = next_untried_repair_intent(state)
             state.runtime_metrics["current_repair_intent"] = (
@@ -2232,59 +2593,47 @@ class ReachPatchController:
                     ControllerPhase.COUNTEREXAMPLE_FEEDBACK,
                     event="revision_requires_further_evidence",
                 )
-            if state.phase == ControllerPhase.INITIAL_GENERATION:
-                state.transition_phase(
-                    ControllerPhase.ROOT_RECOVERY,
-                    event="initial_generation_requested_context",
+            if not packets:
+                state.termination_status = "CONFIRMED_FAILURE_PACKET_MISSING"
+                state.runtime_metrics.setdefault("root_cause_labels", []).append(
+                    "CONFIRMED_FAILURE_WITHOUT_EXECUTION_PACKET"
                 )
-            if (
-                nonprogress >= self.config.nonprogress_before_root_recovery
-                or state.runtime_metrics.pop("root_recovery_required", False)
-            ):
+                break
+            if state.phase != ControllerPhase.REPAIR_GENERATION:
                 state.transition_phase(
-                    ControllerPhase.ROOT_RECOVERY, event="patch_first_nonprogress"
+                    ControllerPhase.REPAIR_GENERATION,
+                    event="confirmed_counterexample_repair_requested",
                 )
-                tools = self._repair_tools(state)
-                try:
-                    self.generator_agent.max_tool_turns = (
-                        self.config.root_recovery_max_turns
+            tools = self._repair_tools(state)
+            try:
+                self.generator_agent.max_tool_turns = (
+                    self.config.root_recovery_max_turns
+                    if use_root_recovery
+                    else self.config.revision_generator_max_turns
+                )
+                self.generator_agent.max_wall_time_seconds = (
+                    self.config.revision_generator_wall_time_s
+                )
+                self.generator_agent.max_completion_tokens = (
+                    self.config.revision_generator_token_budget
+                )
+                revision = (
+                    self.generator_agent.root_recovery(
+                        state, conversation, tools,
                     )
-                    revision = self.generator_agent.root_recovery(
-                        state, conversation, tools
+                    if use_root_recovery
+                    else self.generator_agent.repair_from_counterexamples(
+                        state, conversation, packets[:1], tools,
                     )
-                except GeneratorBlockedExternal as exc:
-                    self._record_generator_block(state, exc)
-                    break
-                nonprogress = 0
-            else:
-                if state.phase != ControllerPhase.REPAIR_GENERATION:
-                    state.transition_phase(
-                        ControllerPhase.REPAIR_GENERATION,
-                        event="counterexample_repair_requested",
-                    )
-                tools = self._repair_tools(state)
-                try:
-                    self.generator_agent.max_tool_turns = (
-                        self.config.revision_generator_max_turns
-                    )
-                    if packets:
-                        revision = self.generator_agent.repair_from_counterexamples(
-                            state, conversation, packets, tools
-                        )
-                        state.runtime_metrics["deepseek_repair_count"] = int(
-                            state.runtime_metrics.get("deepseek_repair_count", 0)
-                        ) + 1
-                    else:
-                        revision = self.generator_agent.root_recovery(
-                            state, conversation, tools
-                        )
-                        state.runtime_metrics["deepseek_root_recovery_count"] = int(
-                            state.runtime_metrics.get("deepseek_root_recovery_count", 0)
-                        ) + 1
-                except GeneratorBlockedExternal as exc:
-                    self._record_generator_block(state, exc)
-                    break
+                )
+                state.runtime_metrics["deepseek_repair_count"] = int(
+                    state.runtime_metrics.get("deepseek_repair_count", 0)
+                ) + 1
+            except GeneratorBlockedExternal as exc:
+                self._record_generator_block(state, exc)
+                break
             submitted += 1
+            state.runtime_metrics["confirmed_revision_count"] = submitted
             state.runtime_metrics["submitted_generator_revisions"] = submitted
             state.runtime_metrics["deepseek_tool_turns"] = int(
                 state.runtime_metrics.get("deepseek_tool_turns", 0)
@@ -2309,38 +2658,22 @@ class ReachPatchController:
                     )
                     break
                 if revision.status == "NO_NEW_REPAIR_EVIDENCE":
-                    nonprogress += 1
                     state.runtime_metrics["same_evidence_revision_count"] = int(
                         state.runtime_metrics.get("same_evidence_revision_count", 0)
                     ) + 1
-                    continue
+                    break
                 if revision.status == "DECLARED_BLOCKER":
                     state.runtime_metrics.setdefault("root_cause_labels", []).append(
                         "GENERATOR_DECLARED_BLOCKER"
                     )
-                    nonprogress += 1
-                    # A model-level blocker is not an external/API blocker. Keep
-                    # the same conversation alive so root recovery can widen the
-                    # bounded slice and try a causal edit.
-                    if (
-                        not state.checkpoint.patch.canonical_diff
-                        and self.generator_agent.requested_max_tool_turns <= 2
-                    ):
-                        state.termination_status = "GENERATOR_NONPROGRESS"
-                        break
-                    continue
+                    state.termination_status = "GENERATOR_NONPROGRESS"
+                    break
                 if revision.status == "GENERATOR_BROWSE_LOOP":
                     state.runtime_metrics.setdefault("root_cause_labels", []).append(
                         "GENERATOR_BROWSE_LOOP"
                     )
-                    nonprogress += 1
-                    if (
-                        not state.checkpoint.patch.canonical_diff
-                        and self.generator_agent.requested_max_tool_turns <= 2
-                    ):
-                        state.termination_status = "GENERATOR_NONPROGRESS"
-                        break
-                    continue
+                    state.termination_status = "GENERATOR_NONPROGRESS"
+                    break
                 if revision.status == "REVISION_BUDGET_EXHAUSTED":
                     state.termination_status = (
                         "REVISION_BUDGET_EXHAUSTED_WITH_UNCERTIFIED_PATCH"
@@ -2357,35 +2690,62 @@ class ReachPatchController:
                         state.runtime_metrics.get("generator_contextless_revisions", 0)
                     ) + 1
                     state.runtime_metrics["generator_contextless_revisions"] = contextless
-                    nonprogress += 1
                     # A persistent conversation is useful only while it is
                     # producing evidence, context requests, or edits.  Do
                     # not repeatedly reset root recovery and spend every
                     # submitted revision on the same browse-only response.
                 else:
-                    nonprogress += 1
-                continue
+                    state.runtime_metrics["pending_context_only_revision"] = True
+                    expanded = self._expand_generator_context(
+                        state, tuple(revision.context_requests),
+                    )
+                    if expanded:
+                        for request in revision.context_requests:
+                            if request in conversation.pending_context_requests:
+                                conversation.pending_context_requests.remove(request)
+                        continue
+                break
             conversion = convert_revision_action(state, revision)
             if revision.mechanism in state.prohibited_mechanisms:
                 state.runtime_metrics.setdefault(
                     "rejected_prohibited_mechanisms", []
                 ).append(revision.mechanism)
-                nonprogress += 1
                 continue
             if conversion.status not in {
                 ActionConversionStatus.ACCEPTED,
                 ActionConversionStatus.NEEDS_SLICE_EXPANSION,
             }:
                 self._record_action_rejection(state, revision, conversion)
-                nonprogress += 1
                 continue
             revision = conversion.revision
             result = evaluate_patch_revision(state, revision)
+            if (
+                failure.kind == "CONFIRMED_PRESERVATION_REGRESSION"
+                and state.patch_trajectory is not None
+            ):
+                promoted = (
+                    result.accepted
+                    and state.patch_trajectory.best_evidence_patch.checkpoint_id
+                    == state.checkpoint.checkpoint_id
+                )
+                if not promoted:
+                    state.patch_trajectory.regression_repair_attempts += 1
+                    if (
+                        state.patch_trajectory.regression_repair_attempts
+                        >= 2
+                    ):
+                        best = state.patch_trajectory.best_evidence_patch
+                        state.patch_trajectory.working_patch = best
+                        restored = state.checkpoint_history.get(best.checkpoint_id)
+                        if restored is not None:
+                            state.checkpoint = restored
+                        state.termination_status = (
+                            "CONFIRMED_REGRESSION_REPAIR_EXHAUSTED"
+                        )
             if result.accepted:
                 state.runtime_metrics["accepted_transitions"] = int(
                     state.runtime_metrics.get("accepted_transitions", 0)
                 ) + 1
-                nonprogress = 0 if result.certificate.progress else nonprogress + 1
             elif result.decision == Decision.KEEP_UNCERTIFIED:
                 state.runtime_metrics["kept_uncertified_transitions"] = int(
                     state.runtime_metrics.get("kept_uncertified_transitions", 0)
@@ -2397,8 +2757,12 @@ class ReachPatchController:
                 state.runtime_metrics.setdefault(
                     "failed_generator_mechanisms", []
                 ).append(revision.mechanism)
-                nonprogress += 1
             self._persist_transition(state, result)
+            refresh_confirmed_failures(state)
+            if state.termination_status == "CONFIRMED_REGRESSION_REPAIR_EXHAUSTED":
+                break
+        finalize_best_patch(state)
+        refresh_confirmed_failures(state)
         if submitted >= revision_limit and not in_target_set(state):
             state.termination_status = (
                 "REVISION_BUDGET_EXHAUSTED_WITH_UNCERTIFIED_PATCH"
@@ -2406,7 +2770,7 @@ class ReachPatchController:
                 else "REVISION_BUDGET_EXHAUSTED_WITH_TARGET_FAILURE"
             )
         elif not in_target_set(state) and state.termination_status is None:
-            state.termination_status = "GENERATOR_NONPROGRESS"
+            state.termination_status = "EVIDENCE_LIMITED_COMPLETE"
         return state, self.seal(state, session)
 
     def _drive(
@@ -3058,6 +3422,28 @@ class ReachPatchController:
             root_causes.add("FALSE_DICC_CLOSURE")
         state.runtime_metrics["root_cause_labels"] = sorted(root_causes)
         state.runtime_metrics.update({
+            "relevant_binding_count": len(state.active_binding_graph.units),
+            "static_actionable_count": sum(
+                unit.status == "STATIC_ACTIONABLE"
+                for unit in state.active_binding_graph.units.values()
+            ),
+            "execution_confirmed_count": sum(
+                unit.status == "EXECUTION_CONFIRMED"
+                for unit in state.active_binding_graph.units.values()
+            ),
+            "confirmed_failing_count": sum(
+                unit.status in {
+                    "TARGET_FAILING", "PRESERVATION_RISK", "COUNTEREXAMPLE_OPEN",
+                }
+                for unit in state.active_binding_graph.units.values()
+            ),
+            "confirmed_passing_count": sum(
+                unit.status == "TARGET_PASSING"
+                for unit in state.active_binding_graph.units.values()
+            ),
+            "binding_gap_count": len(
+                state.active_binding_graph.unresolved_gaps
+            ),
             "normative_candidate_binding_count": sum(
                 unit.status == "CANDIDATE"
                 for unit in state.active_binding_graph.units.values()

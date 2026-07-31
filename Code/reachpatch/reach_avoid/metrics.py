@@ -4,7 +4,11 @@ from dataclasses import dataclass
 
 from reachpatch.models.controller import ReachAvoidState, UnitOutcome
 from reachpatch.models.enums import OutcomeStatus
-from reachpatch.execution.models import CheckClassification, CheckComparison
+from reachpatch.execution.models import (
+    CheckClassification,
+    CheckComparison,
+    CheckStatus,
+)
 
 
 def target_deficit(
@@ -154,13 +158,40 @@ class ProgressMetrics:
 
 @dataclass(frozen=True, slots=True)
 class ProgressVector:
-    target_pass_delta: int
-    target_failure_distance_delta: float
-    requirement_coverage_delta: int
-    counterexample_delta: int
-    preservation_regression_delta: int
-    unresolved_frontier_delta: int
-    syntax_health_delta: int
+    confirmed_target_pass_delta: int
+    confirmed_target_failure_delta: int
+    confirmed_regression_delta: int
+    confirmed_counterexample_delta: int
+    mechanical_health_delta: int
+    execution_confirmed_requirement_delta: int
+
+    @property
+    def target_pass_delta(self) -> int:
+        return self.confirmed_target_pass_delta
+
+    @property
+    def target_failure_distance_delta(self) -> float:
+        return float(max(0, -self.confirmed_target_failure_delta))
+
+    @property
+    def requirement_coverage_delta(self) -> int:
+        return self.execution_confirmed_requirement_delta
+
+    @property
+    def counterexample_delta(self) -> int:
+        return max(0, -self.confirmed_counterexample_delta)
+
+    @property
+    def preservation_regression_delta(self) -> int:
+        return self.confirmed_regression_delta
+
+    @property
+    def unresolved_frontier_delta(self) -> int:
+        return 0
+
+    @property
+    def syntax_health_delta(self) -> int:
+        return self.mechanical_health_delta
 
     @property
     def target_fixed_gain(self) -> int:
@@ -189,11 +220,11 @@ class ProgressVector:
     @property
     def meaningful(self) -> bool:
         return self.new_regressions == 0 and any((
-            self.target_pass_delta > 0,
-            self.target_failure_distance_delta > 0,
-            self.requirement_coverage_delta > 0,
-            self.counterexample_delta > 0,
-            self.syntax_health_delta > 0,
+            self.confirmed_target_pass_delta > 0,
+            self.confirmed_target_failure_delta < 0,
+            self.confirmed_counterexample_delta < 0,
+            self.mechanical_health_delta > 0,
+            self.execution_confirmed_requirement_delta > 0,
         ))
 
 
@@ -234,10 +265,28 @@ def progress_vector_from_comparisons(
     """Measure progress only from actual paired check executions."""
 
     if not current:
-        return ProgressVector(0, 0.0, 0, 0, 0, 0, 0)
+        return ProgressVector(0, 0, 0, 0, 0, 0)
     weights = target_weights or {}
-    old = {item.check_id: item for item in previous}
-    new = {item.check_id: item for item in current}
+    infrastructure_statuses = {
+        CheckStatus.TIMEOUT,
+        CheckStatus.FLAKY,
+        CheckStatus.INVALID_ENVIRONMENT,
+        CheckStatus.INVALID_SELECTOR,
+        CheckStatus.UNSUPPORTED,
+    }
+
+    def comparable(item: CheckComparison) -> bool:
+        return bool(
+            item.baseline.stable
+            and item.patched.stable
+            and item.baseline.status not in infrastructure_statuses
+            and item.patched.status not in infrastructure_statuses
+        )
+
+    old = {item.check_id: item for item in previous if comparable(item)}
+    new = {item.check_id: item for item in current if comparable(item)}
+    if not new:
+        return ProgressVector(0, 0, 0, 0, 0, 0)
     fixed = {
         check_id for check_id, item in new.items()
         if item.classification == CheckClassification.TARGET_FIXED
@@ -276,32 +325,32 @@ def progress_vector_from_comparisons(
         if item.patched.failure_signature
         and item.classification == CheckClassification.TARGET_STILL_FAILING
     }
-    unknown_classes = {
-        CheckClassification.SAME_INFRA_FAILURE,
-        CheckClassification.NEW_INFRA_FAILURE,
-        CheckClassification.FLAKY_RESULT,
-        CheckClassification.UNSUPPORTED_CHECK,
-    }
-    old_unknown = sum(item.classification in unknown_classes for item in old.values())
-    new_unknown = sum(item.classification in unknown_classes for item in new.values())
     regression_classes = {
         CheckClassification.TARGET_REGRESSED,
         CheckClassification.PRESERVATION_REGRESSION,
     }
+    old_regressions = sum(
+        item.classification in regression_classes for item in old.values()
+    )
+    new_regressions = sum(
+        item.classification in regression_classes for item in new.values()
+    )
+    new_unresolved = {
+        check_id for check_id, item in new.items()
+        if item.classification in {
+            CheckClassification.TARGET_STILL_FAILING,
+            CheckClassification.TARGET_REGRESSED,
+        }
+    }
     return ProgressVector(
-        target_pass_delta=len(fixed - old_fixed),
-        target_failure_distance_delta=deficit_reduction,
-        requirement_coverage_delta=len(fixed - old_fixed),
-        counterexample_delta=len(old_failure_signatures - new_failure_signatures),
-        preservation_regression_delta=sum(
-            item.classification in regression_classes for item in new.values()
+        confirmed_target_pass_delta=len(fixed) - len(old_fixed),
+        confirmed_target_failure_delta=len(new_unresolved) - len(old_unresolved),
+        confirmed_regression_delta=new_regressions - old_regressions,
+        confirmed_counterexample_delta=(
+            len(new_failure_signatures) - len(old_failure_signatures)
         ),
-        unresolved_frontier_delta=new_unknown - old_unknown,
-        syntax_health_delta=sum(
-            item.patched.status.value == "PASS"
-            and item.baseline.status.value != "PASS"
-            for item in new.values()
-        ),
+        mechanical_health_delta=0,
+        execution_confirmed_requirement_delta=len(fixed - old_fixed),
     )
 
 

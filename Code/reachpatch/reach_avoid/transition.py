@@ -33,12 +33,12 @@ from reachpatch.execution import (
 )
 from reachpatch.execution.mechanical import mechanical_pass, run_mechanical_checks
 from reachpatch.execution.reconcile import ActualDiff, reconcile_actual_diff
+from reachpatch.execution.target_recovery import certify_recovered_targets
 from reachpatch.execution.worktree import tree_hash
 from reachpatch.models.base import content_hash, stable_id
 from reachpatch.models.budget import BudgetVector
 from reachpatch.models.controller import (
     CounterexamplePacket,
-    FailureHistory,
     IncumbentCheckpoint,
     MechanismAttempt,
     ReachAvoidState,
@@ -63,8 +63,17 @@ from reachpatch.program_graph.tracing import merge_trace_bundles
 from reachpatch.program_graph.impact import guarded_diff_influence_cone
 from reachpatch.reach_avoid.certificates import finalize_certificate
 from reachpatch.reach_avoid.gates import in_target_set, raw_avoid_reasons
+from reachpatch.reach_avoid.trajectory import (
+    checkpoint_from_state,
+    checkpoint_from_trial_diff,
+    decide_transition,
+    evaluate_trial_against_checkpoint,
+    evidence_vector_from_comparison,
+    refresh_confirmed_failures,
+    record_transition,
+)
 from reachpatch.reach_avoid.metrics import (
-    RevisionEvidence, _legacy_progress_metrics, component_shadow_pass,
+    RevisionEvidence, component_shadow_pass,
     progress_metrics,
     progress_vector_from_comparisons, should_commit,
 )
@@ -73,6 +82,7 @@ from reachpatch.reach_avoid.observations import ObservationBundle
 from reachpatch.repair.counterexamples import (
     counterexample_from_check_comparison, packets_for_nonpass_challenges,
 )
+from reachpatch.repair.policy import accept_edit_scope
 from reachpatch.repair.diagnosis import mechanism_fingerprint
 from reachpatch.repair.operators import apply_registered_operator
 from reachpatch.repair.session import PersistentGeneratorSession
@@ -629,6 +639,7 @@ def _legacy_evaluate_single_update(
 
     if os.environ.get("REACHPATCH_ENABLE_LEGACY_FULL_GRAPH") != "1":
         raise RuntimeError("legacy full-graph transition is disabled")
+    from reachpatch.reach_avoid.metrics import _legacy_progress_metrics
     from reachpatch.binding_graph import build_binding_graph
     from reachpatch.challenge_graph.materialize import materialize_challenges
     from reachpatch.program_graph.builder import build_augmented_program_graph
@@ -1001,7 +1012,6 @@ def _legacy_evaluate_single_update(
         equivalent_attempt_count=equivalent,
         forbidden_next=not accepted and equivalent >= 2,
     ))
-    state.counterexamples.extend(packets)
     state.repair_history.append(certificate)
     state.transition_index += 1
     session.resume(
@@ -1174,6 +1184,7 @@ def evaluate_patch_revision(
             f"revision conversion {conversion.status.value}: {'; '.join(conversion.reasons)}"
         )
     before_state = copy.copy(state)
+    initial_patch_submission = state.patch_trajectory is None
     before_state.counterexamples = list(state.counterexamples)
     before_state.outcomes = dict(state.outcomes)
     before_state.check_comparisons = tuple(state.check_comparisons)
@@ -1258,6 +1269,16 @@ def evaluate_patch_revision(
     if incremental.oracle_contamination_paths:
         avoid_reasons.add("ORACLE_CONTAMINATION")
     if avoid_reasons:
+        if state.patch_trajectory is not None:
+            archived_trial = checkpoint_from_trial_diff(
+                state,
+                cumulative,
+                status="MECHANICAL_REJECTED",
+                snapshot_tree=str(trial_tree),
+            )
+            state.patch_trajectory.checkpoint_archive[
+                archived_trial.checkpoint_id
+            ] = archived_trial
         receipt = manager.rollback(trial)
         packet = _mechanical_packet(
             state, transition_id, incremental, ",".join(sorted(avoid_reasons)),
@@ -1287,6 +1308,57 @@ def evaluate_patch_revision(
             transition_id, False, Decision.ROLLBACK, certificate,
             (packet,), state.checkpoint, revision, ",".join(sorted(avoid_reasons)),
         )
+    if not initial_patch_submission:
+        scope_decision = accept_edit_scope(
+            state.runtime_metrics.get("current_repair_intent", {}),
+            incremental,
+            state,
+        )
+        state.runtime_metrics["last_edit_scope_decision"] = {
+            key: value
+            for key, value in scope_decision.__dict__.items()
+        } if hasattr(scope_decision, "__dict__") else {
+            "allowed": scope_decision.allowed,
+            "touched_causal_cut": scope_decision.touched_causal_cut,
+            "unexplained_files": list(scope_decision.unexplained_files),
+            "unexplained_symbols": list(scope_decision.unexplained_symbols),
+            "public_api_changes": list(scope_decision.public_api_changes),
+            "signature_changes": list(scope_decision.signature_changes),
+            "shared_utility_changes": list(scope_decision.shared_utility_changes),
+            "base_class_changes": list(scope_decision.base_class_changes),
+        }
+        if not scope_decision.allowed:
+            if state.patch_trajectory is not None:
+                archived_trial = checkpoint_from_trial_diff(
+                    state,
+                    cumulative,
+                    status="EDIT_SCOPE_REJECTED",
+                    snapshot_tree=str(trial_tree),
+                )
+                state.patch_trajectory.checkpoint_archive[
+                    archived_trial.checkpoint_id
+                ] = archived_trial
+            receipt = manager.rollback(trial)
+            certificate = _revision_certificate(
+                state, revision, transition_id, incremental, checks,
+                decision=Decision.ROLLBACK, receipt_id=receipt.receipt_id,
+                result_checkpoint_id=None,
+                graph_delta={
+                    "actual_diff": incremental.to_dict(),
+                    "edit_scope_decision": state.runtime_metrics[
+                        "last_edit_scope_decision"
+                    ],
+                },
+                outcomes=state.outcomes, packets=(), safe=False,
+                progress=False, reach=False,
+                avoid_reasons=("EDIT_SCOPE_REJECTED",),
+            )
+            state.repair_history.append(certificate)
+            state.transition_index += 1
+            return TransitionResult(
+                transition_id, False, Decision.ROLLBACK, certificate,
+                (), state.checkpoint, revision, "EDIT_SCOPE_REJECTED",
+            )
     project_runner = select_project_runner(
         state.base_repository,
         artifact_root=Path(state.run_root) / "execution",
@@ -1315,6 +1387,94 @@ def evaluate_patch_revision(
     _charge_execution(state, sum(
         item.patched.duration_seconds for item in public_comparisons
     ))
+    locked_comparison = None
+    transition_label = "INITIAL_PATCH"
+    transition_reason = "FIRST_PATCH_SUBMISSION"
+    if not initial_patch_submission:
+        locked = state.current_locked_check_set
+        trajectory = state.patch_trajectory
+        if locked is None or trajectory is None:
+            receipt = manager.rollback(trial)
+            certificate = _revision_certificate(
+                state, revision, transition_id, incremental, checks,
+                decision=Decision.ROLLBACK, receipt_id=receipt.receipt_id,
+                result_checkpoint_id=None,
+                graph_delta={"actual_diff": incremental.to_dict()},
+                outcomes=state.outcomes, packets=(), safe=False,
+                progress=False, reach=False,
+                avoid_reasons=("LOCKED_CHECK_SET_MISSING",),
+            )
+            state.repair_history.append(certificate)
+            state.transition_index += 1
+            return TransitionResult(
+                transition_id, False, Decision.ROLLBACK, certificate,
+                (), state.checkpoint, revision, "LOCKED_CHECK_SET_MISSING",
+            )
+        before_checkpoint = trajectory.working_patch
+        locked_comparison = evaluate_trial_against_checkpoint(
+            before=before_checkpoint,
+            after_patch_hash=incremental.canonical_diff_hash,
+            before_repository=checkpoint_tree,
+            after_repository=trial_tree,
+            locked_checks=locked,
+            project_runner=project_runner,
+            before_tree_hash=tree_hash(checkpoint_tree),
+            after_tree_hash=trial_hash,
+        )
+        transition_label, transition_reason = decide_transition(locked_comparison)
+        state.runtime_metrics["last_locked_trial_comparison"] = (
+            locked_comparison.to_dict()
+        )
+        if transition_label == "ROLLBACK":
+            selected_failure = next((
+                item for item in state.confirmed_failures
+                if item.failure_id == state.runtime_metrics.get(
+                    "selected_confirmed_failure_id"
+                )
+            ), None)
+            trial_checkpoint = checkpoint_from_trial_diff(
+                state,
+                cumulative,
+                status="ROLLED_BACK",
+                evidence_vector=evidence_vector_from_comparison(
+                    locked_comparison
+                ),
+                executed_check_ids=locked_comparison.executed_check_ids,
+                snapshot_tree=str(trial_tree),
+            )
+            if selected_failure is not None:
+                record_transition(
+                    state,
+                    failure=selected_failure,
+                    comparison=locked_comparison,
+                    trial=trial_checkpoint,
+                    action_id=revision.revision_id,
+                    mechanism_id=revision.mechanism,
+                    decision="ROLLBACK",
+                    reason=transition_reason,
+                )
+            receipt = manager.rollback(trial)
+            certificate = _revision_certificate(
+                state, revision, transition_id, incremental, checks,
+                decision=Decision.ROLLBACK, receipt_id=receipt.receipt_id,
+                result_checkpoint_id=None,
+                graph_delta={
+                    "actual_diff": incremental.to_dict(),
+                    "locked_trial_comparison": locked_comparison.to_dict(),
+                    "transition_reason": transition_reason,
+                },
+                outcomes=state.outcomes, packets=(), safe=False,
+                progress=False, reach=False,
+                avoid_reasons=(transition_reason,),
+            )
+            state.repair_history.append(certificate)
+            state.transition_index += 1
+            state.runtime_metrics.setdefault("rolled_back_transitions", 0)
+            state.runtime_metrics["rolled_back_transitions"] += 1
+            return TransitionResult(
+                transition_id, False, Decision.ROLLBACK, certificate,
+                (), state.checkpoint, revision, transition_reason,
+            )
     cuts_by_check = {
         comparison.check_id: causal_repair_cut(
             comparison.patched,
@@ -1358,7 +1518,11 @@ def evaluate_patch_revision(
         item.classification == CheckClassification.TARGET_FIXED
         for item in public_comparisons
     )
-    if public_regressions and not target_fixed_with_regression:
+    if (
+        public_regressions
+        and not target_fixed_with_regression
+        and not initial_patch_submission
+    ):
         receipt = manager.rollback(trial)
         graph_delta = {
             "actual_diff": incremental.to_dict(),
@@ -1505,6 +1669,16 @@ def evaluate_patch_revision(
         active_slice_max_symbols=int(config.get("active_slice_max_symbols", 40)),
         direct_caller_depth=int(config.get("direct_caller_depth", 2)),
         impact_cone_depth=int(config.get("impact_cone_depth", 2)),
+        failure_locations={
+            item.check_id: item.patched.first_project_frame
+            for item in public_comparisons
+            if item.patched.first_project_frame
+            and item.classification in {
+                CheckClassification.TARGET_STILL_FAILING,
+                CheckClassification.TARGET_REGRESSED,
+                CheckClassification.PRESERVATION_REGRESSION,
+            }
+        },
     )
     public_packets = tuple(
         packet
@@ -1648,6 +1822,18 @@ def evaluate_patch_revision(
         (*public_packets,),
     )
     trial_state.active_binding_graph = trial_binding
+    certifications = certify_recovered_targets(
+        state.target_recovery, trial_binding,
+    )
+    trial_state.target_recovery = replace(
+        state.target_recovery, certifications=certifications,
+    )
+    trial_state.runtime_metrics["target_certifications"] = [
+        item.to_dict() for item in certifications
+    ]
+    trial_state.runtime_metrics["certified_target_count"] = sum(
+        item.certified for item in certifications
+    )
     trial_state.requirement_coverage = update_requirement_coverage(
         state.requirement_coverage,
         trial_binding,
@@ -1955,12 +2141,58 @@ def evaluate_patch_revision(
         state.check_comparisons = public_comparisons
         state.observations = trial_state.observations
         state.requirement_coverage = trial_state.requirement_coverage
+        state.target_recovery = trial_state.target_recovery
         state.dicc_certificate = dicc
         state.checkpoint = replace(
             checkpoint, graph_hashes=state.graph_hashes(),
             graph_reached=False, safe=execution_safe,
         )
-        if execution_safe and state.checkpoint.patch.canonical_diff:
+        state.checkpoint_history[state.checkpoint.checkpoint_id] = state.checkpoint
+        if state.patch_trajectory is not None:
+            trial_checkpoint = checkpoint_from_state(
+                state,
+                evidence_vector=(
+                    evidence_vector_from_comparison(locked_comparison)
+                    if locked_comparison is not None else None
+                ),
+                executed_check_ids=(
+                    locked_comparison.executed_check_ids
+                    if locked_comparison is not None
+                    else tuple(item.check_id for item in public_comparisons)
+                ),
+                status=state.checkpoint.patch.status,
+            )
+            selected_failure = next((
+                item for item in state.confirmed_failures
+                if item.failure_id == state.runtime_metrics.get(
+                    "selected_confirmed_failure_id"
+                )
+            ), None)
+            if selected_failure is not None and locked_comparison is not None:
+                record_transition(
+                    state,
+                    failure=selected_failure,
+                    comparison=locked_comparison,
+                    trial=trial_checkpoint,
+                    action_id=revision.revision_id,
+                    mechanism_id=revision.mechanism,
+                    decision=transition_label,
+                    reason=transition_reason,
+                )
+            elif initial_patch_submission:
+                state.patch_trajectory = None
+        if (
+            (
+                initial_patch_submission
+                or (
+                    state.patch_trajectory is not None
+                    and state.patch_trajectory.best_evidence_patch.checkpoint_id
+                    == state.checkpoint.checkpoint_id
+                )
+            )
+            and execution_safe
+            and state.checkpoint.patch.canonical_diff
+        ):
             state.verified_safe_patch = state.checkpoint.patch
         state.current_patch_hash = cumulative.canonical_diff_hash
         state.reach_status = (
@@ -2022,6 +2254,11 @@ def evaluate_patch_revision(
                 item.failure_signature for item in packets
                 if item.failure_signature
             )
+    # Reach and the next repair selection must observe the just-executed
+    # counterexamples, not the preceding checkpoint's packet list.
+    state.counterexamples.extend(packets)
+    if not initial_patch_submission:
+        refresh_confirmed_failures(state)
     graph_delta = {
         "old_target_deficit": previous_target_deficit,
         "actual_diff": incremental.to_dict(),
@@ -2061,6 +2298,11 @@ def evaluate_patch_revision(
         "dicc": dicc.to_dict(),
         "impact_slice": impact_slice.to_dict(),
         "avoid_reasons": sorted(avoid_reasons),
+        "trajectory_decision": transition_label,
+        "trajectory_reason": transition_reason,
+        "locked_trial_comparison": (
+            locked_comparison.to_dict() if locked_comparison is not None else None
+        ),
     }
     reach = accepted and in_target_set(state)
     try:
@@ -2098,43 +2340,6 @@ def evaluate_patch_revision(
             progress=execution_progress.meaningful, reach=reach,
             avoid_reasons=tuple(sorted(avoid_reasons)),
         )
-    state.counterexamples.extend(packets)
-    for packet in packets:
-        if not packet.failure_signature:
-            continue
-        previous_history = state.failure_histories.get(packet.failure_signature)
-        unit = state.active_binding_graph.units.get(
-            packet.binding_unit_id or ""
-        )
-        mechanisms = tuple(dict.fromkeys((
-            *(previous_history.attempted_mechanisms if previous_history else ()),
-            revision.mechanism,
-        )))
-        revisions = tuple((
-            *(previous_history.revisions if previous_history else ()),
-            state.transition_index + 1,
-        ))
-        state.failure_histories[packet.failure_signature] = FailureHistory(
-            signature=packet.failure_signature,
-            attempted_mechanisms=mechanisms,
-            affected_symbols=tuple(dict.fromkeys((
-                *(previous_history.affected_symbols if previous_history else ()),
-                *(unit.program_symbol_ids if unit else ()),
-            ))),
-            causal_cut_ids=tuple(dict.fromkeys((
-                *(previous_history.causal_cut_ids if previous_history else ()),
-                *packet.causal_cut_ids,
-                *packet.candidate_repair_cut_ids,
-            ))),
-            revisions=revisions,
-        )
-        if len(revisions) >= 3:
-            state.prohibited_mechanisms.add(revision.mechanism)
-        if len(revisions) >= 4:
-            state.runtime_metrics["root_recovery_required"] = True
-            state.runtime_metrics["root_recovery_failure_signature"] = (
-                packet.failure_signature
-            )
     state.repair_history.append(certificate)
     state.transition_index += 1
     state.transition_phase(

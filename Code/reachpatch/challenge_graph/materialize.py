@@ -411,10 +411,11 @@ def record_execution(
         OutcomeStatus.PASS: ChallengeTerminalStatus.PASS,
         OutcomeStatus.FAIL: ChallengeTerminalStatus.FAIL,
         OutcomeStatus.UNKNOWN: ChallengeTerminalStatus.UNKNOWN_EXECUTION,
-        OutcomeStatus.BLOCKED: ChallengeTerminalStatus.BLOCKED_EXTERNAL,
-        OutcomeStatus.FLAKY: ChallengeTerminalStatus.FLAKY,
-        OutcomeStatus.BLOCKED_EXTERNAL: ChallengeTerminalStatus.BLOCKED_EXTERNAL,
-        OutcomeStatus.UNSUPPORTED: ChallengeTerminalStatus.UNSUPPORTED,
+        OutcomeStatus.UNKNOWN_ORACLE: ChallengeTerminalStatus.ORACLE_UNAVAILABLE,
+        OutcomeStatus.BLOCKED: ChallengeTerminalStatus.ENVIRONMENT_BLOCKED,
+        OutcomeStatus.FLAKY: ChallengeTerminalStatus.UNSTABLE,
+        OutcomeStatus.BLOCKED_EXTERNAL: ChallengeTerminalStatus.ENVIRONMENT_BLOCKED,
+        OutcomeStatus.UNSUPPORTED: ChallengeTerminalStatus.EXPLORATION_ONLY,
     }
     terminal = mapping.get(bundle.status, ChallengeTerminalStatus.UNKNOWN_EXECUTION)
     return challenge_graph.update_cell(
@@ -469,7 +470,11 @@ def execute_challenges(
         if cell.trigger_recipe_id is None or cell.scenario_id is None:
             challenge_graph.update_cell(
                 challenge_id,
-                terminal_status=ChallengeTerminalStatus.UNKNOWN_EXECUTION,
+                terminal_status=(
+                    ChallengeTerminalStatus.ORACLE_UNAVAILABLE
+                    if cell.oracle_id is None
+                    else ChallengeTerminalStatus.UNREACHABLE
+                ),
                 stability_status="NOT_MATERIALIZED",
             )
             skipped.append(challenge_id)

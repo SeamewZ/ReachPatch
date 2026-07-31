@@ -26,6 +26,7 @@ _ALLOWED = {
     ControllerPhase.MECHANICAL_VALIDATE: {
         ControllerPhase.ACTIVE_GRAPH_BUILD,
         ControllerPhase.COUNTEREXAMPLE_FEEDBACK,
+        ControllerPhase.REPAIR_GENERATION,
         ControllerPhase.TRANSITION_GATE,
         ControllerPhase.SEALED,
     },

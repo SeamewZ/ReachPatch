@@ -2,16 +2,42 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from reachpatch.evidence import build_semantic_graph, freeze_assignment
+from reachpatch.evidence import (
+    build_hypothesis_set, build_semantic_graph, freeze_assignment,
+)
 from reachpatch.models.enums import Authority, RequirementAuthorityClass
-from reachpatch.program_graph import PythonProgramGraphBuilder
-from reachpatch.requirement_graph import compile_assignment_overlay, compile_requirement_paths
+from reachpatch.program_graph import (
+    Deadline, PythonProgramGraphBuilder, build_repository_index,
+)
+from reachpatch.requirement_graph import (
+    compile_assignment_overlay, compile_requirement_core,
+    compile_requirement_paths,
+)
 from reachpatch.requirement_graph.authority import apply_authority_change
 from reachpatch.requirement_graph.closure import requirement_path_closure
 from reachpatch.requirement_graph.domains import promote_program_predicates
 
 
 FIXTURE = Path(__file__).parents[1] / "fixtures" / "simple_repo"
+
+
+def test_requirement_core_uses_a_noncertifying_leaf_fallback():
+    issue = "Improve the public API documentation wording."
+    semantic = build_semantic_graph(issue).graph
+    hypotheses = build_hypothesis_set(semantic)
+    index = build_repository_index(
+        FIXTURE, max_files=20, deadline=Deadline.after(5),
+    )
+
+    graph = compile_requirement_core(
+        semantic, hypotheses, index, issue_text=issue,
+    )
+
+    assert len(graph.leaves) == 1
+    assert graph.build_stats["fallback_used"] == 1
+    leaf = next(iter(graph.leaves.values()))
+    assert leaf.formula == issue
+    assert leaf.coverage_status == "NEEDS_GENERATOR_INTERPRETATION"
 
 
 def test_six_stage_requirement_expansion_and_reverse_domain_promotion():

@@ -15,13 +15,16 @@ from reachpatch.execution.models import (
     EnvironmentFrontier, EnvironmentHealth, EnvironmentHealthStatus,
     ExecutableCheck, RejectedCheck,
 )
-from reachpatch.execution.target_recovery import TargetRecoveryResult
-from reachpatch.execution.target_recovery import TargetCandidate
+from reachpatch.execution.target_recovery import (
+    TargetCandidate,
+    TargetCertification,
+    TargetRecoveryResult,
+)
 from reachpatch.challenge_graph.recipes import (
     InputRecipe, ResourceLimits, TraceSpec,
 )
 from reachpatch.evidence.hypotheses import HypothesisAssignment, HypothesisSet
-from reachpatch.models.controller import UnitOutcome
+from reachpatch.models.controller import ExecutableOracle, UnitOutcome
 from reachpatch.models.core import Frontier
 from reachpatch.models.enums import (
     Authority, ChallengeTerminalStatus, LedgerStatus, OracleLifecycle,
@@ -367,7 +370,7 @@ def conversation_from_dict(raw: dict[str, Any]) -> GeneratorConversation:
 def executable_check_from_dict(raw: dict[str, Any]) -> ExecutableCheck:
     values = _tuple_fields(raw, (
         "command", "source_evidence_ids", "target_requirement_ids",
-        "temporary_artifact_paths",
+        "temporary_artifact_paths", "executed_symbol_ids",
     ))
     values["role"] = CheckRole(values["role"])
     values["environment"] = dict(values.get("environment", {}))
@@ -409,8 +412,46 @@ def environment_frontier_from_dict(raw: dict[str, Any]) -> EnvironmentFrontier:
 def target_recovery_from_dict(raw: dict[str, Any]) -> TargetRecoveryResult:
     def _candidate(item: dict[str, Any]) -> TargetCandidate:
         values = dict(item)
-        values["setup_commands"] = tuple(values.get("setup_commands", ()))
-        values["source_evidence"] = tuple(values.get("source_evidence", ()))
+        old_authority = str(values.pop("authority", ""))
+        old_relation = values.pop("expected_relation", None)
+        old_evidence = values.pop("source_evidence", ())
+        values.setdefault("input_source", "LEGACY_ARTIFACT")
+        values.setdefault("oracle_authority", old_authority or "E")
+        values["setup_commands"] = tuple(
+            tuple(command) if not isinstance(command, str) else (command,)
+            for command in values.get("setup_commands", ())
+        )
+        command = values.get("command", ())
+        values["command"] = (
+            tuple(command) if not isinstance(command, str)
+            else tuple(command.split())
+        )
+        values["source_evidence_ids"] = tuple(
+            values.get("source_evidence_ids", old_evidence)
+        )
+        values["target_requirement_ids"] = tuple(
+            values.get("target_requirement_ids", ())
+        )
+        values["executed_symbol_ids"] = tuple(
+            values.get("executed_symbol_ids", ())
+        )
+        oracle = values.get("oracle")
+        if isinstance(oracle, dict):
+            values["oracle"] = ExecutableOracle(**oracle)
+        elif oracle is None and isinstance(old_relation, dict):
+            relation = str(
+                old_relation.get("relation", old_relation.get("kind", ""))
+            )
+            values["oracle"] = (
+                ExecutableOracle(
+                    oracle_id=str(
+                        old_relation.get("oracle_id", values["target_id"])
+                    ),
+                    authority=values["oracle_authority"],
+                    relation=relation,
+                    requirement_id=old_relation.get("requirement_id"),
+                ) if relation else None
+            )
         contract = values.get("observation_contract")
         if isinstance(contract, dict):
             values["observation_contract"] = _observation(contract)
@@ -445,6 +486,10 @@ def target_recovery_from_dict(raw: dict[str, Any]) -> TargetRecoveryResult:
         ),
         elapsed_seconds=float(raw.get("elapsed_seconds", 0.0)),
         timed_out=bool(raw.get("timed_out", False)),
+        certifications=tuple(
+            TargetCertification(**item)
+            for item in raw.get("certifications", ())
+        ),
     )
 
 

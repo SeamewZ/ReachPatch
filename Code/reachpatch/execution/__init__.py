@@ -27,11 +27,14 @@ from .models import (
 from .worktree import TransactionalTrial, WorktreeManager
 from .target_recovery import (
     TargetCandidate,
+    TargetCertification,
     TargetRecoveryResult,
     TargetRecoveryStatus,
     is_executable_test_path,
     recover_executable_targets,
     recover_executable_targets_bounded,
+    certify_target,
+    certify_recovered_targets,
 )
 from .runners import (
     AstropyRunner,
@@ -74,6 +77,7 @@ __all__ = [
     "SymPyRunner",
     "TransactionalTrial",
     "TargetCandidate",
+    "TargetCertification",
     "TargetRecoveryResult",
     "TargetRecoveryStatus",
     "WorktreeManager",
@@ -84,5 +88,7 @@ __all__ = [
     "select_project_runner",
     "recover_executable_targets",
     "recover_executable_targets_bounded",
+    "certify_target",
+    "certify_recovered_targets",
     "is_executable_test_path",
 ]

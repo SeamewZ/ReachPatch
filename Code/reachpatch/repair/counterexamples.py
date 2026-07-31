@@ -16,6 +16,33 @@ from reachpatch.models.controller import CounterexamplePacket, ReachAvoidState
 from reachpatch.models.enums import ChallengeTerminalStatus, OutcomeStatus
 
 
+def challenge_is_confirmed(cell, scenario, bundle, binding_unit) -> bool:
+    """Certify a diff-neighborhood challenge from actual paired execution."""
+
+    oracle = getattr(scenario, "oracle", None)
+    authority = str(getattr(getattr(oracle, "authority", None), "value", ""))
+    base_runs = tuple(getattr(getattr(bundle, "base_bundle", None), "runs", ()))
+    patch_runs = tuple(getattr(getattr(bundle, "patch_bundle", None), "runs", ()))
+    return bool(
+        cell is not None
+        and cell.terminal_status == ChallengeTerminalStatus.FAIL
+        and oracle is not None
+        and authority in {"A", "B", "C"}
+        and getattr(oracle, "executable", False)
+        and bundle is not None
+        and getattr(bundle, "stability_status", "") == "STABLE"
+        and len(base_runs) >= 2
+        and len(patch_runs) >= 2
+        and getattr(cell, "baseline_outcome", None) == "PASS"
+        and getattr(cell, "patched_outcome", None) == "FAIL"
+        and binding_unit is not None
+        and bool(
+            getattr(binding_unit, "changed_hunk_ids", ())
+            or getattr(binding_unit, "program_symbol_ids", ())
+        )
+    )
+
+
 def _shrink_values(value: Any) -> list[Any]:
     candidates: list[Any] = []
     if isinstance(value, bool):
@@ -152,6 +179,7 @@ def counterexample_from_challenge(
         failure_origin = origins[0] if origins and len(set(origins)) == 1 else "UNSTABLE_ORIGIN"
         first_divergence = paired.first_divergence
     expected = scenario.oracle.relation if scenario is not None else None
+    confirmed = challenge_is_confirmed(cell, scenario, paired, unit)
     actual = {
         "baseline": base_observation,
         "patched": patch_observation,
@@ -229,11 +257,11 @@ def counterexample_from_challenge(
             item.path_obligation_id for item in state.outcomes.values()
             if item.status == OutcomeStatus.PASS
         )),
-        environment_valid=cell.terminal_status not in {
-            ChallengeTerminalStatus.BLOCKED_EXTERNAL,
-            ChallengeTerminalStatus.UNKNOWN_EXECUTION,
-            ChallengeTerminalStatus.UNSUPPORTED,
-        },
+        environment_valid=confirmed,
+        authority=(
+            str(getattr(scenario.oracle.authority, "value", ""))
+            if scenario is not None else ""
+        ),
     )
 
 
@@ -401,11 +429,7 @@ def packets_for_nonpass_challenges(
         cell = challenge_graph.cells[challenge_id]
         if cell.terminal_status == ChallengeTerminalStatus.PASS:
             continue
-        if cell.terminal_status in {
-            ChallengeTerminalStatus.BLOCKED_EXTERNAL,
-            ChallengeTerminalStatus.UNKNOWN_EXECUTION,
-            ChallengeTerminalStatus.UNSUPPORTED,
-        }:
+        if cell.terminal_status != ChallengeTerminalStatus.FAIL:
             continue
         minimized_recipe = None
         minimized_bundle = None

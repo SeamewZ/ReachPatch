@@ -53,6 +53,154 @@ class WorkingPatch(SerializableRecord):
 
 
 @dataclass(frozen=True, slots=True)
+class ExecutableOracle(SerializableRecord):
+    """Mechanically evaluable relation attached to one locked check."""
+
+    oracle_id: str
+    authority: str
+    relation: str
+    requirement_id: str | None = None
+    is_executable: bool = True
+
+
+@dataclass(frozen=True, slots=True)
+class EvidenceVector(SerializableRecord):
+    confirmed_target_pass_count: int = 0
+    confirmed_target_failure_count: int = 0
+    confirmed_preservation_regression_count: int = 0
+    confirmed_counterexample_count: int = 0
+    mechanical_failure_count: int = 0
+    execution_confirmed_requirement_count: int = 0
+
+
+@dataclass(frozen=True, slots=True)
+class ConfirmedFailure(SerializableRecord):
+    failure_id: str
+    kind: str
+    check_id: str
+    oracle_authority: str
+    requirement_id: str | None
+    binding_unit_id: str | None
+    baseline_observation: Any
+    before_patch_observation: Any
+    expected_relation: ExecutableOracle
+    stable_runs: int
+    failure_signature: str
+    failure_location: str | None
+    causal_cut_ids: tuple[str, ...]
+    impact_risk_ids: tuple[str, ...]
+
+
+@dataclass(frozen=True, slots=True)
+class LockedCheck(SerializableRecord):
+    check_id: str
+    role: str
+    command: tuple[str, ...]
+    observation_contract: Any
+    oracle: ExecutableOracle
+    authority: str
+    requirement_ids: tuple[str, ...]
+    cwd: str = ""
+    environment: dict[str, str] = field(default_factory=dict)
+    timeout_seconds: float = 60.0
+    source_evidence_ids: tuple[str, ...] = ()
+    baseline_observation: Any = None
+    input_recipe: Any = None
+    executable_scenario: Any = None
+    baseline_repository: str = ""
+
+
+@dataclass(frozen=True, slots=True)
+class LockedCheckSet(SerializableRecord):
+    lock_id: str
+    target_checks: tuple[LockedCheck, ...] = ()
+    preservation_checks: tuple[LockedCheck, ...] = ()
+    counterexample_checks: tuple[LockedCheck, ...] = ()
+    mechanical_checks: tuple[LockedCheck, ...] = ()
+
+    def all_checks(self) -> tuple[LockedCheck, ...]:
+        result: list[LockedCheck] = []
+        seen: set[str] = set()
+        for check in (
+            *self.target_checks,
+            *self.preservation_checks,
+            *self.counterexample_checks,
+            *self.mechanical_checks,
+        ):
+            if check.check_id in seen:
+                continue
+            seen.add(check.check_id)
+            result.append(check)
+        return tuple(result)
+
+
+@dataclass(frozen=True, slots=True)
+class PatchCheckpoint(SerializableRecord):
+    checkpoint_id: str
+    revision: int
+    patch: WorkingPatch
+    patch_hash: str
+    evidence_vector: EvidenceVector
+    executed_check_ids: tuple[str, ...]
+    confirmed_target_pass_ids: tuple[str, ...]
+    confirmed_target_failure_ids: tuple[str, ...]
+    preservation_regression_ids: tuple[str, ...]
+    mechanical_failure_ids: tuple[str, ...]
+    parent_checkpoint_id: str | None
+    status: str
+    snapshot_tree: str = ""
+
+
+@dataclass(frozen=True, slots=True)
+class RevisionRecord(SerializableRecord):
+    revision_id: str
+    failure_id: str
+    action_id: str
+    mechanism_id: str
+    source_checkpoint_id: str
+    trial_checkpoint_id: str
+    locked_check_set_id: str
+    executed_check_ids: tuple[str, ...]
+    decision: str
+    reason: str
+    promoted: bool
+    rolled_back: bool
+
+
+@dataclass(slots=True)
+class PatchTrajectory(SerializableRecord):
+    first_patch: PatchCheckpoint
+    best_evidence_patch: PatchCheckpoint
+    working_patch: PatchCheckpoint
+    trial_patch: PatchCheckpoint | None
+    locked_checks: dict[str, LockedCheck]
+    confirmed_failures: list[ConfirmedFailure]
+    revision_history: list[RevisionRecord]
+    regression_repair_attempts: int = 0
+    checkpoint_archive: dict[str, PatchCheckpoint] = field(default_factory=dict)
+
+
+@dataclass(frozen=True, slots=True)
+class TrialComparison(SerializableRecord):
+    comparison_id: str
+    lock_id: str
+    before_patch_hash: str
+    after_patch_hash: str
+    before_results: tuple[Any, ...]
+    after_results: tuple[Any, ...]
+    executed_check_ids: tuple[str, ...]
+    comparable: bool
+    confirmed_target_pass_before: tuple[str, ...] = ()
+    confirmed_target_pass_after: tuple[str, ...] = ()
+    confirmed_target_failure_before: tuple[str, ...] = ()
+    confirmed_target_failure_after: tuple[str, ...] = ()
+    preservation_regressions_before: tuple[str, ...] = ()
+    preservation_regressions_after: tuple[str, ...] = ()
+    mechanical_failures_after: tuple[str, ...] = ()
+    unknown_check_ids: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True, slots=True)
 class IncumbentCheckpoint(SerializableRecord):
     checkpoint_id: str
     parent_checkpoint_id: str | None
@@ -254,11 +402,24 @@ class MechanismAttempt(SerializableRecord):
 
 @dataclass(frozen=True, slots=True)
 class FailureHistory(SerializableRecord):
-    signature: str
-    attempted_mechanisms: tuple[str, ...]
-    affected_symbols: tuple[str, ...]
+    failure_signature: str
+    attempted_mechanism_ids: tuple[str, ...]
     causal_cut_ids: tuple[str, ...]
-    revisions: tuple[int, ...]
+    revision_ids: tuple[str, ...]
+    confirmed_outcomes: tuple[str, ...]
+    affected_symbol_ids: tuple[str, ...] = ()
+
+    @property
+    def signature(self) -> str:
+        return self.failure_signature
+
+    @property
+    def attempted_mechanisms(self) -> tuple[str, ...]:
+        return self.attempted_mechanism_ids
+
+    @property
+    def affected_symbols(self) -> tuple[str, ...]:
+        return self.affected_symbol_ids
 
 
 @dataclass(frozen=True, slots=True)
@@ -422,6 +583,10 @@ class ReachAvoidState:
     observations: Any | None = None
     requirement_coverage: Any | None = None
     verified_safe_patch: WorkingPatch | None = None
+    patch_trajectory: PatchTrajectory | None = None
+    checkpoint_history: dict[str, IncumbentCheckpoint] = field(default_factory=dict)
+    confirmed_failures: list[ConfirmedFailure] = field(default_factory=list)
+    current_locked_check_set: LockedCheckSet | None = None
     failure_histories: dict[str, Any] = field(default_factory=dict)
     prohibited_mechanisms: set[str] = field(default_factory=set)
     unresolved_frontier: list[Any] = field(default_factory=list)
@@ -564,6 +729,21 @@ class ReachAvoidState:
             "verified_safe_patch": (
                 self.verified_safe_patch.to_dict()
                 if self.verified_safe_patch is not None else None
+            ),
+            "patch_trajectory": (
+                self.patch_trajectory.to_dict()
+                if self.patch_trajectory is not None else None
+            ),
+            "checkpoint_history": {
+                key: value.to_dict()
+                for key, value in sorted(self.checkpoint_history.items())
+            },
+            "confirmed_failures": [
+                item.to_dict() for item in self.confirmed_failures
+            ],
+            "current_locked_check_set": (
+                self.current_locked_check_set.to_dict()
+                if self.current_locked_check_set is not None else None
             ),
             "failure_histories": {
                 key: value.to_dict() if hasattr(value, "to_dict") else value

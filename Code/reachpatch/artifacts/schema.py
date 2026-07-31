@@ -92,6 +92,15 @@ for _artifact_type, _fields in {
     ),
     "terminal_certificate": ("instance_id", "status", "final_diff_hash"),
     "working_patch": ("version", "canonical_diff", "canonical_diff_hash"),
+    "patch_checkpoint": (
+        "checkpoint_id", "revision", "patch", "patch_hash",
+        "evidence_vector", "executed_check_ids", "status",
+    ),
+    "patch_trajectory": (
+        "first_patch", "best_evidence_patch", "working_patch",
+        "locked_checks", "confirmed_failures", "revision_history",
+        "checkpoint_archive",
+    ),
     "adapter_observation": ("adapter", "marker_paths", "status"),
     "diff_closure_certificate": ("closure_id", "update_id", "diff_challenge_closed"),
     "generator_session": ("session_id", "current_checkpoint_id", "cursor"),

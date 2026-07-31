@@ -12,15 +12,19 @@ if TYPE_CHECKING:
 
 class ActiveBindingStatus(StrEnum):
     UNBOUND = "UNBOUND"
-    BOUND_STATIC = "BOUND_STATIC"
-    BOUND_EXECUTABLE = "BOUND_EXECUTABLE"
-    FAILING = "FAILING"
-    PASSING = "PASSING"
+    STATIC_ACTIONABLE = "STATIC_ACTIONABLE"
+    EXECUTION_CONFIRMED = "EXECUTION_CONFIRMED"
+    TARGET_FAILING = "TARGET_FAILING"
+    TARGET_PASSING = "TARGET_PASSING"
     PRESERVATION_RISK = "PRESERVATION_RISK"
     COUNTEREXAMPLE_OPEN = "COUNTEREXAMPLE_OPEN"
     ORACLE_UNAVAILABLE = "ORACLE_UNAVAILABLE"
     ENVIRONMENT_BLOCKED = "ENVIRONMENT_BLOCKED"
     UNKNOWN = "UNKNOWN"
+    BOUND_STATIC = "STATIC_ACTIONABLE"
+    BOUND_EXECUTABLE = "EXECUTION_CONFIRMED"
+    FAILING = "TARGET_FAILING"
+    PASSING = "TARGET_PASSING"
 
 
 @dataclass(frozen=True, slots=True)
@@ -407,7 +411,50 @@ def _program_hash(graph: Any) -> str:
     return str(method()) if callable(method) else content_hash(graph)
 
 
-def _candidate_symbols(leaf: Any, program: Any, changed_files: set[str]) -> tuple[str, ...]:
+def recover_direct_callers(
+    graph: Any,
+    seed_symbols: set[str],
+    max_depth: int,
+    max_callers: int = 30,
+) -> tuple[str, ...]:
+    """Bounded reverse caller BFS over calls and consumer edges."""
+
+    visited = set(map(str, seed_symbols))
+    frontier = set(visited)
+    callers: list[str] = []
+    accepted = {
+        "calls", "may_call", "dispatch", "protocol_selected", "return_flow",
+        "field_flow", "exception_flow", "state_read", "state_write",
+        "CALLS", "DISPATCHES_TO", "RETURNS_TO", "READS_VALUE_FROM",
+        "HANDLES_EXCEPTION_FROM",
+    }
+    for _depth in range(max(0, int(max_depth))):
+        next_frontier: set[str] = set()
+        for node_id in sorted(frontier):
+            for edge in graph.incoming(node_id):
+                if str(edge.kind) not in accepted:
+                    continue
+                for caller in edge.source_ids:
+                    caller = str(caller)
+                    if caller in visited:
+                        continue
+                    visited.add(caller)
+                    next_frontier.add(caller)
+                    callers.append(caller)
+                    if len(callers) >= max_callers:
+                        return tuple(callers)
+        if not next_frontier:
+            break
+        frontier = next_frontier
+    return tuple(callers)
+
+
+def _candidate_symbols(
+    leaf: Any,
+    program: Any,
+    changed_files: set[str],
+    direct_caller_depth: int = 2,
+) -> tuple[str, ...]:
     names = list(map(str, getattr(leaf, "entrypoint_hypotheses", ())))
     text_tokens = {
         token.strip("`()[]{}.,:;'")
@@ -423,7 +470,11 @@ def _candidate_symbols(leaf: Any, program: Any, changed_files: set[str]) -> tupl
             break
     for relative in sorted(changed_files):
         candidates.extend(map(str, getattr(program, "file_index", {}).get(relative, ())))
-    return tuple(dict.fromkeys(candidates))[:40]
+    seed_symbols = set(dict.fromkeys(candidates))
+    callers = recover_direct_callers(
+        program, seed_symbols, direct_caller_depth,
+    ) if seed_symbols and hasattr(program, "incoming") else ()
+    return tuple(dict.fromkeys((*candidates, *callers)))[:40]
 
 
 def _path_projection(program: Any, symbol_ids: tuple[str, ...]) -> tuple[tuple[str, ...], tuple[str, ...]]:
@@ -476,29 +527,85 @@ def _hunks_for_symbols(
     )
 
 
+def check_binds_requirement(
+    check: Any,
+    requirement: Any,
+    binding_unit: Any,
+) -> bool:
+    requirement_id = _leaf_id(requirement)
+    evidence = set(_leaf_evidence(requirement))
+    requirement_ids = set(map(str, getattr(check, "target_requirement_ids", ())))
+    source_evidence = set(map(str, getattr(check, "source_evidence_ids", ())))
+    executed_symbols = set(map(str, getattr(check, "executed_symbol_ids", ())))
+    bound_symbols = set(map(str, getattr(binding_unit, "program_symbol_ids", ())))
+    bound_symbols.update(map(
+        str, getattr(binding_unit, "program_symbol_names", ()),
+    ))
+    symbol_execution_overlap = any(
+        executed == bound
+        or executed.endswith("." + bound)
+        or bound.endswith("." + executed)
+        for executed in executed_symbols
+        for bound in bound_symbols
+        if executed and bound
+    )
+    oracle = getattr(check, "oracle", None)
+    return any((
+        requirement_id in requirement_ids,
+        bool(source_evidence & evidence),
+        symbol_execution_overlap,
+        getattr(oracle, "requirement_id", None) == requirement_id,
+    ))
+
+
 def _check_projection(
-    leaf: Any, target_recovery: Any, public_tests: Iterable[Any]
+    leaf: Any,
+    target_recovery: Any,
+    public_tests: Iterable[Any],
+    *,
+    symbol_ids: tuple[str, ...] = (),
+    program: Any | None = None,
 ) -> tuple[tuple[str, ...], tuple[str, ...], tuple[str, ...]]:
-    text = _leaf_text(leaf).lower()
-    evidence = set(_leaf_evidence(leaf))
     target: list[str] = []
     preservation: list[str] = []
     challenge: list[str] = []
-    checks = (
+    projected_checks = (
         *getattr(target_recovery, "targets", ()),
         *getattr(target_recovery, "preservation_checks", ()),
         *tuple(public_tests),
     )
+    checks = tuple({
+        str(getattr(check, "check_id", check)): check
+        for check in projected_checks
+    }.values())
+    symbol_names = tuple(dict.fromkeys(
+        str(getattr(program, "nodes", {}).get(symbol_id).attributes.get(
+            "qualified_name",
+            getattr(program, "nodes", {}).get(symbol_id).label,
+        ))
+        for symbol_id in symbol_ids
+        if getattr(program, "nodes", {}).get(symbol_id) is not None
+    ))
+    binding_view = type("BindingProjection", (), {
+        "program_symbol_ids": symbol_ids,
+        "program_symbol_names": symbol_names,
+    })()
+    candidate_by_id = {
+        item.target_id: item
+        for item in getattr(target_recovery, "candidates", ())
+    }
     for check in checks:
         check_id = str(getattr(check, "check_id", check))
-        source = set(map(str, getattr(check, "source_evidence_ids", ())))
-        requirement_ids = set(map(str, getattr(check, "target_requirement_ids", ())))
-        relevant = (
-            _leaf_id(leaf) in requirement_ids
-            or bool(evidence & source)
-            or any(token in str(check).lower() for token in text.split() if len(token) >= 5)
-        )
-        if not relevant and (target or preservation):
+        candidate = candidate_by_id.get(check_id)
+        projected_check = check
+        if candidate is not None and not getattr(check, "executed_symbol_ids", ()):
+            projected_check = type("CheckProjection", (), {
+                "target_requirement_ids": getattr(check, "target_requirement_ids", ()),
+                "source_evidence_ids": getattr(check, "source_evidence_ids", ()),
+                "executed_symbol_ids": candidate.executed_symbol_ids,
+                "oracle": candidate.oracle,
+            })()
+        if not check_binds_requirement(projected_check, leaf, binding_view):
             continue
         role = getattr(getattr(check, "role", None), "value", getattr(check, "role", ""))
         if role == "TARGET":
@@ -511,30 +618,142 @@ def _check_projection(
 
 
 def _causal_cuts(
-    diff: ActualDiff, symbol_ids: tuple[str, ...], target_checks: tuple[str, ...]
+    diff: ActualDiff,
+    program: Any,
+    symbol_ids: tuple[str, ...],
+    target_checks: tuple[str, ...],
+    failure_locations: dict[str, Any] | None = None,
 ) -> tuple[str, ...]:
-    scopes = {relation.qualified_scope for relation in diff.changed_relations}
-    priority = {
-        "return": 0,
-        "guard": 1,
-        "dispatch": 2,
-        "state": 3,
-        "exception": 4,
-        "call": 5,
-        "assignment": 6,
+    failure_locations = failure_locations or {}
+    if not failure_locations:
+        # Before an execution trace exists this is localization, not evidence
+        # that any particular changed relation caused a failure.  Keep the cut
+        # anchored to editable nodes in the bounded requirement/diff slice so a
+        # later ConfirmedFailure and EditScopeGate share stable source IDs.
+        changed_files = set(diff.changed_files)
+        changed_scopes = {
+            str(relation.qualified_scope)
+            for relation in diff.changed_relations
+            if relation.qualified_scope
+        }
+        localized: list[tuple[int, int, int, int, str]] = []
+        for node_id in symbol_ids:
+            node = getattr(program, "nodes", {}).get(node_id)
+            if node is None:
+                continue
+            relative = str(node.attributes.get("file", ""))
+            qualified = str(node.attributes.get("qualified_name", node.label))
+            if not relative or relative.startswith(("<", "/")):
+                continue
+            intersects_scope = any(
+                qualified == scope
+                or qualified.endswith("." + scope)
+                or scope.endswith("." + qualified)
+                for scope in changed_scopes
+            )
+            kind = str(node.kind).lower()
+            observation_node = any(token in kind for token in (
+                "return", "branch", "predicate", "guard", "dispatch",
+                "state", "exception", "call", "assignment", "expression",
+            ))
+            localized.append((
+                0 if intersects_scope else 1,
+                0 if relative in changed_files else 1,
+                0 if observation_node else 1,
+                int(node.attributes.get("line", 0) or 0),
+                str(node_id),
+            ))
+        return tuple(
+            node_id for _scope, _file, _kind, _line, node_id
+            in sorted(localized)[:8]
+        )
+
+    sink_ids: set[str] = set()
+    for location in failure_locations.values():
+        if not isinstance(location, dict):
+            continue
+        relative = str(location.get("relative_path", ""))
+        symbol = str(location.get("symbol", ""))
+        line = int(location.get("line", 0) or 0)
+        for node_id, node in getattr(program, "nodes", {}).items():
+            node_file = str(node.attributes.get("file", ""))
+            node_symbol = str(node.attributes.get("qualified_name", node.label))
+            start = int(node.attributes.get("line", 0) or 0)
+            end = int(node.attributes.get("end_line", start) or start)
+            if relative and node_file != relative:
+                continue
+            if symbol and not (
+                node_symbol == symbol or node_symbol.endswith("." + symbol)
+            ):
+                if not (line and start <= line <= end):
+                    continue
+            elif line and not (start <= line <= end):
+                continue
+            sink_ids.add(str(node_id))
+    if not sink_ids:
+        sink_ids.update(symbol_ids)
+    allowed_edges = {
+        "data_flow", "def_use", "control_dependency", "parameter_flow",
+        "return_flow", "calls", "may_call", "dispatch", "state_read",
+        "state_write", "field_flow", "exception_flow", "raises", "catches",
     }
-    related = sorted(
-        diff.changed_relations,
-        key=lambda relation: (
-            min((rank for kind, rank in priority.items() if kind in relation.kind), default=9),
-            relation.relation_id,
-        ),
+    visited = set(sink_ids)
+    distance = {node_id: 0 for node_id in sink_ids}
+    frontier = set(sink_ids)
+    for depth in range(1, 6):
+        next_frontier: set[str] = set()
+        for node_id in sorted(frontier):
+            for edge in getattr(program, "incoming", lambda *_: ())(node_id):
+                if str(edge.kind) not in allowed_edges:
+                    continue
+                for source_id in edge.source_ids:
+                    source_id = str(source_id)
+                    if source_id in visited:
+                        continue
+                    visited.add(source_id)
+                    distance[source_id] = depth
+                    next_frontier.add(source_id)
+                    if len(visited) >= 80:
+                        break
+                if len(visited) >= 80:
+                    break
+            if len(visited) >= 80:
+                break
+        frontier = next_frontier
+        if not frontier or len(visited) >= 80:
+            break
+    changed_files = set(diff.changed_files)
+    changed_scopes = {
+        relation.qualified_scope for relation in diff.changed_relations
+    }
+    ranked: list[tuple[int, int, str]] = []
+    for node_id in visited:
+        node = getattr(program, "nodes", {}).get(node_id)
+        if node is None:
+            continue
+        relative = str(node.attributes.get("file", ""))
+        qualified = str(node.attributes.get("qualified_name", node.label))
+        editable = bool(relative and not relative.startswith(("<", "/")))
+        if not editable:
+            continue
+        kind = str(node.kind).lower()
+        score = (
+            4 * int(node_id in sink_ids)
+            + 3 * int(any(token in kind for token in ("branch", "predicate", "guard")))
+            + 3 * int(any(token in kind for token in ("return", "assignment", "expression")))
+            + 2 * int(node_id in symbol_ids)
+            + 2 * int(
+                relative in changed_files
+                or qualified in changed_scopes
+                or any(qualified.endswith("." + scope) for scope in changed_scopes)
+            )
+            - 2 * int(bool(node.attributes.get("public_api", False)))
+            - distance.get(node_id, 5)
+        )
+        ranked.append((score, -distance.get(node_id, 5), node_id))
+    return tuple(
+        node_id for _score, _distance, node_id in sorted(ranked, reverse=True)[:8]
     )
-    cuts = [relation.relation_id for relation in related[:8]]
-    if not cuts and target_checks:
-        cuts.extend(stable_id("causal-cut", check_id, symbol_ids) for check_id in target_checks)
-    del scopes
-    return tuple(cuts)
 
 
 def _impact_cone(
@@ -575,13 +794,26 @@ def build_active_binding_graph(
     active_slice_max_symbols: int = 40,
     direct_caller_depth: int = 2,
     impact_cone_depth: int = 2,
+    failure_locations: dict[str, Any] | None = None,
 ) -> ActiveBindingGraph:
     """Project requirements, the actual diff, bounded paths, and real checks."""
 
-    del direct_caller_depth
     if active_slice_max_files < 1 or active_slice_max_symbols < 1:
         raise ValueError("active slice bounds must be positive")
     selected_files = set(diff_analysis.changed_files[:active_slice_max_files])
+    public_tests = tuple(public_tests)
+    projected_checks = tuple((
+        *getattr(target_recovery, "targets", ()),
+        *getattr(target_recovery, "preservation_checks", ()),
+        *public_tests,
+    ))
+    checks_by_id = {
+        str(getattr(check, "check_id", check)): check for check in projected_checks
+    }
+    candidates_by_id = {
+        str(item.target_id): item
+        for item in getattr(target_recovery, "candidates", ())
+    }
     resolved_instance_id = instance_id or getattr(
         previous_graph, "instance_id", getattr(requirement_graph, "assignment_id", "unknown")
     )
@@ -594,16 +826,23 @@ def build_active_binding_graph(
     for leaf in _requirement_leaves(requirement_graph):
         requirement_id = _leaf_id(leaf)
         binding_id = stable_id("active-binding", resolved_instance_id, requirement_id)
-        symbols = _candidate_symbols(leaf, program_slice, selected_files)[:active_slice_max_symbols]
+        symbols = _candidate_symbols(
+            leaf, program_slice, selected_files,
+            direct_caller_depth=direct_caller_depth,
+        )[:active_slice_max_symbols]
         path_ids, branch_ids = _path_projection(program_slice, symbols)
         protocol_ids = _protocol_projection(program_slice, symbols)
         hunk_ids = _hunks_for_symbols(diff_analysis, program_slice, symbols)
         if not hunk_ids and len(_requirement_leaves(requirement_graph)) == 1:
             hunk_ids = tuple(hunk.hunk_id for hunk in diff_analysis.hunks)
         target_ids, preservation_ids, challenge_ids = _check_projection(
-            leaf, target_recovery, public_tests
+            leaf, target_recovery, public_tests,
+            symbol_ids=symbols, program=program_slice,
         )
-        cuts = _causal_cuts(diff_analysis, symbols, target_ids)
+        cuts = _causal_cuts(
+            diff_analysis, program_slice, symbols, target_ids,
+            failure_locations=failure_locations,
+        )
         impacts = _impact_cone(
             diff_analysis, program_slice, symbols, depth=impact_cone_depth
         )
@@ -622,8 +861,20 @@ def build_active_binding_graph(
                 ),
             ))
         elif target_ids or preservation_ids or challenge_ids:
-            status = ActiveBindingStatus.BOUND_EXECUTABLE.value
+            status = ActiveBindingStatus.EXECUTION_CONFIRMED.value
             reason = None
+        elif cuts:
+            status = ActiveBindingStatus.STATIC_ACTIONABLE.value
+            reason = "static localization is available but no trusted executable oracle is bound"
+            gaps.append(BindingGap(
+                requirement_id=requirement_id,
+                gap_type="ORACLE_UNAVAILABLE",
+                reason=reason,
+                attempted_bindings=tuple(hunk_ids),
+                next_recovery_actions=(
+                    "derive_issue_witness", "derive_baseline_relation", "run_preservation_replay",
+                ),
+            ))
         else:
             status = ActiveBindingStatus.ORACLE_UNAVAILABLE.value
             reason = "static requirement/diff binding exists but no trusted executable oracle is available"
@@ -676,6 +927,31 @@ def build_active_binding_graph(
             edges.append(BindingEdge(binding_id, path_id, "UNIT_PATH_CLASS"))
         for check_id in (*target_ids, *preservation_ids, *challenge_ids):
             edges.append(BindingEdge(binding_id, check_id, "UNIT_EXECUTABLE_CHECK", (check_id,)))
+            check = checks_by_id.get(check_id)
+            candidate = candidates_by_id.get(check_id)
+            executed_names = set(map(str, (
+                getattr(candidate, "executed_symbol_ids", ())
+                if candidate is not None else ()
+            ))) | set(map(str, getattr(check, "executed_symbol_ids", ())))
+            for symbol_id in symbols:
+                node = getattr(program_slice, "nodes", {}).get(symbol_id)
+                if node is None:
+                    continue
+                qualified = str(node.attributes.get(
+                    "qualified_name", node.label,
+                ))
+                if any(
+                    executed == qualified
+                    or executed.endswith("." + qualified)
+                    or qualified.endswith("." + executed)
+                    for executed in executed_names
+                ):
+                    edges.append(BindingEdge(
+                        check_id,
+                        symbol_id,
+                        "CHECK_EXECUTED_SYMBOL",
+                        (check_id,),
+                    ))
         all_targets.extend(target_ids)
         all_preservation.extend(preservation_ids)
         all_challenges.extend(challenge_ids)
@@ -711,9 +987,31 @@ def build_active_binding_graph(
             ),
             "candidate_count": len(units),
             "active_count": sum(
-                unit.status == ActiveBindingStatus.BOUND_EXECUTABLE.value
+                unit.status == ActiveBindingStatus.EXECUTION_CONFIRMED.value
                 for unit in units.values()
             ),
+            "relevant_binding_count": len(units),
+            "static_actionable_count": sum(
+                unit.status == ActiveBindingStatus.STATIC_ACTIONABLE.value
+                for unit in units.values()
+            ),
+            "execution_confirmed_count": sum(
+                unit.status == ActiveBindingStatus.EXECUTION_CONFIRMED.value
+                for unit in units.values()
+            ),
+            "confirmed_failing_count": sum(
+                unit.status in {
+                    ActiveBindingStatus.TARGET_FAILING.value,
+                    ActiveBindingStatus.PRESERVATION_RISK.value,
+                    ActiveBindingStatus.COUNTEREXAMPLE_OPEN.value,
+                }
+                for unit in units.values()
+            ),
+            "confirmed_passing_count": sum(
+                unit.status == ActiveBindingStatus.TARGET_PASSING.value
+                for unit in units.values()
+            ),
+            "binding_gap_count": len(gaps),
             "deferred_count": sum(
                 unit.status in {
                     ActiveBindingStatus.UNBOUND.value,
@@ -734,18 +1032,30 @@ def _comparison_status(unit: ActiveBindingUnit, observations: Any) -> str | None
         if getattr(item, "check_id", None) in {
             *unit.target_check_ids, *unit.preservation_check_ids, *unit.challenge_check_ids,
         }
+        and bool(getattr(getattr(item, "baseline", None), "stable", False))
+        and bool(getattr(getattr(item, "patched", None), "stable", False))
+        and str(getattr(getattr(getattr(item, "baseline", None), "status", None), "value", ""))
+        in {"PASS", "FAIL"}
+        and str(getattr(getattr(getattr(item, "patched", None), "status", None), "value", ""))
+        in {"PASS", "FAIL"}
     ]
     if not relevant:
         return None
-    classifications = {
-        getattr(getattr(item, "classification", None), "value", getattr(item, "classification", ""))
+    if any(
+        getattr(getattr(item, "classification", None), "value", "")
+        == "PRESERVATION_REGRESSION"
+        and getattr(item.baseline.status, "value", "") == "PASS"
+        and getattr(item.patched.status, "value", "") == "FAIL"
         for item in relevant
-    }
-    if "PRESERVATION_REGRESSION" in classifications:
+    ):
         return ActiveBindingStatus.PRESERVATION_RISK.value
-    if classifications & {
-        "TARGET_STILL_FAILING", "TARGET_REGRESSED",
-    }:
+    if any(
+        getattr(getattr(item, "classification", None), "value", "")
+        == "TARGET_STILL_FAILING"
+        and getattr(item.baseline.status, "value", "") == "FAIL"
+        and getattr(item.patched.status, "value", "") == "FAIL"
+        for item in relevant
+    ):
         return ActiveBindingStatus.FAILING.value
     target_ids = set(unit.target_check_ids)
     target_rows = [item for item in relevant if getattr(item, "check_id", None) in target_ids]
@@ -808,6 +1118,7 @@ def update_active_binding_graph(
             preservation_check_ids=previous_graph.preservation_check_ids,
             challenge_check_ids=previous_graph.challenge_check_ids,
             history=previous_graph.history,
+            build_stats=previous_graph.build_stats,
         )
     rebuilt = 0
     reused = 0
@@ -887,5 +1198,27 @@ def update_active_binding_graph(
     candidate.build_stats.update({
         "incrementally_rebuilt_unit_count": rebuilt,
         "incrementally_reused_unit_count": reused,
+        "relevant_binding_count": len(updated_units),
+        "static_actionable_count": sum(
+            unit.status == ActiveBindingStatus.STATIC_ACTIONABLE.value
+            for unit in updated_units.values()
+        ),
+        "execution_confirmed_count": sum(
+            unit.status == ActiveBindingStatus.EXECUTION_CONFIRMED.value
+            for unit in updated_units.values()
+        ),
+        "confirmed_failing_count": sum(
+            unit.status in {
+                ActiveBindingStatus.TARGET_FAILING.value,
+                ActiveBindingStatus.PRESERVATION_RISK.value,
+                ActiveBindingStatus.COUNTEREXAMPLE_OPEN.value,
+            }
+            for unit in updated_units.values()
+        ),
+        "confirmed_passing_count": sum(
+            unit.status == ActiveBindingStatus.TARGET_PASSING.value
+            for unit in updated_units.values()
+        ),
+        "binding_gap_count": len(candidate.unresolved_gaps),
     })
     return candidate

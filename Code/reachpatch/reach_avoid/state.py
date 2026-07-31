@@ -41,6 +41,11 @@ def outcomes_from_challenges(
         ChallengeTerminalStatus.UNKNOWN_EXECUTION: OutcomeStatus.UNKNOWN_EXECUTION,
         ChallengeTerminalStatus.BLOCKED_EXTERNAL: OutcomeStatus.BLOCKED_EXTERNAL,
         ChallengeTerminalStatus.UNSUPPORTED: OutcomeStatus.UNSUPPORTED,
+        ChallengeTerminalStatus.EXPLORATION_ONLY: OutcomeStatus.UNSUPPORTED,
+        ChallengeTerminalStatus.ORACLE_UNAVAILABLE: OutcomeStatus.UNKNOWN_ORACLE,
+        ChallengeTerminalStatus.ENVIRONMENT_BLOCKED: OutcomeStatus.BLOCKED_EXTERNAL,
+        ChallengeTerminalStatus.UNREACHABLE: OutcomeStatus.UNKNOWN_EXECUTION,
+        ChallengeTerminalStatus.UNSTABLE: OutcomeStatus.FLAKY,
         ChallengeTerminalStatus.INFEASIBLE_PROVED: OutcomeStatus.INFEASIBLE_PROVED,
         ChallengeTerminalStatus.PENDING: OutcomeStatus.BLOCKED,
     }

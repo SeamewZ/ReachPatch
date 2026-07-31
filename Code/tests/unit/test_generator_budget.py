@@ -122,6 +122,124 @@ def test_program_slice_request_ends_revision_until_context_is_materialized(
     assert revision.context_requests[0].symbols == ("pkg.api.public",)
 
 
+def test_compacted_correction_keeps_primary_repair_packet():
+    conversation = GeneratorConversation.create("case")
+    primary = '{"initial_repair_packet":{"issue_text":"normative issue"}}'
+    conversation.messages.extend((
+        {"role": "user", "content": primary},
+        {"role": "assistant", "content": "truncated", "finish_reason": "length"},
+        {"role": "user", "content": "return one compact action"},
+    ))
+
+    messages = PersistentDeepSeekAgent._request_messages(conversation)
+
+    assert any(message.get("content") == primary for message in messages)
+    assert messages[-1]["content"] == "return one compact action"
+    assert any(
+        "primary repair task" in message.get("content", "")
+        for message in messages
+    )
+
+
+def test_length_response_forces_compact_edit_without_losing_issue(
+    tmp_path, monkeypatch,
+):
+    repository = tmp_path / "repo"
+    repository.mkdir()
+    (repository / "module.py").write_text("VALUE = 1\n", encoding="utf-8")
+    index = build_repository_index(
+        repository, max_files=10, deadline=Deadline.after(10),
+    )
+    executor = RepairToolExecutor(
+        repository_root=repository,
+        repository_index=index,
+        public_checks={},
+    )
+    context = SimpleNamespace(
+        issue="normative issue", working_diff="", failed_checks=(),
+        counterexamples=(), first_trace_divergences=(),
+        causal_repair_cuts=(), causal_cut_candidates=(),
+        relevant_source_snippets=({
+            "relative_path": "module.py", "start_line": 1, "end_line": 1,
+            "symbol": "VALUE", "content": "VALUE = 1",
+        },),
+        active_program_slice={"files": ("module.py",), "symbols": ("VALUE",)},
+        failure_signature="failure", first_project_frame=None,
+        baseline_output={"stderr": "failure"},
+        to_dict=lambda: {"issue": "normative issue"},
+    )
+    monkeypatch.setattr(
+        "reachpatch.repair.deepseek_agent.build_repair_context",
+        lambda state, mode: context,
+    )
+
+    class TruncatedThenStructured:
+        def __init__(self):
+            self.calls = 0
+
+        def __call__(self, messages, schemas):
+            self.calls += 1
+            assert self.calls == 1
+            return {
+                "role": "assistant", "content": "x" * 100,
+                "finish_reason": "length",
+            }
+
+        def call_with_tool_choice(self, messages, schemas, tool_choice):
+            self.calls += 1
+            available = {
+                schema["function"]["name"] for schema in schemas
+            }
+            assert "normative issue" in "\n".join(
+                str(message.get("content", "")) for message in messages
+            )
+            assert tool_choice == "required"
+            if self.calls == 2:
+                assert available == {
+                    "apply_edits", "finish_revision", "declare_blocker",
+                }
+                return {
+                    "role": "assistant", "content": "", "tool_calls": [{
+                        "id": "edit", "type": "function", "function": {
+                            "name": "apply_edits", "arguments": json.dumps({
+                                "mechanism": "initial_issue_repair",
+                                "edits": [{
+                                    "relative_path": "module.py",
+                                    "start_line": 1, "end_line": 1,
+                                    "expected_source": "VALUE = 1",
+                                    "replacement": "VALUE = 2",
+                                }],
+                            }),
+                        },
+                    }],
+                }
+            return {
+                "role": "assistant", "content": "", "tool_calls": [{
+                    "id": "finish", "type": "function", "function": {
+                        "name": "finish_revision", "arguments": json.dumps({
+                            "summary": "reviewed the complete diff",
+                        }),
+                    },
+                }],
+            }
+
+    transport = TruncatedThenStructured()
+    revision = PersistentDeepSeekAgent(
+        transport, max_tool_turns=6,
+    ).generate_initial_patch(
+        SimpleNamespace(
+            program_graph=SimpleNamespace(file_index={"module.py": ()}),
+            repository_index=index,
+        ),
+        GeneratorConversation.create("case"),
+        executor,
+    )
+
+    assert transport.calls == 3
+    assert revision.status == "PROPOSED"
+    assert revision.edits[0].replacement == "VALUE = 2"
+
+
 def test_root_recovery_for_empty_patch_gets_structural_edit_correction(
     tmp_path, monkeypatch,
 ):

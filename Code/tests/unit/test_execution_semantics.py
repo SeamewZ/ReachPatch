@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import json
+import time
 from dataclasses import replace
 from types import SimpleNamespace
 
@@ -15,9 +17,12 @@ from reachpatch.execution.models import (
     CheckExecution,
     CheckRole,
     CheckStatus,
+    EnvironmentHealth,
+    EnvironmentHealthStatus,
     ExecutableCheck,
     classify_check_pair,
 )
+from reachpatch.execution.target_recovery import recover_executable_targets_bounded
 from reachpatch.reach_avoid.gates import in_target_set
 from reachpatch.reach_avoid.metrics import (
     RevisionEvidence,
@@ -305,7 +310,16 @@ def test_real_target_fix_and_preservation_pass_commit_close_and_reach():
         checkpoint=SimpleNamespace(
             patch=SimpleNamespace(canonical_diff="diff --git a/x b/x"), safe=True,
         ),
-        target_recovery=SimpleNamespace(targets=(target,)),
+        target_recovery=SimpleNamespace(
+            targets=(target,),
+            candidates=(SimpleNamespace(
+                target_id=target.check_id, oracle_authority="A",
+                strategy="related_public_test",
+            ),),
+            certifications=(SimpleNamespace(
+                target_id=target.check_id, certified=True,
+            ),),
+        ),
         check_comparisons=current,
         counterexamples=[],
         dicc_certificate=dicc,
@@ -411,3 +425,60 @@ def test_environment_blocked_improvement_is_kept_uncertified_not_committed():
     )
 
     assert decide_execution_transition(None, evidence) == Decision.KEEP_UNCERTIFIED
+
+
+def test_target_recovery_timeout_cancels_late_audit_overwrite(tmp_path):
+    check = _check("slow-public-target", CheckRole.EXPLORATION)
+    execution = _execution(
+        check.check_id, CheckStatus.FAIL, "base", signature="issue-failure",
+    )
+
+    class SlowRunner:
+        name = "slow"
+        explicit_commands = ()
+        repository = tmp_path
+
+        @staticmethod
+        def compile_visible_checks(*args, **kwargs):
+            return (check,)
+
+        @staticmethod
+        def compile_command_checks(*args, **kwargs):
+            return ()
+
+        @staticmethod
+        def health_check(bounded_check):
+            # Deliberately ignore the supplied per-check timeout to exercise
+            # cancellation at the outer production boundary.
+            time.sleep(0.35)
+            return EnvironmentHealth(
+                health_id="late-health",
+                status=EnvironmentHealthStatus.HEALTHY,
+                detail="late result",
+                execution=execution,
+            )
+
+    result = recover_executable_targets_bounded(
+        SimpleNamespace(
+            issue="The public behavior should change.",
+            visible_tests=("test_public.py",),
+            public_metadata={}, environment={},
+        ),
+        SimpleNamespace(test_references={}, symbols={}),
+        SlowRunner(),
+        SimpleNamespace(),
+        tmp_path / "recovery",
+        wall_time_seconds=0.2,
+        max_target_candidates=1,
+        max_llm_reproduction_attempts=1,
+        max_stability_runs=2,
+    )
+
+    audit = tmp_path / "recovery" / "target_recovery_result.json"
+    assert result.timed_out
+    assert result.elapsed_seconds <= 0.2
+    assert json.loads(audit.read_text(encoding="utf-8"))["timed_out"] is True
+    time.sleep(0.25)
+    persisted = json.loads(audit.read_text(encoding="utf-8"))
+    assert persisted["timed_out"] is True
+    assert persisted["targets"] == []

@@ -12,7 +12,12 @@ from typing import Any, Callable
 from urllib.request import Request, urlopen
 
 from reachpatch.models.base import SerializableRecord, content_hash, stable_id
-from reachpatch.repair.context import build_repair_context
+from reachpatch.repair.context import (
+    assess_first_patch_readiness,
+    build_initial_repair_packet,
+    build_repair_context,
+    build_revision_packet,
+)
 from reachpatch.repair.tools import ProposedEdit, RepairToolExecutor
 
 
@@ -29,6 +34,24 @@ few statements implement the repair.
 Do not claim success from reasoning alone. After editing, request executable public checks.
 When evidence is insufficient, request targeted context or declare a concrete blocker.
 Never access hidden tests, gold patches, test_patch, or harness outcomes."""
+
+INITIAL_REPAIR_INSTRUCTION = """Repair the complete issue, not only its examples.
+Before editing, read the most likely target definition, at least one direct caller when
+one exists, and a related public test or public contract. Identify the root cause, list
+every independent requirement, and identify behavior that must remain compatible.
+Implement a minimal root-cause repair without changing tests or hard-coding witnesses.
+After editing, review the complete diff against requirements, callers, protocol paths,
+exceptions, boundaries, and preservation behavior."""
+
+REVISION_REPAIR_INSTRUCTION = """Preserve behavior already satisfied by the current
+working patch. Repair only the mechanism exposed by this one confirmed executable
+failure. Before editing, explain why the concrete input follows the failing path,
+identify the supplied causal cut, and identify behavior protected by the locked check
+set. Continue editing the same working patch; do not create an independent candidate,
+expand unrelated APIs, or repeat a prohibited mechanism. After editing, review the
+counterexample, preservation contracts, and complete diff. The controller will execute
+the identical LockedCheckSet on the before and after checkpoints and will reject any
+revision without confirmed improvement."""
 
 
 @dataclass(slots=True)
@@ -194,13 +217,24 @@ Transport = Callable[[list[dict], list[dict]], dict]
 
 
 class DeepSeekHTTPTransport:
-    def __init__(self, api_key: str, *, model: str = "deepseek-chat", base_url: str = "https://api.deepseek.com", max_concurrency: int = 10) -> None:
+    def __init__(
+        self,
+        api_key: str,
+        *,
+        model: str = "deepseek-chat",
+        base_url: str = "https://api.deepseek.com",
+        max_concurrency: int = 10,
+        request_timeout_seconds: float = 180.0,
+        max_output_tokens: int = 8_000,
+    ) -> None:
         self.api_key = api_key
         self.model = model
         self.base_url = base_url.rstrip("/")
         self._semaphore = threading.BoundedSemaphore(max_concurrency)
         self._lock = threading.Lock()
         self.calls: list[dict[str, Any]] = []
+        self.request_timeout_seconds = float(request_timeout_seconds)
+        self.max_output_tokens = int(max_output_tokens)
 
     def _call_with_tool_choice(
         self,
@@ -214,7 +248,7 @@ class DeepSeekHTTPTransport:
             "messages": messages,
             "tools": tools,
             "tool_choice": tool_choice,
-            "max_tokens": 4000,
+            "max_tokens": self.max_output_tokens,
         }
         request = Request(
             f"{self.base_url}/chat/completions",
@@ -226,9 +260,13 @@ class DeepSeekHTTPTransport:
             "message_count": len(messages), "status": "REQUESTED",
         }
         try:
-            with self._semaphore, urlopen(request, timeout=180) as response:
+            with self._semaphore, urlopen(
+                request, timeout=max(1.0, self.request_timeout_seconds),
+            ) as response:
                 raw = json.loads(response.read().decode("utf-8"))
-            message = dict(raw["choices"][0]["message"])
+            choice = raw["choices"][0]
+            message = dict(choice["message"])
+            message["finish_reason"] = choice.get("finish_reason")
             record.update({
                 "status": "RESPONSE",
                 "tool_names": [
@@ -442,6 +480,8 @@ class PersistentDeepSeekAgent:
         *,
         max_tool_turns: int = 6,
         max_revisions: int = 6,
+        max_wall_time_seconds: float = 300.0,
+        max_completion_tokens: int = 32_000,
     ) -> None:
         self.transport = transport
         # Keep the caller's bound for deterministic transports.  The
@@ -451,13 +491,17 @@ class PersistentDeepSeekAgent:
         self.requested_max_tool_turns = max_tool_turns
         self.max_tool_turns = max_tool_turns
         self.max_revisions = max_revisions
+        self.max_wall_time_seconds = float(max_wall_time_seconds)
+        self.max_completion_tokens = int(max_completion_tokens)
 
     @staticmethod
     def _request_messages(conversation: GeneratorConversation) -> list[dict]:
-        last_user = max(
+        user_indices = [
             index for index, message in enumerate(conversation.messages)
             if message.get("role") == "user"
-        )
+        ]
+        first_user = user_indices[0]
+        last_user = user_indices[-1]
         memory = {
             "conversation_id": conversation.conversation_id,
             "inspected_files": sorted(conversation.inspected_files)[-40:],
@@ -474,15 +518,32 @@ class PersistentDeepSeekAgent:
             "unresolved_counterexamples": sorted(conversation.unresolved_counterexamples)[-20:],
             "passed_preservation_checks": sorted(conversation.passed_preservation_checks)[-20:],
         }
-        return [
+        messages = [
             conversation.messages[0],
             {
                 "role": "system",
                 "content": "Persistent conversation memory: "
                 + json.dumps(memory, sort_keys=True),
             },
-            *conversation.messages[last_user:],
         ]
+        if first_user != last_user:
+            # Structural correction prompts are intentionally compact, but
+            # they must not replace the normative issue and checklist.  Keep
+            # the first bounded repair packet as the task authority while
+            # retaining only the latest correction exchange around it.
+            messages.extend((
+                conversation.messages[first_user],
+                {
+                    "role": "system",
+                    "content": (
+                        "The preceding user message is the primary repair task. "
+                        "The following user message is only the latest structural "
+                        "or mechanical correction and must not replace that task."
+                    ),
+                },
+            ))
+        messages.extend(conversation.messages[last_user:])
+        return messages
 
     @staticmethod
     def _exact_source_anchor(
@@ -647,6 +708,35 @@ class PersistentDeepSeekAgent:
         return tuple(active), tuple(expandable), tuple(unknown)
 
     def _invoke(self, state, conversation: GeneratorConversation, tools: RepairToolExecutor, *, mode: str) -> GeneratorRevision:
+        invocation_started = time.monotonic()
+        completion_tokens = 0
+        wall_time_exhausted = False
+        token_budget_exhausted = False
+        if hasattr(state, "runtime_metrics"):
+            trajectory = getattr(state, "patch_trajectory", None)
+            working = getattr(trajectory, "working_patch", None)
+            budget_scope = {
+                "generation_run_id": str(getattr(state, "generation_run_id", "")),
+                "instance_id": str(getattr(state, "instance_id", "")),
+                "trajectory_id": str(
+                    getattr(working, "checkpoint_id", "initial-trajectory")
+                ),
+                "revision_id": stable_id(
+                    "generator-budget-scope",
+                    getattr(state, "generation_run_id", ""),
+                    getattr(state, "instance_id", ""),
+                    getattr(working, "checkpoint_id", "initial-trajectory"),
+                    mode,
+                    conversation.revision_count,
+                ),
+                "mode": mode,
+                "max_tool_turns": self.max_tool_turns,
+                "wall_time_seconds": self.max_wall_time_seconds,
+                "completion_token_budget": self.max_completion_tokens,
+            }
+            state.runtime_metrics.setdefault(
+                "generator_budget_scopes", [],
+            ).append(budget_scope)
         context = build_repair_context(state, mode=mode)
         evidence_fingerprint = content_hash({
             "issue": context.issue,
@@ -692,7 +782,22 @@ class PersistentDeepSeekAgent:
         conversation.last_evidence_fingerprint = evidence_fingerprint
         conversation.revision_count += 1
         conversation.current_working_diff = context.working_diff
-        conversation.messages.append({"role": "user", "content": json.dumps(context.to_dict())})
+        prompt_payload = context.to_dict()
+        if mode == "INITIAL":
+            prompt_payload = {
+                "instruction": INITIAL_REPAIR_INSTRUCTION,
+                "initial_repair_packet": build_initial_repair_packet(
+                    state, context=context,
+                ).to_dict(),
+            }
+        else:
+            prompt_payload = {
+                "instruction": REVISION_REPAIR_INSTRUCTION,
+                "revision_packet": build_revision_packet(
+                    state, context=context,
+                ).to_dict(),
+            }
+        conversation.messages.append({"role": "user", "content": json.dumps(prompt_payload)})
         mechanism = "initial_issue_repair" if mode == "INITIAL" else "causal_slice_rewrite"
         requested_checks: list[str] = []
         summary = ""
@@ -701,13 +806,26 @@ class PersistentDeepSeekAgent:
         invalid_feedback = ""
         final_correction_used = False
         synthesis_edit_only = False
+        force_synthesis = False
         evidence_anchor = json.dumps(
             self._repair_anchor(context, conversation), sort_keys=True
         )
         while turns < self.max_tool_turns:
+            remaining_wall_time = (
+                self.max_wall_time_seconds
+                - (time.monotonic() - invocation_started)
+            )
+            if remaining_wall_time <= 0:
+                wall_time_exhausted = True
+                break
+            if completion_tokens >= self.max_completion_tokens:
+                token_budget_exhausted = True
+                break
             turns += 1
             schemas = _tool_schema()
             synthesis_turn = (
+                force_synthesis
+                or
                 turns == self.max_tool_turns
                 or (
                     self.max_tool_turns >= 6
@@ -748,11 +866,34 @@ class PersistentDeepSeekAgent:
                 if synthesis_edit_only:
                     final_tools = final_tools - {"request_program_slice"}
                 schemas = _tool_schema(final_tools)
+            else:
+                available = set(_ALLOWED_TOOL_NAMES)
+                if tools.search_calls >= tools.max_search_calls:
+                    available.difference_update({
+                        "search_code", "find_callers", "find_references",
+                    })
+                if tools.read_calls >= tools.max_read_calls:
+                    available.discard("read_file")
+                if tools.public_check_calls >= tools.max_public_checks:
+                    available.discard("run_public_check")
+                schemas = _tool_schema(frozenset(available))
             available_names = frozenset(
                 schema["function"]["name"] for schema in schemas
             )
+            previous_timeout = getattr(
+                self.transport, "request_timeout_seconds", None,
+            )
             try:
                 request_messages = self._request_messages(conversation)
+                if previous_timeout is not None:
+                    self.transport.request_timeout_seconds = min(
+                        float(previous_timeout), max(1.0, remaining_wall_time),
+                    )
+                transport_records = getattr(self.transport, "calls", ())
+                call_count = (
+                    len(transport_records)
+                    if isinstance(transport_records, (list, tuple)) else 0
+                )
                 constrained_call = getattr(
                     self.transport, "call_with_tool_choice", None
                 )
@@ -764,12 +905,24 @@ class PersistentDeepSeekAgent:
                     )
                 else:
                     message = self.transport(request_messages, schemas)
+                transport_records = getattr(self.transport, "calls", ())
+                if (
+                    isinstance(transport_records, (list, tuple))
+                    and len(transport_records) > call_count
+                ):
+                    usage = dict(transport_records[-1].get("usage", {}))
+                    completion_tokens += int(usage.get(
+                        "completion_tokens", usage.get("output_tokens", 0),
+                    ) or 0)
             except GeneratorBlockedExternal:
                 raise
             except Exception as exc:
                 raise GeneratorBlockedExternal(
                     f"deepseek_{mode.lower()}", exc
                 ) from exc
+            finally:
+                if previous_timeout is not None:
+                    self.transport.request_timeout_seconds = previous_timeout
             if not isinstance(message, dict):
                 raise GeneratorBlockedExternal(
                     f"deepseek_{mode.lower()}_response",
@@ -781,13 +934,15 @@ class PersistentDeepSeekAgent:
                 summary = str(message.get("content") or "revision response without finish tool")
                 finish_reason = str(message.get("finish_reason", "")).lower()
                 if finish_reason == "length":
+                    force_synthesis = True
+                    synthesis_edit_only = True
                     conversation.messages.append({
                         "role": "user",
                         "content": (
                             "The response was truncated. Preserve the current working "
                             "diff and return one compact structured tool action now. "
-                            "Omit repeated reasoning and use apply_edits, "
-                            "request_program_slice, finish_revision, or declare_blocker."
+                            "Omit repeated reasoning. Browsing is now closed; use "
+                            "apply_edits, finish_revision, or declare_blocker."
                         ),
                     })
                     if turns < self.max_tool_turns:
@@ -905,7 +1060,8 @@ class PersistentDeepSeekAgent:
                         invalid_synthesis_turn = True
                         invalid_feedback = output["error"]
                 conversation.messages.append({
-                    "role": "tool", "tool_call_id": call.get("id"),
+                    "role": "tool", "name": name,
+                    "tool_call_id": call.get("id"),
                     "content": json.dumps(output, sort_keys=True),
                 })
             if finished:
@@ -961,6 +1117,8 @@ class PersistentDeepSeekAgent:
             empty_patch_recovery
             and self.max_tool_turns >= 6
             and self.requested_max_tool_turns >= 6
+            and not wall_time_exhausted
+            and not token_budget_exhausted
             and not tools.staged_edits
             and (tools.blocker is None or model_declared_blocker)
             and (
@@ -1067,6 +1225,7 @@ class PersistentDeepSeekAgent:
                     invalid_synthesis_calls += 1
                 conversation.messages.append({
                     "role": "tool",
+                    "name": name,
                     "tool_call_id": call.get("id"),
                     "content": json.dumps(output, sort_keys=True),
                 })
@@ -1152,6 +1311,7 @@ class PersistentDeepSeekAgent:
                         invalid_synthesis_calls += 1
                     conversation.messages.append({
                         "role": "tool",
+                        "name": name,
                         "tool_call_id": call.get("id"),
                         "content": json.dumps(output, sort_keys=True),
                     })
@@ -1234,6 +1394,7 @@ class PersistentDeepSeekAgent:
                             invalid_synthesis_calls += 1
                         conversation.messages.append({
                             "role": "tool",
+                            "name": name,
                             "tool_call_id": call.get("id"),
                             "content": json.dumps(output, sort_keys=True),
                         })
@@ -1255,6 +1416,8 @@ class PersistentDeepSeekAgent:
             status=(
                 "PROPOSED" if tools.staged_edits
                 else "DECLARED_BLOCKER" if tools.blocker
+                else "GENERATOR_WALL_TIME_EXHAUSTED" if wall_time_exhausted
+                else "GENERATOR_TOKEN_BUDGET_EXHAUSTED" if token_budget_exhausted
                 else "GENERATOR_BROWSE_LOOP" if invalid_synthesis_calls
                 else "CONTEXT_ONLY"
             ),
@@ -1262,7 +1425,11 @@ class PersistentDeepSeekAgent:
         return revision
 
     def generate_initial_patch(self, state, conversation: GeneratorConversation, tools: RepairToolExecutor) -> GeneratorRevision:
-        return self._invoke(state, conversation, tools, mode="INITIAL")
+        revision = self._invoke(state, conversation, tools, mode="INITIAL")
+        if hasattr(state, "runtime_metrics"):
+            readiness = assess_first_patch_readiness(state, conversation, revision)
+            state.runtime_metrics["first_patch_readiness"] = readiness.to_dict()
+        return revision
 
     def repair_from_counterexamples(self, state, conversation: GeneratorConversation, packets, tools: RepairToolExecutor) -> GeneratorRevision:
         conversation.delivered_counterexamples.update(item.counterexample_id for item in packets)

@@ -103,4 +103,5 @@ def test_target_infrastructure_failure_is_unknown_not_preservation_regression():
     progress = progress_vector_from_comparisons((), (comparison,))
 
     assert progress.preservation_regression_delta == 0
-    assert progress.unresolved_frontier_delta == 1
+    assert progress.unresolved_frontier_delta == 0
+    assert not progress.meaningful

@@ -67,6 +67,7 @@ class ExecutableCheck(SerializableRecord):
     target_requirement_ids: tuple[str, ...]
     temporary_artifact_paths: tuple[str, ...]
     selector: str = ""
+    executed_symbol_ids: tuple[str, ...] = ()
 
     def with_role(self, role: CheckRole) -> "ExecutableCheck":
         from dataclasses import replace

@@ -763,14 +763,14 @@ def test_target_recovery_unavailable_still_calls_generator(tmp_path):
         run_root=tmp_path / "run",
     )
 
-    assert certificate.status == "REVISION_BUDGET_EXHAUSTED_WITH_TARGET_FAILURE"
-    assert state.termination_status == "REVISION_BUDGET_EXHAUSTED_WITH_TARGET_FAILURE"
+    assert certificate.status == "GENERATOR_NONPROGRESS"
+    assert state.termination_status == "GENERATOR_NONPROGRESS"
     assert not state.target_recovery.targets
     assert state.target_recovery.directed_reproduction_requests <= 1
     assert transport.calls > 0
     assert state.transition_index == 0
-    assert state.runtime_metrics["submitted_generator_revisions"] == 6
-    assert state.runtime_metrics["submitted_generator_revisions"] == 6
+    assert state.runtime_metrics.get("confirmed_revision_count", 0) == 0
+    assert state.runtime_metrics.get("submitted_generator_revisions", 0) == 0
 
 
 def test_transient_initial_generator_failure_retries_and_keeps_patch(tmp_path):
@@ -830,7 +830,7 @@ def test_unknown_generator_tool_is_reported_without_crashing_or_executing_shell(
     assert any(item.get("error") == "INVALID_TOOL" for item in tool_messages)
 
 
-def test_single_working_patch_is_repaired_in_one_persistent_conversation(
+def test_untrusted_frontier_does_not_revise_single_working_patch(
     tmp_path, monkeypatch,
 ):
     repository = tmp_path / "repo"
@@ -860,18 +860,20 @@ def test_single_working_patch_is_repaired_in_one_persistent_conversation(
         run_root=tmp_path / "run",
     )
 
-    assert certificate.status == "REACHED"
-    assert state.transition_index == 3
-    assert [item.decision for item in state.repair_history] == [
-        Decision.COMMIT, Decision.ROLLBACK, Decision.COMMIT,
-    ]
-    assert state.checkpoint.patch.version == 2
+    assert certificate.status == "EVIDENCE_LIMITED_COMPLETE"
+    assert state.transition_index == 1
+    assert [item.decision for item in state.repair_history] == [Decision.COMMIT]
+    assert state.checkpoint.patch.version == 1
     assert state.runtime_metrics["deepseek_initial_generation_count"] == 1
-    assert state.runtime_metrics["deepseek_repair_count"] == 2
-    assert len(state.generator_conversation.accepted_patch_hashes) == 2
-    assert len(state.generator_conversation.rejected_patch_hashes) == 1
-    assert "return []" in state.checkpoint.patch.canonical_diff
-    assert "return [1]" not in state.checkpoint.patch.canonical_diff
+    assert state.runtime_metrics["deepseek_repair_count"] == 0
+    assert state.runtime_metrics["confirmed_revision_count"] == 0
+    assert len(state.generator_conversation.accepted_patch_hashes) == 1
+    assert len(state.generator_conversation.rejected_patch_hashes) == 0
+    assert "return [1]" in state.checkpoint.patch.canonical_diff
+    assert "return []" not in state.checkpoint.patch.canonical_diff
+    assert state.patch_trajectory.first_patch.patch_hash == (
+        state.patch_trajectory.best_evidence_patch.patch_hash
+    )
     records = state.runtime_metrics["graph_build_records"]
     assert records[0]["kind"] == "initial_localization"
     assert records[0]["products_materialized"] is False
@@ -1486,6 +1488,13 @@ def test_public_target_fix_contributes_transition_progress(tmp_path):
     )
     assert restored.generator_conversation.current_working_diff == (
         state.checkpoint.patch.canonical_diff
+    )
+    assert restored.patch_trajectory is not None
+    assert restored.patch_trajectory.first_patch.patch_hash == (
+        state.patch_trajectory.first_patch.patch_hash
+    )
+    assert restored.patch_trajectory.best_evidence_patch.patch_hash == (
+        state.patch_trajectory.best_evidence_patch.patch_hash
     )
 
 

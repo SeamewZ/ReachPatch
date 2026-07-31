@@ -7,7 +7,7 @@ import re
 import threading
 import time
 from queue import Queue
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from enum import StrEnum
 from pathlib import Path
 from typing import Any, Iterable
@@ -24,6 +24,7 @@ from reachpatch.execution.models import (
 )
 from reachpatch.execution.runners import BaseProjectRunner
 from reachpatch.models.base import SerializableRecord, stable_id
+from reachpatch.models.controller import ExecutableOracle
 from reachpatch.models.isolation import assert_generation_payload, is_official_only_path
 from reachpatch.oracle.models import ObservationContract
 
@@ -38,15 +39,42 @@ class TargetRecoveryStatus(StrEnum):
 class TargetCandidate(SerializableRecord):
     target_id: str
     strategy: str
-    authority: str
-    setup_commands: tuple[str, ...]
-    command: str
+    input_source: str
+    oracle_authority: str
+    setup_commands: tuple[tuple[str, ...], ...]
+    command: tuple[str, ...]
     observation_contract: ObservationContract
-    expected_relation: dict[str, Any] | None
-    source_evidence: tuple[str, ...]
+    oracle: ExecutableOracle | None
+    target_requirement_ids: tuple[str, ...]
+    source_evidence_ids: tuple[str, ...]
+    executed_symbol_ids: tuple[str, ...]
     stability_runs: int
-    confidence: float
     status: str
+    confidence: float = 0.0
+
+    @property
+    def authority(self) -> str:
+        return self.oracle_authority
+
+    @property
+    def expected_relation(self) -> dict[str, Any] | None:
+        return self.oracle.to_dict() if self.oracle is not None else None
+
+    @property
+    def source_evidence(self) -> tuple[str, ...]:
+        return self.source_evidence_ids
+
+
+@dataclass(frozen=True, slots=True)
+class TargetCertification(SerializableRecord):
+    target_id: str
+    certified: bool
+    trusted_oracle: bool
+    stable_execution: bool
+    exposes_issue: bool
+    reaches_related_code: bool
+    oracle_authority: str
+    reason: str
 
 
 @dataclass(frozen=True, slots=True)
@@ -63,6 +91,7 @@ class TargetRecoveryResult(SerializableRecord):
     exploration_candidates: tuple[TargetCandidate, ...] = ()
     elapsed_seconds: float = 0.0
     timed_out: bool = False
+    certifications: tuple[TargetCertification, ...] = ()
 
     def execution_for(self, check_id: str) -> CheckExecution | None:
         return next(
@@ -83,6 +112,108 @@ class TargetRecoveryResult(SerializableRecord):
             ),
             timed_out=timed_out,
         )
+
+
+def baseline_exposes_issue_failure(
+    candidate: TargetCandidate,
+    runs: Iterable[CheckExecution],
+) -> bool:
+    executions = tuple(runs)
+    if candidate.oracle is None or not candidate.oracle.is_executable:
+        return False
+    if candidate.oracle.relation != "baseline_failure_must_become_pass":
+        return False
+    return bool(
+        executions
+        and all(
+            item.check_id == candidate.target_id
+            and item.status == CheckStatus.FAIL
+            and item.stable
+            and item.return_code not in {None, 0}
+            for item in executions
+        )
+    )
+
+
+def reaches_relevant_program_region(
+    candidate: TargetCandidate,
+    active_binding_graph: Any,
+) -> bool:
+    for unit in getattr(active_binding_graph, "units", {}).values():
+        if candidate.target_id not in getattr(unit, "target_check_ids", ()):
+            continue
+        if any(
+            edge.edge_type == "CHECK_EXECUTED_SYMBOL"
+            and edge.source_id == candidate.target_id
+            and edge.target_id in unit.program_symbol_ids
+            for edge in getattr(active_binding_graph, "edges", ())
+        ):
+            return True
+    return False
+
+
+def certify_target(
+    candidate: TargetCandidate,
+    baseline_runs: Iterable[CheckExecution],
+    active_binding_graph: Any,
+) -> TargetCertification:
+    runs = tuple(baseline_runs)
+    trusted_oracle = bool(
+        candidate.oracle is not None
+        and candidate.oracle.is_executable
+        and candidate.oracle_authority in {"A", "B", "C"}
+    )
+    stable_execution = bool(
+        candidate.stability_runs >= 2
+        and runs
+        and all(item.stable for item in runs)
+    )
+    exposes_issue = baseline_exposes_issue_failure(candidate, runs)
+    reaches_related_code = reaches_relevant_program_region(
+        candidate, active_binding_graph,
+    )
+    certified = all((
+        trusted_oracle,
+        stable_execution,
+        exposes_issue,
+        reaches_related_code,
+    ))
+    failed = tuple(
+        name for name, passed in (
+            ("trusted_oracle", trusted_oracle),
+            ("stable_execution", stable_execution),
+            ("exposes_issue", exposes_issue),
+            ("reaches_related_code", reaches_related_code),
+        ) if not passed
+    )
+    return TargetCertification(
+        target_id=candidate.target_id,
+        certified=certified,
+        trusted_oracle=trusted_oracle,
+        stable_execution=stable_execution,
+        exposes_issue=exposes_issue,
+        reaches_related_code=reaches_related_code,
+        oracle_authority=candidate.oracle_authority,
+        reason="CERTIFIED" if certified else "MISSING:" + ",".join(failed),
+    )
+
+
+def certify_recovered_targets(
+    recovery: TargetRecoveryResult,
+    active_binding_graph: Any,
+) -> tuple[TargetCertification, ...]:
+    executions = {
+        item.check_id: item for item in recovery.baseline_executions
+    }
+    return tuple(
+        certify_target(
+            candidate,
+            tuple(filter(None, (executions.get(candidate.target_id),))),
+            active_binding_graph,
+        )
+        for candidate in recovery.candidates
+        if candidate.target_id in {item.check_id for item in recovery.targets}
+    )
 
 
 _CODE_BLOCK = re.compile(r"```(?:python|py)?\s*\n(?P<code>.*?)```", re.DOTALL | re.IGNORECASE)
@@ -216,6 +347,41 @@ def _write_reproduction(
     path = reproduction_root / name
     path.write_text(source.rstrip() + "\n", encoding="utf-8")
     check_id = stable_id("temporary-public-reproduction", evidence_id, source)
+    imported_symbols = set(_called_import_symbols(source))
+
+    source_evidence_ids = tuple(dict.fromkeys((
+        evidence_id,
+        *(f"issue-behavior:{symbol}" for symbol in sorted(imported_symbols)),
+    )))
+    environment = {"PYTHONPATH": str(runner.repository)}
+    django_settings = runner.repository / "tests" / "test_sqlite.py"
+    if runner.name == "django" and django_settings.is_file():
+        environment.update({
+            "DJANGO_SETTINGS_MODULE": "test_sqlite",
+            "PYTHONPATH": os.pathsep.join((
+                str(runner.repository),
+                str(runner.repository / "tests"),
+            )),
+        })
+    return ExecutableCheck(
+        check_id=check_id,
+        role=CheckRole.EXPLORATION,
+        authority="ISSUE_PUBLIC_REPRODUCTION",
+        command=(runner.python_executable, str(path)),
+        cwd=str(runner.repository),
+        environment=environment,
+        timeout_seconds=60.0,
+        source_evidence_ids=source_evidence_ids,
+        target_requirement_ids=(),
+        temporary_artifact_paths=(str(path),),
+        selector=str(path),
+        executed_symbol_ids=tuple(sorted(imported_symbols)),
+    )
+
+
+def _called_import_symbols(source: str) -> tuple[str, ...]:
+    """Return imported call targets that a public check actually invokes."""
+
     imported_symbols: set[str] = set()
     try:
         tree = ast.parse(source)
@@ -254,33 +420,19 @@ def _write_reproduction(
             imported_symbols.add(".".join((
                 aliases[current.id], *reversed(parts),
             )))
-    source_evidence_ids = tuple(dict.fromkeys((
-        evidence_id,
-        *(f"issue-behavior:{symbol}" for symbol in sorted(imported_symbols)),
-    )))
-    environment = {"PYTHONPATH": str(runner.repository)}
-    django_settings = runner.repository / "tests" / "test_sqlite.py"
-    if runner.name == "django" and django_settings.is_file():
-        environment.update({
-            "DJANGO_SETTINGS_MODULE": "test_sqlite",
-            "PYTHONPATH": os.pathsep.join((
-                str(runner.repository),
-                str(runner.repository / "tests"),
-            )),
-        })
-    return ExecutableCheck(
-        check_id=check_id,
-        role=CheckRole.EXPLORATION,
-        authority="ISSUE_PUBLIC_REPRODUCTION",
-        command=(runner.python_executable, str(path)),
-        cwd=str(runner.repository),
-        environment=environment,
-        timeout_seconds=60.0,
-        source_evidence_ids=source_evidence_ids,
-        target_requirement_ids=(),
-        temporary_artifact_paths=(str(path),),
-        selector=str(path),
-    )
+    return tuple(sorted(imported_symbols))
+
+
+def _command_called_symbols(command: tuple[str, ...]) -> tuple[str, ...]:
+    """Extract statically grounded call targets from Python command checks."""
+
+    try:
+        inline_index = command.index("-c")
+    except ValueError:
+        return ()
+    if inline_index + 1 >= len(command):
+        return ()
+    return _called_import_symbols(command[inline_index + 1])
 
 
 def _ensure_django_reproduction_app_labels(source: str) -> str:
@@ -444,6 +596,23 @@ def _issue_describes_executable_behavior(issue: str) -> bool:
     ))
 
 
+def _proposal_uses_issue_oracle(issue: str, expected_observation: str) -> bool:
+    """Return whether the model supplied only input/setup for an issue oracle."""
+
+    expected = expected_observation.lower()
+    strong_tokens = set(re.findall(
+        r"\b[A-Za-z_][A-Za-z0-9_]*(?:Error|Exception|Warning)\b",
+        issue,
+    ))
+    strong_tokens.update(re.findall(
+        r"(?i)\b(?:True|False|None|NotImplemented)\b|"
+        r"\[[^\n]{0,80}\]|\{[^\n]{0,80}\}|"
+        r"(?<![A-Za-z_])[-+]?\d+(?:\.\d+)?(?![A-Za-z_])",
+        issue,
+    ))
+    return any(str(token).strip().lower() in expected for token in strong_tokens)
+
+
 def _directed_source_context(
     issue: str,
     repository_index: Any,
@@ -496,7 +665,8 @@ def recover_executable_targets(
     max_target_candidates: int = 3,
     max_llm_reproduction_attempts: int = 2,
     max_stability_runs: int = 2,
-    wall_time_seconds: float = 90.0,
+    wall_time_seconds: float = 45.0,
+    _cancel_event: threading.Event | None = None,
 ) -> TargetRecoveryResult:
     """Recover stable baseline targets without using official-only evidence."""
 
@@ -506,9 +676,17 @@ def recover_executable_targets(
     ) <= 0:
         raise ValueError("target recovery budgets must be positive")
     started = time.monotonic()
+    deadline = started + wall_time_seconds
 
     def expired() -> bool:
-        return time.monotonic() - started >= wall_time_seconds
+        return (
+            (_cancel_event is not None and _cancel_event.is_set())
+            or time.monotonic() >= deadline
+        )
+
+    def remaining(until: float | None = None) -> float:
+        active_deadline = min(deadline, until) if until is not None else deadline
+        return max(0.0, active_deadline - time.monotonic())
 
     issue = _public_issue(instance)
     root = _artifact_root(artifact_store)
@@ -533,18 +711,59 @@ def recover_executable_targets(
     if behavior is not None:
         checks.append(behavior)
 
+    annotated_checks: list[ExecutableCheck] = []
+    for check in checks:
+        selector_path = str(check.selector).split("::", 1)[0].replace("\\", "/")
+        references = tuple(map(str, getattr(repository_index, "test_references", {}).get(
+            selector_path, (),
+        )))
+        annotated_checks.append(replace(
+            check,
+            executed_symbol_ids=tuple(dict.fromkeys((
+                *check.executed_symbol_ids,
+                *references,
+                *_command_called_symbols(check.command),
+            ))),
+        ))
+    checks = annotated_checks
+
     unique: dict[str, ExecutableCheck] = {}
     for check in checks:
         unique.setdefault(check.check_id, check)
 
     targets: list[ExecutableCheck] = []
     preservation: list[ExecutableCheck] = []
+    exploration_checks: list[ExecutableCheck] = []
     rejected: list[RejectedCheck] = []
     frontiers: list[EnvironmentFrontier] = []
     executions: list[CheckExecution] = []
     health_checks: list[EnvironmentHealth] = []
-    def evaluate(check: ExecutableCheck) -> None:
-        health = project_runner.health_check(check)
+    def evaluate(
+        check: ExecutableCheck,
+        *,
+        allow_trusted: bool = True,
+        phase_deadline: float | None = None,
+    ) -> None:
+        available = remaining(phase_deadline)
+        if expired() or available <= 0:
+            return
+        # BaseProjectRunner performs two stability runs.  Freeze a per-run
+        # timeout from the shared phase deadline so one slow public check
+        # cannot outlive target recovery and later overwrite its audit.
+        per_run_timeout = max(
+            0.25,
+            (available - min(0.25, available / 10.0))
+            / max(2, max_stability_runs),
+        )
+        bounded_check = replace(
+            check,
+            timeout_seconds=min(check.timeout_seconds, per_run_timeout),
+        )
+        health = project_runner.health_check(bounded_check)
+        if expired() or (
+            phase_deadline is not None and time.monotonic() >= phase_deadline
+        ):
+            return
         health_checks.append(health)
         execution = health.execution
         if execution is None:
@@ -578,9 +797,15 @@ def recover_executable_targets(
                     check.selector,
                 ))
                 return
-            targets.append(check.with_role(CheckRole.TARGET))
+            if allow_trusted:
+                targets.append(check.with_role(CheckRole.TARGET))
+            else:
+                exploration_checks.append(check.with_role(CheckRole.EXPLORATION))
         elif execution.stable and execution.status == CheckStatus.PASS:
-            preservation.append(check.with_role(CheckRole.PRESERVATION))
+            if allow_trusted:
+                preservation.append(check.with_role(CheckRole.PRESERVATION))
+            else:
+                exploration_checks.append(check.with_role(CheckRole.EXPLORATION))
         else:
             rejected.append(RejectedCheck(
                 check.check_id,
@@ -589,10 +814,13 @@ def recover_executable_targets(
                 check.selector,
             ))
 
+    public_phase_end = started + min(10.0, wall_time_seconds)
     for check in tuple(unique.values())[: max_target_candidates * 4]:
-        if expired():
+        if expired() or time.monotonic() >= public_phase_end:
             break
-        evaluate(check)
+        evaluate(check, phase_deadline=public_phase_end)
+        if len(targets) + len(preservation) >= max_target_candidates:
+            break
 
     reproduction_method = getattr(
         generator_agent, "generate_target_reproduction", None,
@@ -609,18 +837,35 @@ def recover_executable_targets(
             )
         ).strip()
         seen_proposals: set[str] = set()
+        llm_phase_end = min(started + wall_time_seconds, time.monotonic() + 15.0)
         for attempt in range(max_llm_reproduction_attempts):
-            if targets or expired():
+            if targets or expired() or time.monotonic() >= llm_phase_end:
                 break
             directed_requests += 1
-            proposal = reproduction_method(
-                issue=str(getattr(instance, "issue", "")),
-                public_discussion=public_discussion,
-                source_context=_directed_source_context(
-                    issue, repository_index, project_runner.repository,
-                ),
-                project_runner=project_runner.name,
+            transport = getattr(generator_agent, "transport", None)
+            previous_timeout = getattr(
+                transport, "request_timeout_seconds", None,
             )
+            try:
+                if previous_timeout is not None:
+                    attempts_left = max(1, max_llm_reproduction_attempts - attempt)
+                    transport.request_timeout_seconds = min(
+                        float(previous_timeout),
+                        max(0.25, remaining(llm_phase_end) / attempts_left),
+                    )
+                proposal = reproduction_method(
+                    issue=str(getattr(instance, "issue", "")),
+                    public_discussion=public_discussion,
+                    source_context=_directed_source_context(
+                        issue, repository_index, project_runner.repository,
+                    ),
+                    project_runner=project_runner.name,
+                )
+            finally:
+                if previous_timeout is not None:
+                    transport.request_timeout_seconds = previous_timeout
+            if expired() or time.monotonic() >= llm_phase_end:
+                break
             if proposal is None:
                 continue
             proposal_key = stable_id(
@@ -643,7 +888,26 @@ def recover_executable_targets(
                     attempt,
                 ),
             )
-            evaluate(directed)
+            proposal_text = str(proposal.get("expected_observation", ""))
+            contract_overlap = _proposal_uses_issue_oracle(
+                issue, proposal_text,
+            )
+            if contract_overlap:
+                directed = replace(
+                    directed,
+                    source_evidence_ids=tuple(dict.fromkeys((
+                        *directed.source_evidence_ids,
+                        "issue-contract-witness",
+                    ))),
+                )
+            # Generated inputs are trusted only when the expected relation is
+            # independently present in the issue (Authority B); otherwise the
+            # reproduction remains an Authority E exploration probe.
+            evaluate(
+                directed,
+                allow_trusted=contract_overlap,
+                phase_deadline=llm_phase_end,
+            )
 
     targets = targets[:max_target_candidates]
     preservation = preservation[:max_target_candidates]
@@ -652,6 +916,8 @@ def recover_executable_targets(
     def candidate_strategy(check: ExecutableCheck) -> str:
         evidence = " ".join(check.source_evidence_ids).lower()
         selector = str(check.selector).lower()
+        if "issue-contract-witness" in evidence:
+            return "issue_executable_witness"
         if "directed-public-reproduction" in evidence:
             return "llm_reproduction"
         if "issue-behavior" in evidence:
@@ -676,29 +942,57 @@ def recover_executable_targets(
                 "protocol" in " ".join(check.source_evidence_ids).lower()
             ),
         )
-        relation = None
+        oracle = None
+        strategy = candidate_strategy(check)
+        oracle_authority = (
+            "A" if strategy == "related_public_test"
+            else "B" if strategy in {
+                "issue_executable_witness", "return_or_exception_api_contract",
+            }
+            else "C" if trusted
+            else "E"
+        )
         if trusted and execution is not None:
-            relation = {
-                "kind": (
+            relation = (
                     "baseline_failure_must_become_pass"
                     if check.role == CheckRole.TARGET
                     else "baseline_pass_must_be_preserved"
+            )
+            oracle = ExecutableOracle(
+                oracle_id=stable_id(
+                    "target-oracle", check.check_id, oracle_authority, relation,
                 ),
-                "baseline_status": execution.status.value,
-                "expected_status": "PASS",
-            }
+                authority=oracle_authority,
+                relation=relation,
+                requirement_id=(
+                    check.target_requirement_ids[0]
+                    if check.target_requirement_ids else None
+                ),
+                is_executable=True,
+            )
         return TargetCandidate(
             target_id=check.check_id,
-            strategy=candidate_strategy(check),
-            authority=check.authority,
+            strategy=strategy,
+            input_source=(
+                "LLM_INPUT_SYNTHESIS_D"
+                if "directed-public-reproduction" in " ".join(
+                    check.source_evidence_ids
+                ).lower() and trusted
+                else "LLM_EXPLORATION_E" if not trusted
+                else "PUBLIC_REPOSITORY" if strategy == "related_public_test"
+                else "ISSUE_CONTRACT"
+            ),
+            oracle_authority=oracle_authority,
             setup_commands=(),
-            command=" ".join(check.command),
+            command=check.command,
             observation_contract=contract,
-            expected_relation=relation,
-            source_evidence=check.source_evidence_ids,
+            oracle=oracle,
+            target_requirement_ids=check.target_requirement_ids,
+            source_evidence_ids=check.source_evidence_ids,
+            executed_symbol_ids=check.executed_symbol_ids,
             stability_runs=min(max_stability_runs, 2),
-            confidence=(0.95 if trusted else 0.35),
             status=("MECHANICALLY_VERIFIED" if trusted else "EXPLORATION_ONLY"),
+            confidence=(0.95 if trusted else 0.35),
         )
 
     verified_candidates = tuple(
@@ -707,7 +1001,7 @@ def recover_executable_targets(
     verified_ids = {item.target_id for item in verified_candidates}
     exploration_candidates = tuple(
         as_candidate(check, trusted=False)
-        for check in unique.values()
+        for check in (*unique.values(), *exploration_checks)
         if check.check_id not in verified_ids
     )[:max_target_candidates]
     timed_out = expired()
@@ -732,10 +1026,11 @@ def recover_executable_targets(
         elapsed_seconds=time.monotonic() - started,
         timed_out=timed_out,
     )
-    audit_path = root / "target_recovery_result.json"
-    audit_path.write_text(
-        json.dumps(result.to_dict(), sort_keys=True, indent=2), encoding="utf-8",
-    )
+    if _cancel_event is None or not _cancel_event.is_set():
+        audit_path = root / "target_recovery_result.json"
+        audit_path.write_text(
+            json.dumps(result.to_dict(), sort_keys=True, indent=2), encoding="utf-8",
+        )
     return result
 
 
@@ -749,7 +1044,13 @@ def recover_executable_targets_bounded(
 ) -> TargetRecoveryResult:
     """Run optional recovery on a daemon worker so a wall timeout is real."""
 
-    timeout = float(kwargs.get("wall_time_seconds", 90.0))
+    timeout = float(kwargs.get("wall_time_seconds", 45.0))
+    # Leave bounded cleanup/audit headroom inside the configured public wall
+    # time.  The externally visible timeout remains the configured value.
+    worker_timeout = max(0.001, timeout - min(0.5, timeout / 10.0))
+    worker_kwargs = dict(kwargs)
+    worker_kwargs["wall_time_seconds"] = worker_timeout
+    cancel_event = threading.Event()
     result_queue: Queue[tuple[str, Any]] = Queue(maxsize=1)
 
     def worker() -> None:
@@ -758,7 +1059,9 @@ def recover_executable_targets_bounded(
                 "ok",
                 recover_executable_targets(
                     instance, repository_index, project_runner,
-                    generator_agent, artifact_store, **kwargs,
+                    generator_agent, artifact_store,
+                    _cancel_event=cancel_event,
+                    **worker_kwargs,
                 ),
             ))
         except BaseException as exc:  # propagate only on the caller thread
@@ -768,9 +1071,19 @@ def recover_executable_targets_bounded(
         target=worker, name="reachpatch-target-recovery", daemon=True,
     )
     thread.start()
-    thread.join(timeout=max(0.001, timeout))
+    thread.join(timeout=max(0.001, worker_timeout))
     if thread.is_alive():
-        return TargetRecoveryResult.unavailable(timed_out=True)
+        cancel_event.set()
+        result = replace(
+            TargetRecoveryResult.unavailable(timed_out=True),
+            elapsed_seconds=worker_timeout,
+        )
+        root = _artifact_root(artifact_store)
+        (root / "target_recovery_result.json").write_text(
+            json.dumps(result.to_dict(), sort_keys=True, indent=2),
+            encoding="utf-8",
+        )
+        return result
     if result_queue.empty():
         return TargetRecoveryResult.unavailable()
     status, payload = result_queue.get()

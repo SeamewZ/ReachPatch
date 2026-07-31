@@ -6,6 +6,7 @@ from reachpatch.models.controller import MechanicalCheck, ReachAvoidState, UnitO
 from reachpatch.models.enums import OutcomeStatus
 from reachpatch.challenge_graph.models import DICCStatus
 from reachpatch.execution.models import CheckClassification
+from reachpatch.reach_avoid.trajectory import TRUSTED_AUTHORITIES, authority_tier
 
 
 def _hard_frontiers(state: ReachAvoidState) -> tuple[str, ...]:
@@ -68,7 +69,19 @@ def in_target_set(state: ReachAvoidState) -> bool:
         return False
     target_recovery = getattr(state, "target_recovery", None)
     if target_recovery is not None:
-        targets = tuple(target_recovery.targets)
+        candidates = {
+            item.target_id: item for item in getattr(target_recovery, "candidates", ())
+        }
+        certifications = {
+            item.target_id: item
+            for item in getattr(target_recovery, "certifications", ())
+        }
+        targets = tuple(
+            item for item in target_recovery.targets
+            if authority_tier(item, candidates.get(item.check_id)) in TRUSTED_AUTHORITIES
+            and candidates.get(item.check_id) is not None
+            and bool(getattr(certifications.get(item.check_id), "certified", False))
+        )
         target_ids = {item.check_id for item in targets}
         comparisons = tuple(state.check_comparisons)
         target_comparisons = tuple(
@@ -107,13 +120,18 @@ def in_target_set(state: ReachAvoidState) -> bool:
             ),
             not preservation_regression,
             stable_counterexamples_pass,
-            state.dicc_certificate is not None,
-            state.dicc_certificate.status == DICCStatus.CLOSED
-            if state.dicc_certificate is not None else False,
-            state.dicc_certificate.real_challenge_execution_count > 0
-            if state.dicc_certificate is not None else False,
             not environment_invalid,
             state.checkpoint.safe,
+            not getattr(state, "confirmed_failures", ()),
+            not bool(
+                getattr(
+                    getattr(state, "requirement_graph", None),
+                    "build_stats",
+                    {},
+                ).get(
+                    "fallback_used", 0,
+                )
+            ),
             all(
                 row.status == "PASSING"
                 for row in getattr(getattr(state, "requirement_coverage", None), "rows", {}).values()
@@ -174,19 +192,43 @@ def in_target_set(state: ReachAvoidState) -> bool:
 
 
 def evidence_limited_complete(state: ReachAvoidState) -> bool:
+    if not state.checkpoint.patch.canonical_diff or state.target_recovery is None:
+        return False
+    candidates = {
+        item.target_id: item for item in getattr(state.target_recovery, "candidates", ())
+    }
+    trusted_targets = tuple(
+        item for item in state.target_recovery.targets
+        if authority_tier(item, candidates.get(item.check_id)) in TRUSTED_AUTHORITIES
+        and candidates.get(item.check_id) is not None
+        and bool(next((
+            certification.certified
+            for certification in getattr(
+                state.target_recovery, "certifications", ()
+            )
+            if certification.target_id == item.check_id
+        ), False))
+    )
     return bool(
-        state.checkpoint.patch.canonical_diff
-        and state.target_recovery is not None
-        and not state.target_recovery.targets
-        and state.checkpoint.patch.status in {
-            "EVIDENCE_LIMITED_COMPLETE", "WORKING_UNCERTIFIED", "WORKING_IMPROVED",
-        }
+        not trusted_targets
+        and not getattr(state, "confirmed_failures", ())
+        and state.checkpoint.safe
         and state.checkpoint.patch.status not in {"ROLLED_BACK", "EMPTY"}
+        and not any(
+            item.classification == CheckClassification.PRESERVATION_REGRESSION
+            for item in getattr(state, "check_comparisons", ())
+        )
     )
 
 
 def terminal_avoid_reason(state: ReachAvoidState) -> str | None:
     if not state.remaining_budget.available() and not in_target_set(state):
+        if (
+            state.checkpoint.patch.canonical_diff
+            and state.checkpoint.safe
+            and not getattr(state, "confirmed_failures", ())
+        ):
+            return None
         if state.checkpoint.patch.canonical_diff:
             return "REVISION_BUDGET_EXHAUSTED_WITH_UNCERTIFIED_PATCH"
         return "REVISION_BUDGET_EXHAUSTED_WITH_TARGET_FAILURE"

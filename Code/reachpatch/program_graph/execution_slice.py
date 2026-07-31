@@ -132,11 +132,14 @@ def _target_fallback_locations(
 
     candidates: list[tuple[tuple[object, ...], SymbolLocation]] = []
     seen: set[tuple[str, str, int, int]] = set()
-    evidence_symbols = tuple(
-        evidence.split(":", 1)[1]
-        for evidence in target_check.source_evidence_ids
-        if evidence.startswith("issue-behavior:")
-    )
+    evidence_symbols = tuple(dict.fromkeys((
+        *map(str, getattr(target_check, "executed_symbol_ids", ())),
+        *(
+            evidence.split(":", 1)[1]
+            for evidence in target_check.source_evidence_ids
+            if evidence.startswith("issue-behavior:")
+        ),
+    )))
     for evidence_index, symbol in enumerate(evidence_symbols):
         exact = tuple(repository_index.symbols.get(symbol, ()))
         leaf = symbol.rsplit(".", 1)[-1]
@@ -281,6 +284,7 @@ def build_target_slice(
         for evidence in check.source_evidence_ids:
             if evidence.startswith("issue-behavior:"):
                 symbols.add(evidence.split(":", 1)[1])
+        symbols.update(map(str, getattr(check, "executed_symbol_ids", ())))
     for symbol in tuple(symbols):
         for location in (
             repository_index.symbols.get(symbol, ())
