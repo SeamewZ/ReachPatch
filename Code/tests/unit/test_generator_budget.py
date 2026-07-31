@@ -9,7 +9,7 @@ import pytest
 from reachpatch.program_graph.budget import Deadline
 from reachpatch.program_graph.index import build_repository_index
 from reachpatch.repair.deepseek_agent import GeneratorConversation, PersistentDeepSeekAgent
-from reachpatch.repair.tools import RepairToolExecutor
+from reachpatch.repair.tools import ProposedEdit, RepairToolExecutor
 
 
 def test_repair_tool_budgets_and_tree_range_read_cache(tmp_path):
@@ -54,6 +54,45 @@ def test_repair_tool_budgets_and_tree_range_read_cache(tmp_path):
         assert executor.run_public_check(check_id)["return_code"] == 0
     with pytest.raises(ValueError, match="public check budget exhausted"):
         executor.run_public_check("check-3")
+
+
+def test_apply_edits_relocates_unique_whitespace_normalized_anchor(tmp_path):
+    repository = tmp_path / "repo"
+    (repository / "pkg").mkdir(parents=True)
+    (repository / "pkg" / "module.py").write_text(
+        "def public(value):\n"
+        "    if value:\n"
+        "        if value.ready:\n"
+        "            return value.old\n",
+        encoding="utf-8",
+    )
+    index = build_repository_index(
+        repository, max_files=10, deadline=Deadline.after(10),
+    )
+    executor = RepairToolExecutor(
+        repository_root=repository,
+        repository_index=index,
+        public_checks={},
+    )
+
+    result = executor.apply_edits((ProposedEdit(
+        relative_path="pkg/module.py",
+        start_line=2,
+        end_line=2,
+        expected_source="    if value.ready:",
+        replacement="    if value.ready and value.current:",
+    ),))
+
+    edit = executor.staged_edits[0]
+    assert result["relocated"] == [{
+        "path": "pkg/module.py",
+        "from_start_line": 2,
+        "to_start_line": 3,
+        "match": "normalized_whitespace",
+    }]
+    assert edit.start_line == 3
+    assert edit.expected_source == "        if value.ready:"
+    assert edit.replacement == "        if value.ready and value.current:"
 
 
 def test_program_slice_request_ends_revision_until_context_is_materialized(

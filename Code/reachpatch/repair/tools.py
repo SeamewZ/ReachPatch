@@ -175,6 +175,8 @@ class RepairToolExecutor:
             path = self._path(edit.relative_path, for_edit=True)
             lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
             expected_lines = edit.expected_source.rstrip("\n").splitlines()
+            expected_source = edit.expected_source
+            replacement = edit.replacement
             start = edit.start_line
             end = edit.end_line
             actual = "\n".join(lines[start - 1:end])
@@ -196,12 +198,60 @@ class RepairToolExecutor:
                     raise ValueError(
                         f"expected source is ambiguous: {edit.relative_path}:{edit.start_line}"
                     )
+                else:
+                    normalized_expected = [line.strip() for line in expected_lines]
+                    normalized_matches = [
+                        index + 1
+                        for index in range(len(lines) - len(expected_lines) + 1)
+                        if [
+                            line.strip()
+                            for line in lines[index:index + len(expected_lines)]
+                        ] == normalized_expected
+                    ]
+                    if len(normalized_matches) == 1:
+                        start = normalized_matches[0]
+                        end = start + len(expected_lines) - 1
+                        actual_lines = lines[start - 1:end]
+
+                        def indentation(source_line: str) -> int:
+                            return len(source_line) - len(source_line.lstrip())
+
+                        expected_anchor = next(
+                            (line for line in expected_lines if line.strip()), "",
+                        )
+                        actual_anchor = next(
+                            (line for line in actual_lines if line.strip()), "",
+                        )
+                        shift = indentation(actual_anchor) - indentation(
+                            expected_anchor
+                        )
+                        if shift:
+                            adjusted = []
+                            for line in replacement.rstrip("\n").splitlines():
+                                if not line.strip():
+                                    adjusted.append("")
+                                    continue
+                                width = max(0, indentation(line) + shift)
+                                adjusted.append(" " * width + line.lstrip())
+                            replacement = "\n".join(adjusted)
+                        expected_source = "\n".join(actual_lines)
+                        relocated.append({
+                            "path": edit.relative_path,
+                            "from_start_line": edit.start_line,
+                            "to_start_line": start,
+                            "match": "normalized_whitespace",
+                        })
+                    elif len(normalized_matches) > 1:
+                        raise ValueError(
+                            "whitespace-normalized expected source is ambiguous: "
+                            f"{edit.relative_path}:{edit.start_line}"
+                        )
             candidate.append(ProposedEdit(
                 relative_path=edit.relative_path,
                 start_line=start,
                 end_line=end,
-                expected_source=edit.expected_source,
-                replacement=edit.replacement,
+                expected_source=expected_source,
+                replacement=replacement,
             ))
         occupied: dict[str, list[tuple[int, int]]] = {}
         for staged in self.staged_edits:
