@@ -107,6 +107,18 @@ class RepairIntent(SerializableRecord):
     forbidden_fingerprints: tuple[str, ...]
     frontier_resolution_ids: tuple[str, ...]
     selection_witness: dict[str, Any]
+    mechanism_id: str = ""
+    requirements_to_satisfy: tuple[str, ...] = ()
+    binding_unit_ids: tuple[str, ...] = ()
+    counterexample_ids: tuple[str, ...] = ()
+    observed_failures: tuple[str, ...] = ()
+    root_cause: str = ""
+    files_to_modify: tuple[str, ...] = ()
+    symbols_to_modify: tuple[str, ...] = ()
+    causal_cut_ids: tuple[str, ...] = ()
+    behavior_to_preserve: tuple[str, ...] = ()
+    expected_effects: tuple[str, ...] = ()
+    known_risks: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -198,6 +210,20 @@ class CounterexamplePacket(SerializableRecord):
     previous_diff: str = ""
     protected_behavior: tuple[str, ...] = ()
     environment_valid: bool = True
+    requirement_id: str | None = None
+    authority: str = "PUBLIC_EXECUTION"
+    setup: tuple[str, ...] = ()
+    command: str = ""
+    concrete_input: Any = None
+    input_derivation: tuple[str, ...] = ()
+    baseline_observation: Any = None
+    patched_observation: Any = None
+    expected_relation: str = ""
+    oracle_result: str = ""
+    failure_location: str = ""
+    causal_cut_ids: tuple[str, ...] = ()
+    impact_risks: tuple[str, ...] = ()
+    suggested_action_families: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -224,6 +250,15 @@ class MechanismAttempt(SerializableRecord):
     transition_id: str
     equivalent_attempt_count: int
     forbidden_next: bool
+
+
+@dataclass(frozen=True, slots=True)
+class FailureHistory(SerializableRecord):
+    signature: str
+    attempted_mechanisms: tuple[str, ...]
+    affected_symbols: tuple[str, ...]
+    causal_cut_ids: tuple[str, ...]
+    revisions: tuple[int, ...]
 
 
 @dataclass(frozen=True, slots=True)
@@ -276,6 +311,34 @@ class TransitionCertificate(SerializableRecord):
     restoration_or_commit_receipt: str
     input_artifact_ids: tuple[str, ...]
     recomputation_hash: str
+    instance_id: str = ""
+    generation_run_id: str = ""
+    from_revision: int = 0
+    to_revision: int = 0
+    before_patch_hash: str = ""
+    after_patch_hash: str = ""
+    action_id: str = ""
+    mechanism_id: str = ""
+    active_binding_graph_hash: str = ""
+    affected_binding_unit_ids: tuple[str, ...] = ()
+    executed_check_ids: tuple[str, ...] = ()
+    target_comparisons: tuple[str, ...] = ()
+    preservation_comparisons: tuple[str, ...] = ()
+    challenge_comparisons: tuple[str, ...] = ()
+    requirements_improved: tuple[str, ...] = ()
+    requirements_regressed: tuple[str, ...] = ()
+    counterexamples_closed: tuple[str, ...] = ()
+    counterexamples_opened: tuple[str, ...] = ()
+    progress_before: dict[str, Any] = field(default_factory=dict)
+    progress_after: dict[str, Any] = field(default_factory=dict)
+    reach_decision: str = "NOT_REACHED"
+    avoid_decision: str = "NOT_AVOIDED"
+    rollback_decision: str = ""
+    code_commit_sha: str = ""
+    config_hash: str = ""
+    prompt_hash: str = ""
+    patch_hash: str = ""
+    evidence_hashes: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -325,7 +388,7 @@ class ReachAvoidState:
     semantic_graph: Any
     requirement_graph: Any
     program_graph: Any
-    binding_graph: Any
+    active_binding_graph: Any
     challenge_graph: Any
     checkpoint: IncumbentCheckpoint
     outcomes: dict[str, UnitOutcome]
@@ -352,18 +415,30 @@ class ReachAvoidState:
     target_slice: Any | None = None
     causal_slices: tuple[Any, ...] = ()
     impact_slice: Any | None = None
-    executable_binding_graph: Any | None = None
     check_comparisons: tuple[Any, ...] = ()
     dicc_certificate: Any | None = None
     environment_frontiers: tuple[Any, ...] = ()
     working_trial: dict[str, Any] | None = None
+    observations: Any | None = None
+    requirement_coverage: Any | None = None
+    verified_safe_patch: WorkingPatch | None = None
+    failure_histories: dict[str, Any] = field(default_factory=dict)
+    prohibited_mechanisms: set[str] = field(default_factory=set)
+    unresolved_frontier: list[Any] = field(default_factory=list)
+    reach_status: str = "NOT_REACHED"
+    avoid_status: str = "NOT_AVOIDED"
+    generation_run_id: str = ""
+    code_commit_sha: str = ""
+    method_config_hash: str = ""
+    prompt_hash: str = ""
+    current_patch_hash: str = ""
 
     def graph_hashes(self) -> dict[str, str]:
         return {
             "semantic": self.semantic_graph.to_dict()["graph_hash"],
             "requirement": self.requirement_graph.semantic_layer_hash(),
             "program": self.program_graph.program_hash(),
-            "binding": self.binding_graph.graph_hash(),
+            "binding": self.active_binding_graph.graph_hash(),
             "challenge": self.challenge_graph.graph_hash(),
         }
 
@@ -396,8 +471,8 @@ class ReachAvoidState:
             ))
         target_units = {
             unit.unit_id
-            for unit in self.binding_graph.units.values()
-            if self.requirement_graph.leaves[unit.leaf_id].authority_class.value != "PRESERVATION"
+            for unit in self.active_binding_graph.units.values()
+            if unit.preservation_check_ids == ()
         }
         by_unit = {
             unit_id: [
@@ -411,8 +486,7 @@ class ReachAvoidState:
             if outcomes and all(item.status == OutcomeStatus.PASS for item in outcomes)
         }
         return sum(
-            self.requirement_graph.leaves[self.binding_graph.units[unit_id].leaf_id].weight
-            for unit_id in target_units - passed
+            1.0 for unit_id in target_units - passed
         )
 
     def to_dict(self) -> dict[str, Any]:
@@ -444,6 +518,7 @@ class ReachAvoidState:
             "graph_hashes": self.graph_hashes(),
             "checkpoint": self.checkpoint.to_dict(),
             "working_patch_hash": self.checkpoint.patch.canonical_diff_hash,
+            "active_binding_graph": self.active_binding_graph.to_dict(),
             "outcomes": [self.outcomes[key].to_dict() for key in sorted(self.outcomes)],
             "trace_bundle_ids": sorted(self.trace_bundles),
             "counterexample_ids": [item.counterexample_id for item in self.counterexamples],
@@ -471,10 +546,6 @@ class ReachAvoidState:
             "target_slice": self.target_slice.to_dict() if self.target_slice else None,
             "causal_slices": [item.to_dict() for item in self.causal_slices],
             "impact_slice": self.impact_slice.to_dict() if self.impact_slice else None,
-            "executable_binding_graph": (
-                self.executable_binding_graph.to_dict()
-                if self.executable_binding_graph else None
-            ),
             "check_comparisons": [item.to_dict() for item in self.check_comparisons],
             "dicc_certificate": (
                 self.dicc_certificate.to_dict() if self.dicc_certificate else None
@@ -483,6 +554,35 @@ class ReachAvoidState:
                 item.to_dict() for item in self.environment_frontiers
             ],
             "working_trial": self.working_trial,
+            "observations": (
+                self.observations.to_dict() if self.observations is not None else None
+            ),
+            "requirement_coverage": (
+                self.requirement_coverage.to_dict()
+                if self.requirement_coverage is not None else None
+            ),
+            "verified_safe_patch": (
+                self.verified_safe_patch.to_dict()
+                if self.verified_safe_patch is not None else None
+            ),
+            "failure_histories": {
+                key: value.to_dict() if hasattr(value, "to_dict") else value
+                for key, value in sorted(self.failure_histories.items())
+            },
+            "prohibited_mechanisms": sorted(self.prohibited_mechanisms),
+            "unresolved_frontier": [
+                item.to_dict() if hasattr(item, "to_dict") else item
+                for item in self.unresolved_frontier
+            ],
+            "reach_status": self.reach_status,
+            "avoid_status": self.avoid_status,
+            "generation_run_id": self.generation_run_id or self.run_id,
+            "code_commit_sha": self.code_commit_sha,
+            "method_config_hash": self.method_config_hash,
+            "prompt_hash": self.prompt_hash,
+            "current_patch_hash": (
+                self.current_patch_hash or self.checkpoint.patch.canonical_diff_hash
+            ),
         }
         body["content_hash"] = content_hash(body)
         return body

@@ -122,6 +122,86 @@ def test_program_slice_request_ends_revision_until_context_is_materialized(
     assert revision.context_requests[0].symbols == ("pkg.api.public",)
 
 
+def test_root_recovery_for_empty_patch_gets_structural_edit_correction(
+    tmp_path, monkeypatch,
+):
+    repository = tmp_path / "repo"
+    repository.mkdir()
+    (repository / "module.py").write_text("VALUE = 1\n", encoding="utf-8")
+    index = build_repository_index(
+        repository, max_files=10, deadline=Deadline.after(10),
+    )
+    executor = RepairToolExecutor(
+        repository_root=repository, repository_index=index, public_checks={},
+    )
+    context = SimpleNamespace(
+        issue="issue", working_diff="", failed_checks=(), counterexamples=(),
+        first_trace_divergences=(), causal_repair_cuts=(),
+        causal_cut_candidates=(),
+        relevant_source_snippets=({
+            "relative_path": "module.py", "start_line": 1, "end_line": 1,
+            "symbol": "VALUE", "content": "VALUE = 1",
+        },),
+        active_program_slice={"files": ("module.py",), "symbols": ("VALUE",)},
+        failure_signature="failure", first_project_frame=None,
+        baseline_output={"stderr": "failure"},
+        to_dict=lambda: {"issue": "issue", "working_diff": ""},
+    )
+    monkeypatch.setattr(
+        "reachpatch.repair.deepseek_agent.build_repair_context",
+        lambda state, mode: context,
+    )
+    calls: list[set[str]] = []
+
+    def transport(messages, schemas):
+        available = {schema["function"]["name"] for schema in schemas}
+        calls.append(available)
+        if len(calls) == 1:
+            return {
+                "role": "assistant", "content": "", "tool_calls": [{
+                    "id": "model-blocker", "type": "function",
+                    "function": {
+                        "name": "declare_blocker",
+                        "arguments": json.dumps({
+                            "reason": "more evidence would be helpful",
+                        }),
+                    },
+                }],
+            }
+        assert available == {"apply_edits", "request_program_slice"}
+        return {
+            "role": "assistant", "content": "", "tool_calls": [{
+                "id": "root-correction-edit", "type": "function",
+                "function": {
+                    "name": "apply_edits",
+                    "arguments": json.dumps({
+                        "mechanism": "root_recovery_edit",
+                        "edits": [{
+                            "relative_path": "module.py", "start_line": 1,
+                            "end_line": 1, "expected_source": "VALUE = 1",
+                            "replacement": "VALUE = 2",
+                        }],
+                    }),
+                },
+            }],
+        }
+
+    revision = PersistentDeepSeekAgent(
+        transport, max_tool_turns=8,
+    ).root_recovery(
+        SimpleNamespace(
+            program_graph=SimpleNamespace(file_index={"module.py": ()}),
+            repository_index=index,
+        ),
+        GeneratorConversation.create("case"), executor,
+    )
+
+    assert len(calls) == 2
+    assert revision.status == "PROPOSED"
+    assert revision.mechanism == "root_recovery_edit"
+    assert revision.edits[0].replacement == "VALUE = 2"
+
+
 def test_redundant_program_slice_request_is_corrected_into_an_edit(
     tmp_path, monkeypatch,
 ):
@@ -453,3 +533,170 @@ def test_synthesis_edit_mismatch_returns_actual_source_before_budget_ends(
     assert turn == 5
     assert revision.status == "PROPOSED"
     assert revision.edits[0].expected_source == "VALUE = 1"
+
+
+def test_structural_correction_returns_accepted_slice_to_controller(
+    tmp_path, monkeypatch,
+):
+    repository = tmp_path / "repo"
+    repository.mkdir()
+    (repository / "module.py").write_text(
+        "VALUE = 1\n\ndef needed():\n    return VALUE\n", encoding="utf-8",
+    )
+    index = build_repository_index(
+        repository, max_files=10, deadline=Deadline.after(10),
+    )
+    executor = RepairToolExecutor(
+        repository_root=repository, repository_index=index, public_checks={},
+    )
+    context = SimpleNamespace(
+        issue="needed() must return the normalized public value",
+        working_diff="", failed_checks=(), counterexamples=(),
+        first_trace_divergences=(), causal_repair_cuts=(),
+        causal_cut_candidates=(),
+        relevant_source_snippets=({
+            "relative_path": "module.py", "snippet_start_line": 1,
+            "snippet_end_line": 1, "symbol": "VALUE",
+            "content": "VALUE = 1",
+        },),
+        active_program_slice={"files": ("module.py",), "symbols": ()},
+        failure_signature=None, first_project_frame=None,
+        baseline_output={"stderr": ""},
+        to_dict=lambda: {"issue": "needed() must return the normalized public value"},
+    )
+    monkeypatch.setattr(
+        "reachpatch.repair.deepseek_agent.build_repair_context",
+        lambda state, mode: context,
+    )
+    turn = 0
+
+    def transport(messages, schemas):
+        nonlocal turn
+        turn += 1
+        if turn == 1:
+            name = "declare_blocker"
+            arguments = {"reason": "need the exact needed implementation"}
+        elif turn == 2:
+            assert "needed() must return" in messages[-1]["content"]
+            name = "request_program_slice"
+            arguments = {"symbols": ["needed"], "relation_kinds": ["calls"]}
+        else:
+            raise AssertionError("accepted context expansion must end the revision")
+        return {
+            "role": "assistant", "content": "", "tool_calls": [{
+                "id": f"turn-{turn}", "type": "function",
+                "function": {"name": name, "arguments": json.dumps(arguments)},
+            }],
+        }
+
+    revision = PersistentDeepSeekAgent(
+        transport, max_tool_turns=8,
+    ).root_recovery(
+        SimpleNamespace(
+            program_graph=SimpleNamespace(
+                file_index={"module.py": ()}, resolve_symbol=lambda symbol: (),
+            ),
+            repository_index=index,
+        ),
+        GeneratorConversation.create("case"), executor,
+    )
+
+    assert turn == 2
+    assert revision.status == "CONTEXT_ONLY"
+    assert revision.context_requests[0].symbols == ("needed",)
+    assert not revision.edits
+
+
+def test_structural_recovery_retries_rejected_edit_with_issue_and_actual_source(
+    tmp_path, monkeypatch,
+):
+    repository = tmp_path / "repo"
+    repository.mkdir()
+    (repository / "module.py").write_text(
+        "VALUE = 1\n\ndef public():\n    return VALUE\n", encoding="utf-8",
+    )
+    index = build_repository_index(
+        repository, max_files=10, deadline=Deadline.after(10),
+    )
+    executor = RepairToolExecutor(
+        repository_root=repository, repository_index=index, public_checks={},
+    )
+    issue = "public() must return 2 while preserving its callable API"
+    context = SimpleNamespace(
+        issue=issue, working_diff="", failed_checks=(), counterexamples=(),
+        first_trace_divergences=(), causal_repair_cuts=(),
+        causal_cut_candidates=(),
+        relevant_source_snippets=({
+            "relative_path": "module.py", "snippet_start_line": 1,
+            "snippet_end_line": 1, "symbol": "VALUE",
+            "content": "VALUE = 1",
+        },),
+        active_program_slice={"files": ("module.py",), "symbols": ("public",)},
+        failure_signature=None, first_project_frame=None,
+        baseline_output={"stderr": ""},
+        to_dict=lambda: {"issue": issue},
+    )
+    monkeypatch.setattr(
+        "reachpatch.repair.deepseek_agent.build_repair_context",
+        lambda state, mode: context,
+    )
+    turn = 0
+
+    def transport(messages, schemas):
+        nonlocal turn
+        turn += 1
+        if turn == 1:
+            name = "declare_blocker"
+            arguments = {"reason": "need one more source decision"}
+        elif turn == 2:
+            name = "request_program_slice"
+            arguments = {"symbols": ["public"], "relation_kinds": ["calls"]}
+        elif turn == 3:
+            assert issue in messages[-1]["content"]
+            name = "apply_edits"
+            arguments = {
+                "mechanism": "causal_slice_rewrite",
+                "edits": [{
+                    "relative_path": "module.py", "start_line": 1,
+                    "end_line": 1, "expected_source": "VALUE = stale",
+                    "replacement": "VALUE = 2",
+                }],
+            }
+        elif turn == 4:
+            assert issue in messages[-1]["content"]
+            assert "actual source at requested range: 'VALUE = 1'" in messages[-1]["content"]
+            name = "apply_edits"
+            arguments = {
+                "mechanism": "causal_slice_rewrite",
+                "edits": [{
+                    "relative_path": "module.py", "start_line": 1,
+                    "end_line": 1, "expected_source": "VALUE = 1",
+                    "replacement": "VALUE = 2",
+                }],
+            }
+        else:
+            raise AssertionError("structural retry must remain bounded")
+        return {
+            "role": "assistant", "content": "", "tool_calls": [{
+                "id": f"turn-{turn}", "type": "function",
+                "function": {"name": name, "arguments": json.dumps(arguments)},
+            }],
+        }
+
+    revision = PersistentDeepSeekAgent(
+        transport, max_tool_turns=8,
+    ).root_recovery(
+        SimpleNamespace(
+            program_graph=SimpleNamespace(
+                file_index={"module.py": ()},
+                resolve_symbol=lambda symbol: ("node",) if symbol == "public" else (),
+            ),
+            repository_index=index,
+        ),
+        GeneratorConversation.create("case"), executor,
+    )
+
+    assert turn == 4
+    assert revision.status == "PROPOSED"
+    assert revision.edits[0].expected_source == "VALUE = 1"
+    assert revision.edits[0].replacement == "VALUE = 2"

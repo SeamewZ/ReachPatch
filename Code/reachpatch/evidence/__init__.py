@@ -8,6 +8,7 @@ from .hypotheses import (
     freeze_assignment,
 )
 from .semantic_graph import SemanticGraph, build_semantic_graph
+from .extract import public_discussion_evidence
 
 __all__ = [
     "HypothesisAssignment",
@@ -17,4 +18,5 @@ __all__ = [
     "build_semantic_graph",
     "enumerate_assignments",
     "freeze_assignment",
+    "public_discussion_evidence",
 ]

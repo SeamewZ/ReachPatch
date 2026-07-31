@@ -248,6 +248,58 @@ def materialize_active_challenges(
     if max_challenges < 1:
         raise ValueError("max_challenges must be positive")
     total_started = time.perf_counter()
+    # ActiveBindingGraph intentionally has no legacy oracle/scenario product.
+    # Public target/preservation comparisons are executed directly by the
+    # project runner; retain bounded challenge frontiers so DICC can account
+    # for the delegated checks without manufacturing a second binding graph.
+    if hasattr(binding_graph, "target_check_ids") and not getattr(
+        binding_graph, "scenarios", {}
+    ):
+        graph = ChallengeGraph(
+            requirement_graph_hash=binding_graph.requirement_graph_hash,
+            program_graph_hash=binding_graph.program_slice_hash,
+            binding_graph_hash=binding_graph.graph_hash(),
+            diff_hash=getattr(actual_diff, "canonical_diff_hash", "BASELINE")
+            if actual_diff is not None else "BASELINE",
+        )
+        for unit in sorted(binding_graph.units.values(), key=lambda item: item.binding_id):
+            if not (
+                unit.target_check_ids
+                or unit.preservation_check_ids
+                or unit.challenge_check_ids
+            ):
+                continue
+            graph.add_frontier(Frontier(
+                frontier_id=stable_id(
+                    "active-check-challenge", unit.binding_id,
+                    graph.diff_hash,
+                ),
+                kind="ACTIVE_CHECK_DELEGATED",
+                owner_id=unit.binding_id,
+                reason=(
+                    "paired public checks are executed directly and counted as "
+                    "real target/preservation challenge evidence"
+                ),
+                resolution_action="replay the affected executable check ids",
+                hard=False,
+                evidence_ids=tuple(dict.fromkeys((
+                    *unit.target_check_ids,
+                    *unit.preservation_check_ids,
+                    *unit.challenge_check_ids,
+                ))),
+            ))
+        graph.build_timings = {"total_seconds": time.perf_counter() - total_started}
+        graph.build_stats = {
+            "active_unit_count": len(binding_graph.units),
+            "cell_count": 0,
+            "frontier_count": len(graph.frontiers),
+            "delegated_check_count": len(set(
+                binding_graph.target_check_ids
+                + binding_graph.preservation_check_ids
+                + binding_graph.challenge_check_ids
+            )),
+        }
+        return graph
     graph = materialize_challenges(
         requirement_graph, program_graph, binding_graph,
         diff_hash=getattr(actual_diff, "canonical_diff_hash", "BASELINE") if actual_diff else "BASELINE",

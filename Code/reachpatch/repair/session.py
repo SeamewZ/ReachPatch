@@ -91,12 +91,12 @@ class PersistentGeneratorSession:
         intent: RepairIntent,
     ) -> RepairAction | None:
         units = [
-            unit for unit in state.binding_graph.units.values()
+            unit for unit in state.active_binding_graph.units.values()
             if unit.path_obligation_id in intent.losing_path_obligation_ids
         ]
         oracles = [
-            state.binding_graph.oracles[unit.oracle_id]
-            for unit in units if unit.oracle_id in state.binding_graph.oracles
+            state.active_binding_graph.oracles[unit.oracle_id]
+            for unit in units if unit.oracle_id in state.active_binding_graph.oracles
         ]
         relations = [oracle.relation for oracle in oracles if oracle.active_and_trusted]
         if not relations:

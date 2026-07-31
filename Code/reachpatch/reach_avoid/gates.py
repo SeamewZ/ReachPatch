@@ -2,10 +2,8 @@ from __future__ import annotations
 
 from typing import Iterable
 
-from reachpatch.binding_graph.closure import compute_binding_path_closure
 from reachpatch.models.controller import MechanicalCheck, ReachAvoidState, UnitOutcome
 from reachpatch.models.enums import OutcomeStatus
-from reachpatch.requirement_graph.closure import requirement_path_closure
 from reachpatch.challenge_graph.models import DICCStatus
 from reachpatch.execution.models import CheckClassification
 
@@ -14,7 +12,6 @@ def _hard_frontiers(state: ReachAvoidState) -> tuple[str, ...]:
     sources = (
         state.requirement_graph.frontiers.values(),
         state.program_graph.frontiers.values(),
-        state.binding_graph.frontiers.values(),
         state.challenge_graph.frontiers.values(),
     )
     return tuple(sorted({
@@ -113,24 +110,26 @@ def in_target_set(state: ReachAvoidState) -> bool:
             state.dicc_certificate is not None,
             state.dicc_certificate.status == DICCStatus.CLOSED
             if state.dicc_certificate is not None else False,
-            state.dicc_certificate.path_obligation_count > 0
-            if state.dicc_certificate is not None else False,
-            state.dicc_certificate.active_binding_count > 0
-            if state.dicc_certificate is not None else False,
             state.dicc_certificate.real_challenge_execution_count > 0
             if state.dicc_certificate is not None else False,
             not environment_invalid,
             state.checkpoint.safe,
+            all(
+                row.status == "PASSING"
+                for row in getattr(getattr(state, "requirement_coverage", None), "rows", {}).values()
+                if row.binding_unit_ids and row.executable_check_ids
+            ) if getattr(state, "requirement_coverage", None) is not None else True,
         ))
+    active_graph = getattr(state, "active_binding_graph", None)
+    if active_graph is None:
+        return False
     active_target_ids = {
-        unit.unit_id for unit in state.binding_graph.units.values()
-        if unit.status in {"ACTIVE", "READY"}
-        and state.requirement_graph.leaves[unit.leaf_id].authority_class.value != "PRESERVATION"
+        unit.unit_id for unit in active_graph.units.values()
+        if unit.target_check_ids
     }
     active_preservation_ids = {
-        unit.unit_id for unit in state.binding_graph.units.values()
-        if unit.status in {"ACTIVE", "READY"}
-        and state.requirement_graph.leaves[unit.leaf_id].authority_class.value == "PRESERVATION"
+        unit.unit_id for unit in active_graph.units.values()
+        if unit.preservation_check_ids
     }
     by_unit = {
         unit_id: [item for item in state.outcomes.values() if item.unit_id == unit_id]
@@ -158,8 +157,8 @@ def in_target_set(state: ReachAvoidState) -> bool:
     )
     diff_closed = bool(state.runtime_metrics.get("diff_adequacy_closed", False))
     hashes_current = (
-        state.binding_graph.requirement_graph_hash == state.requirement_graph.semantic_layer_hash()
-        and state.binding_graph.program_graph_hash == state.program_graph.program_hash()
+        active_graph.requirement_graph_hash == state.requirement_graph.semantic_layer_hash()
+        and active_graph.program_graph_hash == state.program_graph.program_hash()
     )
     return all((
         state.checkpoint.safe,
@@ -170,26 +169,31 @@ def in_target_set(state: ReachAvoidState) -> bool:
         not state.runtime_metrics.get("public_stable_fail_commands", ()),
         diff_closed,
         hashes_current,
-        not any(
-            frontier.hard
-            for frontier in state.binding_graph.oracle_frontiers.values()
-        ),
         not state.runtime_metrics.get("high_value_pending_challenge_ids", ()),
     ))
 
 
+def evidence_limited_complete(state: ReachAvoidState) -> bool:
+    return bool(
+        state.checkpoint.patch.canonical_diff
+        and state.target_recovery is not None
+        and not state.target_recovery.targets
+        and state.checkpoint.patch.status in {
+            "EVIDENCE_LIMITED_COMPLETE", "WORKING_UNCERTIFIED", "WORKING_IMPROVED",
+        }
+        and state.checkpoint.patch.status not in {"ROLLED_BACK", "EMPTY"}
+    )
+
+
 def terminal_avoid_reason(state: ReachAvoidState) -> str | None:
     if not state.remaining_budget.available() and not in_target_set(state):
-        if state.target_recovery is None or not state.target_recovery.targets:
-            return "TARGET_RECOVERY_BLOCKED"
         if state.checkpoint.patch.canonical_diff:
             return "REVISION_BUDGET_EXHAUSTED_WITH_UNCERTIFIED_PATCH"
         return "REVISION_BUDGET_EXHAUSTED_WITH_TARGET_FAILURE"
     if state.termination_status in {
         "NO_LEGAL_ACTION", "ENVIRONMENT_BLOCKED", "SEMANTIC_BLOCKED",
         "ORACLE_BLOCKED", "LOCALIZATION_BLOCKED", "GENERATOR_BLOCKED_EXTERNAL",
-        "TARGET_RECOVERY_BLOCKED", "GENERATOR_NONPROGRESS",
-        "NO_NEW_REPAIR_EVIDENCE", "MECHANICAL_FAILURE",
+        "GENERATOR_NONPROGRESS", "MECHANICAL_FAILURE",
     }:
         return state.termination_status
     return None

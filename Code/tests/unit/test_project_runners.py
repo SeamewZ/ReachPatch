@@ -310,6 +310,9 @@ def test_public_docker_broker_executes_real_check_without_daemon_exposure(
 ) -> None:
     repository = tmp_path / "case-tree"
     repository.mkdir()
+    (repository / ".git").write_text(
+        "gitdir: /hidden/repository/worktrees/case-tree\n", encoding="utf-8",
+    )
     (repository / "check.py").write_text(
         "import os\n"
         "from pathlib import Path\n"

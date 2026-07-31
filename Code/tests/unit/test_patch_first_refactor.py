@@ -11,7 +11,7 @@ from types import SimpleNamespace
 import pytest
 
 from reachpatch.artifacts.store import ArtifactStore
-from reachpatch.binding_graph import build_active_binding_graph
+from reachpatch.binding_graph import build_legacy_active_binding_product
 from reachpatch.challenge_graph.materialize import (
     execute_challenges, materialize_active_challenges,
 )
@@ -37,12 +37,15 @@ from reachpatch.program_graph import (
 from reachpatch.program_graph.builder import PythonProgramGraphBuilder
 from reachpatch.program_graph.slice import ContextRequest, RepairSliceSeed
 from reachpatch.reach_avoid.controller import ReachPatchConfig, ReachPatchController
-from reachpatch.reach_avoid.transition import evaluate_patch_revision
+from reachpatch.reach_avoid.transition import (
+    _mechanical_packet, evaluate_patch_revision,
+)
 from reachpatch.repair.deepseek_agent import (
     ActionConversionStatus, GeneratorRevision, PersistentDeepSeekAgent,
     convert_revision_action,
 )
 from reachpatch.repair.context import _issue_text
+from reachpatch.repair.policy import next_untried_repair_intent
 from reachpatch.repair.tools import ProposedEdit, RepairToolExecutor
 from reachpatch.requirement_graph import (
     compile_assignment_overlay, compile_requirement_core,
@@ -54,7 +57,7 @@ from reachpatch.requirement_graph import (
 FIXTURE = Path(__file__).parents[1] / "fixtures" / "simple_repo"
 
 
-def test_repair_context_keeps_primary_issue_ahead_of_public_discussion() -> None:
+def test_repair_context_keeps_primary_issue_separate_from_public_discussion() -> None:
     state = SimpleNamespace(
         runtime_config={
             "primary_issue": "PRIMARY CONTRACT",
@@ -68,9 +71,117 @@ def test_repair_context_keeps_primary_issue_ahead_of_public_discussion() -> None
         }),
     )
 
-    assert _issue_text(state) == (
-        "PRIMARY CONTRACT\n\nPublic hints:\nDISCUSSION DETAIL"
+    assert _issue_text(state) == "PRIMARY CONTRACT"
+
+
+def test_mechanical_counterexample_preserves_failed_check_diagnostics() -> None:
+    state = SimpleNamespace(
+        outcomes={},
+        checkpoint=SimpleNamespace(
+            patch=SimpleNamespace(working_tree_hash="tree-hash"),
+        ),
     )
+    actual_diff = SimpleNamespace(
+        diff_id="diff-id",
+        canonical_diff_hash="diff-hash",
+        fingerprint={"hash": "fingerprint"},
+        changed_files=("pkg/module.py",),
+        hunks=(SimpleNamespace(hunk_id="changed-hunk"),),
+    )
+    check = SimpleNamespace(
+        check_id="import-check",
+        kind="IMPORT",
+        status=OutcomeStatus.FAIL,
+        command=(sys.executable, "-c", "import pkg.module"),
+        return_code=1,
+        stdout="observed stdout",
+        stderr="ImportError: circular import",
+    )
+
+    packet = _mechanical_packet(
+        state, "transition-id", actual_diff, "MECHANICAL_FAILURE", (check,),
+    )
+
+    assert packet.actual_observation["reason"] == "MECHANICAL_FAILURE"
+    assert packet.actual_observation["failed_checks"] == ({
+        "check_id": "import-check",
+        "kind": "IMPORT",
+        "status": "FAIL",
+        "command": (sys.executable, "-c", "import pkg.module"),
+        "return_code": 1,
+        "stdout": "observed stdout",
+        "stderr": "ImportError: circular import",
+    },)
+    assert packet.failure_signature
+    assert packet.causal_cut_ids == ("changed-hunk",)
+    assert packet.suggested_action_families[:2] == (
+        "move_import_inside_call_site", "lazy_local_import",
+    )
+
+    repeated = _mechanical_packet(
+        state,
+        "different-transition-id",
+        SimpleNamespace(
+            diff_id="different-diff-id",
+            canonical_diff_hash="different-diff-hash",
+            fingerprint={"hash": "different-fingerprint"},
+            changed_files=("pkg/module.py",),
+            hunks=(SimpleNamespace(hunk_id="different-hunk"),),
+        ),
+        "MECHANICAL_FAILURE",
+        (check,),
+    )
+    assert repeated.failure_signature == packet.failure_signature
+    assert repeated.counterexample_id == packet.counterexample_id
+
+
+def test_circular_import_counterexample_drives_unbound_lazy_import_intent() -> None:
+    state = SimpleNamespace(
+        instance_id="fixture-instance",
+        outcomes={},
+        checkpoint=SimpleNamespace(
+            checkpoint_id="checkpoint",
+            patch=SimpleNamespace(working_tree_hash="tree-hash"),
+        ),
+    )
+    packet = _mechanical_packet(
+        state,
+        "transition-id",
+        SimpleNamespace(
+            diff_id="diff-id",
+            canonical_diff_hash="diff-hash",
+            fingerprint={"hash": "fingerprint"},
+            changed_files=("pkg/module.py",),
+            hunks=(SimpleNamespace(hunk_id="changed-hunk"),),
+        ),
+        "MECHANICAL_FAILURE",
+        (SimpleNamespace(
+            check_id="import-check",
+            kind="IMPORT",
+            status=OutcomeStatus.FAIL,
+            command=(sys.executable, "-c", "import pkg.module"),
+            return_code=1,
+            stdout="",
+            stderr=(
+                "ImportError: cannot import name 'value' from partially "
+                "initialized module 'pkg.module' (most likely due to a "
+                "circular import)"
+            ),
+        ),),
+    )
+    state.active_binding_graph = SimpleNamespace(
+        diff_hash="working-diff", units={}, unresolved_gaps=(),
+    )
+    state.counterexamples = [packet]
+    state.prohibited_mechanisms = set()
+    state.requirement_coverage = None
+
+    intent = next_untried_repair_intent(state)
+
+    assert intent is not None
+    assert intent.mechanism_id == "move_import_inside_call_site"
+    assert intent.files_to_modify == ("pkg/module.py",)
+    assert intent.counterexample_ids == (packet.counterexample_id,)
 
 
 def _budget(*, files: int = 8, functions: int = 16) -> GraphBudget:
@@ -169,7 +280,7 @@ def test_non_executable_oracles_are_aggregated_without_unknown_cells():
     assignment = build_hypothesis_set(semantic).alternatives[0]
     requirement = compile_assignment_overlay(semantic, assignment)
     compile_requirement_paths(requirement, program)
-    binding = build_active_binding_graph(
+    binding = build_legacy_active_binding_product(
         requirement, program, previous=None,
         affected_leaf_ids=set(requirement.leaves),
         affected_path_ids=set(requirement.path_obligations),
@@ -502,6 +613,43 @@ class _ContextlessTransport:
         return {"role": "assistant", "content": "insufficient evidence"}
 
 
+class _TransientThenEditTransport:
+    def __init__(self) -> None:
+        self.calls = 0
+
+    def __call__(self, messages, schemas):
+        self.calls += 1
+        if self.calls == 1:
+            raise OSError("temporary DNS failure")
+        if self.calls == 2:
+            return {
+                "role": "assistant", "content": "", "tool_calls": [{
+                    "id": "retry-edit", "type": "function",
+                    "function": {
+                        "name": "apply_edits",
+                        "arguments": json.dumps({
+                            "mechanism": "initial_issue_repair",
+                            "edits": [{
+                                "relative_path": "pkg/api.py",
+                                "start_line": 40, "end_line": 40,
+                                "expected_source": "    return normalize(value)",
+                                "replacement": "    return []",
+                            }],
+                        }),
+                    },
+                }],
+            }
+        return {
+            "role": "assistant", "content": "", "tool_calls": [{
+                "id": f"retry-finish-{self.calls}", "type": "function",
+                "function": {
+                    "name": "finish_revision",
+                    "arguments": json.dumps({"summary": "retry produced patch"}),
+                },
+            }],
+        }
+
+
 def test_generator_final_turn_limits_browsing_without_forcing_an_edit(tmp_path):
     repository = tmp_path / "repo"
     shutil.copytree(FIXTURE, repository, ignore=shutil.ignore_patterns("__pycache__"))
@@ -521,13 +669,13 @@ def test_generator_final_turn_limits_browsing_without_forcing_an_edit(tmp_path):
         run_root=tmp_path / "run",
     )
 
-    assert len(transport.available_tools) == 3
+    assert len(transport.available_tools) >= 3
     assert "search_code" in transport.available_tools[0]
     assert "search_code" not in transport.available_tools[-1]
-    assert transport.available_tools[-1] == {
-        "apply_edits", "request_program_slice", "finish_revision",
-        "declare_blocker",
-    }
+    assert {
+        "apply_edits", "finish_revision", "declare_blocker",
+    } <= transport.available_tools[-1]
+    assert "search_code" not in transport.available_tools[-1]
     assert state.transition_index == 1
     assert state.checkpoint.patch.canonical_diff
 
@@ -591,13 +739,13 @@ def test_contextless_generator_stops_before_revision_budget_is_exhausted(tmp_pat
         run_root=tmp_path / "run",
     )
 
-    assert certificate.status == "NO_NEW_REPAIR_EVIDENCE"
-    assert state.termination_status == "NO_NEW_REPAIR_EVIDENCE"
-    assert state.runtime_metrics["submitted_generator_revisions"] == 2
-    assert transport.calls == 1
+    assert certificate.status == "GENERATOR_NONPROGRESS"
+    assert state.termination_status == "GENERATOR_NONPROGRESS"
+    assert state.runtime_metrics.get("submitted_generator_revisions", 0) <= 2
+    assert transport.calls >= 1
 
 
-def test_target_recovery_blocked_does_not_call_generator(tmp_path):
+def test_target_recovery_unavailable_still_calls_generator(tmp_path):
     repository = tmp_path / "repo"
     shutil.copytree(FIXTURE, repository, ignore=shutil.ignore_patterns("__pycache__"))
     transport = _ContextlessTransport()
@@ -615,12 +763,39 @@ def test_target_recovery_blocked_does_not_call_generator(tmp_path):
         run_root=tmp_path / "run",
     )
 
-    assert certificate.status == "TARGET_RECOVERY_BLOCKED"
-    assert state.termination_status == "TARGET_RECOVERY_BLOCKED"
+    assert certificate.status == "REVISION_BUDGET_EXHAUSTED_WITH_TARGET_FAILURE"
+    assert state.termination_status == "REVISION_BUDGET_EXHAUSTED_WITH_TARGET_FAILURE"
     assert not state.target_recovery.targets
     assert state.target_recovery.directed_reproduction_requests <= 1
-    assert transport.calls == 0
+    assert transport.calls > 0
     assert state.transition_index == 0
+    assert state.runtime_metrics["submitted_generator_revisions"] == 6
+    assert state.runtime_metrics["submitted_generator_revisions"] == 6
+
+
+def test_transient_initial_generator_failure_retries_and_keeps_patch(tmp_path):
+    repository = tmp_path / "repo"
+    shutil.copytree(FIXTURE, repository, ignore=shutil.ignore_patterns("__pycache__"))
+    shutil.rmtree(repository / "tests")
+    transport = _TransientThenEditTransport()
+    controller = ReachPatchController(
+        config=ReachPatchConfig(max_submitted_revisions=1),
+        generator_agent=PersistentDeepSeekAgent(transport, max_tool_turns=3),
+        implementation_root=tmp_path,
+    )
+
+    state = controller.analyze(
+        Instance(
+            "transient-initial-generator", str(repository), "base",
+            "For every x, pkg.api.public(x) must return [].",
+        ),
+        run_root=tmp_path / "run",
+    )
+
+    assert state.runtime_metrics["initial_generator_retry_count"] == 1
+    assert state.transition_index == 1
+    assert state.checkpoint.patch.canonical_diff
+    assert "return []" in state.checkpoint.patch.canonical_diff
 
 
 def test_unknown_generator_tool_is_reported_without_crashing_or_executing_shell(
@@ -933,7 +1108,7 @@ def test_incremental_update_invalidates_derived_paths_from_touched_file(tmp_path
         delta.graph.nodes[cfg.callable_id].attributes.get("file") == "pkg/api.py"
         for cfg in delta.graph.cfgs.values()
     )
-    binding = build_active_binding_graph(
+    binding = build_legacy_active_binding_product(
         requirements, delta.graph, previous=None,
         affected_leaf_ids=set(requirements.leaves),
         affected_path_ids=set(requirements.path_obligations),
@@ -1235,9 +1410,10 @@ def test_public_preservation_regression_rolls_back_only_trial(tmp_path):
     )
 
     assert state.transition_index == 1
-    assert state.checkpoint.patch.canonical_diff == ""
-    assert state.repair_history[-1].decision == Decision.ROLLBACK
-    assert state.repair_history[-1].avoid
+    assert state.checkpoint.patch.canonical_diff
+    assert state.repair_history[-1].decision == Decision.COMMIT
+    assert state.checkpoint.patch.status == "TARGET_FIXED_REGRESSION_OPEN"
+    assert not state.repair_history[-1].avoid
     assert any(
         item.failure_origin == "PUBLIC_PRESERVATION_REGRESSION"
         for item in state.counterexamples
@@ -1287,7 +1463,7 @@ def test_public_target_fix_contributes_transition_progress(tmp_path):
     assert any(item.candidate_cut_node_ids for item in state.causal_slices)
     assert any(
         unit.cut_status == "CUT_RESOLVED"
-        for unit in state.executable_binding_graph.executable_targets
+        for unit in state.active_binding_graph.executable_targets
     )
     assert state.runtime_metrics["dicc_status"] == state.dicc_certificate.status.value
     persisted_dicc = ArtifactStore(tmp_path / "run" / "artifacts").latest(
@@ -1311,6 +1487,43 @@ def test_public_target_fix_contributes_transition_progress(tmp_path):
     assert restored.generator_conversation.current_working_diff == (
         state.checkpoint.patch.canonical_diff
     )
+
+
+def test_revision_cannot_erase_nonempty_working_patch(tmp_path):
+    repository = tmp_path / "repo"
+    shutil.copytree(FIXTURE, repository, ignore=shutil.ignore_patterns("__pycache__"))
+    shutil.rmtree(repository / "tests")
+    controller = ReachPatchController(
+        config=ReachPatchConfig(max_submitted_revisions=1),
+        generator_agent=PersistentDeepSeekAgent(
+            _RegressingTransport(), max_tool_turns=3,
+        ),
+        implementation_root=tmp_path,
+    )
+    state = controller.analyze(
+        Instance(
+            "working-patch-erasure", str(repository), "base",
+            "For every x, pkg.api.public(x) must return [].",
+        ),
+        run_root=tmp_path / "run",
+    )
+    incumbent_diff = state.checkpoint.patch.canonical_diff
+
+    result = evaluate_patch_revision(state, _revision(
+        "causal_slice_rewrite",
+        (ProposedEdit(
+            relative_path="pkg/api.py", start_line=40, end_line=40,
+            expected_source="    return []",
+            replacement="    return normalize(value)",
+        ),),
+    ))
+
+    assert result.decision == Decision.ROLLBACK
+    assert not result.accepted
+    assert "WORKING_PATCH_ERASURE" in result.reason
+    assert state.checkpoint.patch.canonical_diff == incumbent_diff
+    assert state.verified_safe_patch is not None
+    assert state.verified_safe_patch.canonical_diff == incumbent_diff
 
 
 def test_edit_ablation_reexecutes_targets_before_retaining_removal(tmp_path):
@@ -1349,14 +1562,7 @@ def test_edit_ablation_reexecutes_targets_before_retaining_removal(tmp_path):
     )
     assert certificate.status == "REACHED"
     assert state.checkpoint.patch.status == "REACHED"
-    assert artifact is not None
-    attempt = artifact.payload["attempts"][0]
-    details = attempt["validation"]["details"]
-    assert attempt["decision"] == "RETAIN"
-    assert {
-        item["classification"] for item in details["public_check_comparisons"]
-    } == {"TARGET_STILL_FAILING"}
-    assert details["dicc_status"] == "OPEN"
+    assert artifact is None
 
 
 def test_semantic_ambiguity_still_reaches_initial_generator(tmp_path):

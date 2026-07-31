@@ -26,9 +26,12 @@ from .models import (
 )
 from .worktree import TransactionalTrial, WorktreeManager
 from .target_recovery import (
+    TargetCandidate,
     TargetRecoveryResult,
+    TargetRecoveryStatus,
     is_executable_test_path,
     recover_executable_targets,
+    recover_executable_targets_bounded,
 )
 from .runners import (
     AstropyRunner,
@@ -70,7 +73,9 @@ __all__ = [
     "SphinxRunner",
     "SymPyRunner",
     "TransactionalTrial",
+    "TargetCandidate",
     "TargetRecoveryResult",
+    "TargetRecoveryStatus",
     "WorktreeManager",
     "mechanical_pass",
     "run_mechanical_checks",
@@ -78,5 +83,6 @@ __all__ = [
     "classify_check_pair",
     "select_project_runner",
     "recover_executable_targets",
+    "recover_executable_targets_bounded",
     "is_executable_test_path",
 ]

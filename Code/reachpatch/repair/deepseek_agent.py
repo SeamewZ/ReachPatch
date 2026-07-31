@@ -18,6 +18,8 @@ from reachpatch.repair.tools import ProposedEdit, RepairToolExecutor
 
 SYSTEM_PROMPT = """You are the Repair Player maintaining one persistent working patch.
 Preserve previously validated edits. Use repository tools to inspect only relevant code.
+The primary issue is normative. Public discussion is provisional context only: use it
+for witnesses or mechanisms, never as a new requirement when it differs from the issue.
 You may make multiple coordinated edits when they implement one repair mechanism.
 For apply_edits, choose exactly one registered mechanism value from the tool schema;
 put a human-readable explanation in finish_revision instead of inventing a mechanism name.
@@ -48,6 +50,7 @@ class GeneratorConversation(SerializableRecord):
     unresolved_counterexamples: set[str] = field(default_factory=set)
     passed_preservation_checks: set[str] = field(default_factory=set)
     last_evidence_fingerprint: str | None = None
+    evidence_repeat_counts: dict[str, int] = field(default_factory=dict)
     revision_count: int = 0
 
     @classmethod
@@ -441,6 +444,11 @@ class PersistentDeepSeekAgent:
         max_revisions: int = 6,
     ) -> None:
         self.transport = transport
+        # Keep the caller's bound for deterministic transports.  The
+        # controller may raise the initial-generation budget to the production
+        # default, but short-budget fixtures must still be able to terminate
+        # their contextless loop predictably.
+        self.requested_max_tool_turns = max_tool_turns
         self.max_tool_turns = max_tool_turns
         self.max_revisions = max_revisions
 
@@ -477,30 +485,79 @@ class PersistentDeepSeekAgent:
         ]
 
     @staticmethod
-    def _exact_source_anchor(context) -> tuple[dict[str, Any], ...]:
-        """Keep exact causal source available after conversation compaction."""
+    def _exact_source_anchor(
+        context,
+        conversation: GeneratorConversation | None = None,
+    ) -> tuple[dict[str, Any], ...]:
+        """Keep exact implementation source available after compaction.
 
-        snippets = sorted(
-            context.relevant_source_snippets,
-            key=lambda item: (
-                item.get("origin") == "TARGET_REPRODUCTION_ARTIFACT",
-                max(
-                    0,
-                    int(item.get("snippet_end_line", item.get("end_line", 0)))
-                    - int(item.get("snippet_start_line", item.get("start_line", 0))),
-                ),
-                str(item.get("relative_path", "")),
-            ),
-        )
+        The initial context is deliberately bounded and can contain low-value
+        lexical matches (for example examples/ snippets).  Once the model has
+        inspected a file, its tool result is stronger evidence than those
+        matches, so fold recent ``read_file`` results into the correction
+        anchor and rank implementation paths ahead of examples and tests.
+        """
+
+        snippets = list(context.relevant_source_snippets)
+        if conversation is not None:
+            for message in conversation.messages:
+                if message.get("role") != "tool":
+                    continue
+                try:
+                    payload = json.loads(message.get("content") or "{}")
+                except (TypeError, ValueError, json.JSONDecodeError):
+                    continue
+                if not isinstance(payload, dict) or not payload.get("path"):
+                    continue
+                content = payload.get("content")
+                if not isinstance(content, str) or not content.strip():
+                    continue
+                snippets.append({
+                    "relative_path": str(payload["path"]),
+                    "start_line": int(payload.get("start_line", 1)),
+                    "end_line": int(payload.get("end_line", 1)),
+                    "snippet_start_line": int(payload.get("start_line", 1)),
+                    "snippet_end_line": int(payload.get("end_line", 1)),
+                    "symbol": "<recent-read-file>",
+                    "content": content,
+                    "origin": "RECENT_READ_FILE",
+                })
+
+        def source_priority(item: dict[str, Any]) -> tuple[int, int, int, int, str]:
+            relative = str(item.get("relative_path", ""))
+            parts = {part.lower() for part in Path(relative).parts}
+            implementation = not bool(
+                parts & {"examples", "example", "benchmarks", "docs", "doc", "tests", "test"}
+            )
+            recent = item.get("origin") == "RECENT_READ_FILE"
+            explicit_symbol = not str(item.get("symbol", "")).startswith("<")
+            width = max(
+                0,
+                int(item.get("snippet_end_line", item.get("end_line", 0)))
+                - int(item.get("snippet_start_line", item.get("start_line", 0))),
+            )
+            # Recent implementation reads are the most reliable expected_source
+            # anchors; narrow snippets are preferred within the same source.
+            return (
+                0 if implementation else 1,
+                0 if recent else 1,
+                0 if explicit_symbol else 1,
+                width,
+                relative,
+            )
+
+        snippets = sorted(snippets, key=source_priority)
         selected: list[dict[str, Any]] = []
-        seen: set[tuple[str, str]] = set()
+        seen: set[tuple[str, int, int, str]] = set()
         total_characters = 0
         for item in snippets:
             content = str(item.get("content", ""))
             relative_path = str(item.get("relative_path", ""))
             if not relative_path or not content:
                 continue
-            key = (relative_path, content)
+            start_line = int(item.get("snippet_start_line", item.get("start_line", 1)))
+            end_line = int(item.get("snippet_end_line", item.get("end_line", start_line)))
+            key = (relative_path, start_line, end_line, content)
             if key in seen:
                 continue
             if selected and total_characters + len(content) > 14000:
@@ -518,9 +575,53 @@ class PersistentDeepSeekAgent:
                 "content": content,
             })
             total_characters += len(content)
-            if len(selected) >= 3:
+            if len(selected) >= 5:
                 break
         return tuple(selected)
+
+    @classmethod
+    def _repair_anchor(
+        cls,
+        context,
+        conversation: GeneratorConversation | None = None,
+    ) -> dict[str, Any]:
+        """Keep normative and executable evidence across message compaction."""
+
+        unresolved_requirements = tuple(
+            row for row in getattr(context, "requirement_coverage", ())
+            if str(row.get("status", ""))
+            in {"FAILING", "UNBOUND", "UNTESTABLE", "PRESERVATION_RISK", "UNKNOWN"}
+        )
+        return {
+            "issue": context.issue,
+            "public_discussion_context": getattr(
+                context, "public_discussion", ""
+            ),
+            "authority_rule": (
+                "primary issue and executable public contracts are normative; "
+                "public discussion is provisional"
+            ),
+            "requirement_coverage": unresolved_requirements,
+            "active_target_check": getattr(context, "active_target_check", None),
+            "failed_checks": getattr(context, "failed_checks", ()),
+            "counterexamples": getattr(context, "counterexamples", ()),
+            "preferred_action_families": getattr(
+                context, "suggested_action_families", ()
+            ),
+            "failure_signature": context.failure_signature,
+            "first_project_frame": context.first_project_frame,
+            "causal_cut_candidates": context.causal_cut_candidates[:3],
+            "exact_source_snippets": cls._exact_source_anchor(
+                context, conversation
+            ),
+            "baseline_output": context.baseline_output,
+            "patched_output": getattr(context, "patched_output", None),
+            "preservation_checks": getattr(context, "preservation_checks", ()),
+            "prohibited_mechanisms": getattr(
+                context, "prohibited_mechanisms", ()
+            ),
+            "repair_intent": getattr(context, "repair_intent", None),
+        }
 
     @staticmethod
     def _requested_symbol_status(state, symbols: tuple[str, ...]) -> tuple[
@@ -549,6 +650,7 @@ class PersistentDeepSeekAgent:
         context = build_repair_context(state, mode=mode)
         evidence_fingerprint = content_hash({
             "issue": context.issue,
+            "public_discussion": getattr(context, "public_discussion", ""),
             "working_diff": context.working_diff,
             "failed_checks": context.failed_checks,
             "counterexamples": context.counterexamples,
@@ -559,20 +661,23 @@ class PersistentDeepSeekAgent:
             "active_slice_files": context.active_program_slice.get("files", ()),
             "active_slice_symbols": context.active_program_slice.get("symbols", ()),
         })
-        if (
+        repeated_evidence = (
             mode != "INITIAL"
             and conversation.last_evidence_fingerprint == evidence_fingerprint
-        ):
-            return GeneratorRevision(
-                revision_id=stable_id(
-                    "generator-no-new-evidence", conversation.conversation_id,
-                    evidence_fingerprint,
+        )
+        if repeated_evidence:
+            count = conversation.evidence_repeat_counts.get(evidence_fingerprint, 0) + 1
+            conversation.evidence_repeat_counts[evidence_fingerprint] = count
+            conversation.messages.append({
+                "role": "system",
+                "content": (
+                    "The observable failure repeated. Do not stop. Diagnose why the "
+                    "previous mechanism did not change behavior, preserve the current "
+                    "working diff, and revise the causal mechanism. Use a different "
+                    "mechanism when it is prohibited by the repair context. Repetition "
+                    f"count for this evidence is {count}."
                 ),
-                mechanism="causal_slice_rewrite",
-                edits=(), summary="no new repair evidence",
-                context_requests=(), requested_public_checks=(),
-                tool_turns=0, status="NO_NEW_REPAIR_EVIDENCE",
-            )
+            })
         if conversation.revision_count >= self.max_revisions:
             return GeneratorRevision(
                 revision_id=stable_id(
@@ -596,15 +701,9 @@ class PersistentDeepSeekAgent:
         invalid_feedback = ""
         final_correction_used = False
         synthesis_edit_only = False
-        evidence_anchor = json.dumps({
-            "failure_signature": context.failure_signature,
-            "first_project_frame": context.first_project_frame,
-            "causal_cut_candidates": context.causal_cut_candidates[:3],
-            "exact_source_snippets": self._exact_source_anchor(context),
-            "baseline_stderr": (
-                str((context.baseline_output or {}).get("stderr", ""))[-2000:]
-            ),
-        }, sort_keys=True)
+        evidence_anchor = json.dumps(
+            self._repair_anchor(context, conversation), sort_keys=True
+        )
         while turns < self.max_tool_turns:
             turns += 1
             schemas = _tool_schema()
@@ -620,6 +719,13 @@ class PersistentDeepSeekAgent:
                 )
             )
             if synthesis_turn:
+                # Rebuild the anchor after every inspection turn so the final
+                # synthesis sees the exact source just returned by read_file,
+                # rather than the low-confidence lexical snippets from the
+                # initial context projection.
+                evidence_anchor = json.dumps(
+                    self._repair_anchor(context, conversation), sort_keys=True
+                )
                 conversation.messages.append({
                     "role": "system",
                     "content": (
@@ -673,6 +779,19 @@ class PersistentDeepSeekAgent:
             calls = message.get("tool_calls") or ()
             if not calls:
                 summary = str(message.get("content") or "revision response without finish tool")
+                finish_reason = str(message.get("finish_reason", "")).lower()
+                if finish_reason == "length":
+                    conversation.messages.append({
+                        "role": "user",
+                        "content": (
+                            "The response was truncated. Preserve the current working "
+                            "diff and return one compact structured tool action now. "
+                            "Omit repeated reasoning and use apply_edits, "
+                            "request_program_slice, finish_revision, or declare_blocker."
+                        ),
+                    })
+                    if turns < self.max_tool_turns:
+                        continue
                 if turns < self.max_tool_turns and (
                     synthesis_turn or self.max_tool_turns >= 6
                 ):
@@ -822,6 +941,302 @@ class PersistentDeepSeekAgent:
                     ),
                 })
         conversation.attempted_mechanisms.append(mechanism)
+
+        # A long initial pass can spend its last turns on source browsing or be
+        # truncated immediately before emitting the edit.  Preserve the
+        # persistent working tree and give the model one compact, tool-only
+        # synthesis opportunity.  This is deliberately limited to initial
+        # generation and to production-sized budgets; short deterministic test
+        # transports and revision calls retain their normal turn limits.
+        blocker_reason = str((tools.blocker or {}).get("reason", "")).lower()
+        model_declared_blocker = bool(tools.blocker) and not any(
+            marker in blocker_reason
+            for marker in ("repository", "worktree", "api", "cannot save", "unavailable")
+        )
+        empty_patch_recovery = (
+            mode == "INITIAL"
+            or (mode == "ROOT_RECOVERY" and not context.working_diff)
+        )
+        if (
+            empty_patch_recovery
+            and self.max_tool_turns >= 6
+            and self.requested_max_tool_turns >= 6
+            and not tools.staged_edits
+            and (tools.blocker is None or model_declared_blocker)
+            and (
+                not tools.context_requests
+                or model_declared_blocker
+                or bool(context.relevant_source_snippets)
+            )
+        ):
+            if model_declared_blocker:
+                # A model-level "insufficient evidence" declaration is not an
+                # external failure.  Keep the conversation recoverable and let
+                # the bounded structural correction or root recovery decide.
+                tools.blocker = None
+            correction_prompt = (
+                "This repair pass did not stage a patch. This is a structural "
+                "correction, not a request for more browsing. Preserve any current "
+                "working diff, use only the exact source already returned, and call "
+                "exactly one final tool: apply_edits for the smallest complete fix "
+                "or request_program_slice for one concrete missing symbol. Actual "
+                "repository/API failures are handled by the controller. Do not "
+                "return prose or finish_revision without edits. Execution anchor: "
+                + json.dumps(
+                    self._repair_anchor(context, conversation), sort_keys=True
+                )
+            )
+            conversation.messages.append({"role": "user", "content": correction_prompt})
+            correction_schemas = _tool_schema(frozenset({
+                "apply_edits", "request_program_slice",
+            }))
+            try:
+                constrained_call = getattr(
+                    self.transport, "call_with_tool_choice", None
+                )
+                correction_message = (
+                    constrained_call(
+                        self._request_messages(conversation),
+                        correction_schemas,
+                        "required",
+                    )
+                    if callable(constrained_call)
+                    else self.transport(
+                        self._request_messages(conversation), correction_schemas
+                    )
+                )
+            except GeneratorBlockedExternal:
+                raise
+            except Exception as exc:
+                raise GeneratorBlockedExternal(
+                    f"deepseek_{mode.lower()}_structural_correction", exc
+                ) from exc
+            conversation.messages.append(correction_message)
+            correction_calls = correction_message.get("tool_calls") or ()
+            accepted_context_expansion = False
+            for call in correction_calls:
+                function = call.get("function", {})
+                name = str(function.get("name", ""))
+                try:
+                    arguments = json.loads(function.get("arguments") or "{}")
+                    if name == "apply_edits":
+                        mechanism = str(arguments.pop("mechanism", mechanism))
+                        edits = tuple(
+                            ProposedEdit(**item) for item in arguments["edits"]
+                        )
+                        output = tools.apply_edits(edits)
+                        summary = "structural correction staged the initial patch"
+                    elif name == "request_program_slice":
+                        requested_symbols = tuple(map(str, arguments["symbols"]))
+                        active, expandable, unknown = self._requested_symbol_status(
+                            state, requested_symbols
+                        )
+                        if not expandable:
+                            output = {
+                                "error": (
+                                    "CONTEXT_ALREADY_ACTIVE" if active
+                                    else "SYMBOL_NOT_FOUND"
+                                ),
+                                "active_symbols": list(active),
+                                "unknown_symbols": list(unknown),
+                                "instruction": (
+                                    "Use the exact implementation source already in "
+                                    "the correction anchor and call apply_edits."
+                                ),
+                            }
+                            invalid_synthesis_calls += 1
+                        else:
+                            output = tools.request_program_slice(
+                                symbols=expandable,
+                                relation_kinds=arguments["relation_kinds"],
+                            )
+                            summary = "requested one targeted source slice"
+                            accepted_context_expansion = True
+                    else:
+                        output = {
+                            "error": "INVALID_TOOL",
+                            "requested_tool": name,
+                            "allowed_tools": ["apply_edits", "request_program_slice"],
+                        }
+                        invalid_synthesis_calls += 1
+                except (
+                    OSError, ValueError, KeyError, TypeError,
+                    subprocess.SubprocessError, json.JSONDecodeError,
+                ) as exc:
+                    output = {"error": f"{type(exc).__name__}: {exc}"}
+                    invalid_synthesis_calls += 1
+                conversation.messages.append({
+                    "role": "tool",
+                    "tool_call_id": call.get("id"),
+                    "content": json.dumps(output, sort_keys=True),
+                })
+
+            # A model can spend the correction call on a redundant slice request
+            # even though the exact implementation was already inspected. Give
+            # that case one bounded convergence call using only the edit tool.
+            if (
+                not tools.staged_edits
+                and tools.blocker is None
+                and not accepted_context_expansion
+                and (context.relevant_source_snippets or conversation.inspected_files)
+                and any(
+                    str(call.get("function", {}).get("name", ""))
+                    in {"request_program_slice", "apply_edits"}
+                    for call in correction_calls
+                )
+            ):
+                conversation.messages.append({
+                    "role": "user",
+                    "content": (
+                        "The correction request did not stage an edit. The repository "
+                        "source is already available in the exact anchor and recent "
+                        "read results. Call apply_edits now for the smallest complete "
+                        "fix. Do not request another program slice. The replacement "
+                        "must be non-empty and differ from expected_source. Use exact "
+                        "expected_source text from this repair anchor: "
+                        + json.dumps(
+                            self._repair_anchor(context, conversation),
+                            sort_keys=True,
+                        )
+                    ),
+                })
+                recovery_schemas = _tool_schema(frozenset({"apply_edits"}))
+                try:
+                    constrained_call = getattr(
+                        self.transport, "call_with_tool_choice", None
+                    )
+                    recovery_message = (
+                        constrained_call(
+                            self._request_messages(conversation),
+                            recovery_schemas,
+                            "required",
+                        )
+                        if callable(constrained_call)
+                        else self.transport(
+                            self._request_messages(conversation), recovery_schemas
+                        )
+                    )
+                except GeneratorBlockedExternal:
+                    raise
+                except Exception as exc:
+                    raise GeneratorBlockedExternal(
+                        f"deepseek_{mode.lower()}_structural_recovery", exc
+                    ) from exc
+                conversation.messages.append(recovery_message)
+                recovery_failure = ""
+                for call in (recovery_message.get("tool_calls") or ()):
+                    function = call.get("function", {})
+                    name = str(function.get("name", ""))
+                    try:
+                        arguments = json.loads(function.get("arguments") or "{}")
+                        if name == "apply_edits":
+                            mechanism = str(arguments.pop("mechanism", mechanism))
+                            edits = tuple(
+                                ProposedEdit(**item) for item in arguments["edits"]
+                            )
+                            output = tools.apply_edits(edits)
+                            summary = "structural recovery staged a working patch"
+                        else:
+                            output = {
+                                "error": "INVALID_TOOL",
+                                "requested_tool": name,
+                                "allowed_tools": ["apply_edits"],
+                            }
+                            invalid_synthesis_calls += 1
+                    except (
+                        OSError, ValueError, KeyError, TypeError,
+                        subprocess.SubprocessError, json.JSONDecodeError,
+                    ) as exc:
+                        output = {"error": f"{type(exc).__name__}: {exc}"}
+                        recovery_failure = output["error"]
+                        invalid_synthesis_calls += 1
+                    conversation.messages.append({
+                        "role": "tool",
+                        "tool_call_id": call.get("id"),
+                        "content": json.dumps(output, sort_keys=True),
+                    })
+
+                # The forced edit can still contain truncated JSON, stale line
+                # numbers, or a no-op replacement. Give it one final bounded
+                # retry with the mechanical validation error and full normative
+                # anchor, rather than spending another controller revision on
+                # the same malformed action.
+                if not tools.staged_edits and recovery_failure:
+                    conversation.messages.append({
+                        "role": "user",
+                        "content": (
+                            "The required apply_edits call was mechanically rejected: "
+                            + recovery_failure
+                            + ". Correct that exact validation failure now. Call only "
+                            "apply_edits with valid JSON, a non-empty changed "
+                            "replacement, and expected_source copied exactly from the "
+                            "actual source or repair anchor. Repair anchor: "
+                            + json.dumps(
+                                self._repair_anchor(context, conversation),
+                                sort_keys=True,
+                            )
+                        ),
+                    })
+                    retry_schemas = _tool_schema(frozenset({"apply_edits"}))
+                    try:
+                        constrained_call = getattr(
+                            self.transport, "call_with_tool_choice", None
+                        )
+                        retry_message = (
+                            constrained_call(
+                                self._request_messages(conversation),
+                                retry_schemas,
+                                "required",
+                            )
+                            if callable(constrained_call)
+                            else self.transport(
+                                self._request_messages(conversation), retry_schemas
+                            )
+                        )
+                    except GeneratorBlockedExternal:
+                        raise
+                    except Exception as exc:
+                        raise GeneratorBlockedExternal(
+                            f"deepseek_{mode.lower()}_structural_retry", exc
+                        ) from exc
+                    conversation.messages.append(retry_message)
+                    for call in (retry_message.get("tool_calls") or ()):
+                        function = call.get("function", {})
+                        name = str(function.get("name", ""))
+                        try:
+                            arguments = json.loads(
+                                function.get("arguments") or "{}"
+                            )
+                            if name == "apply_edits":
+                                mechanism = str(
+                                    arguments.pop("mechanism", mechanism)
+                                )
+                                edits = tuple(
+                                    ProposedEdit(**item)
+                                    for item in arguments["edits"]
+                                )
+                                output = tools.apply_edits(edits)
+                                summary = (
+                                    "structural retry staged a working patch"
+                                )
+                            else:
+                                output = {
+                                    "error": "INVALID_TOOL",
+                                    "requested_tool": name,
+                                    "allowed_tools": ["apply_edits"],
+                                }
+                                invalid_synthesis_calls += 1
+                        except (
+                            OSError, ValueError, KeyError, TypeError,
+                            subprocess.SubprocessError, json.JSONDecodeError,
+                        ) as exc:
+                            output = {"error": f"{type(exc).__name__}: {exc}"}
+                            invalid_synthesis_calls += 1
+                        conversation.messages.append({
+                            "role": "tool",
+                            "tool_call_id": call.get("id"),
+                            "content": json.dumps(output, sort_keys=True),
+                        })
         active_files = set(state.program_graph.file_index)
         for relative in sorted({item.relative_path for item in tools.staged_edits} - active_files):
             tools.context_requests.append(__import__(

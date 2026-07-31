@@ -169,7 +169,8 @@ class PublicDockerExecutionBroker(AbstractContextManager["PublicDockerExecutionB
         synchronized = subprocess.run(
             (
                 "docker", "exec", container_id, "bash", "-lc",
-                "cp -a /reachpatch-source/. /testbed/",
+                "tar -C /reachpatch-source --exclude=.git --exclude=./.git "
+                "-cf - . | tar -C /testbed -xf -",
             ),
             capture_output=True, text=True, check=False, timeout=180,
         )
@@ -182,10 +183,22 @@ class PublicDockerExecutionBroker(AbstractContextManager["PublicDockerExecutionB
 
     @staticmethod
     def _stop_container(container_id: str) -> None:
-        subprocess.run(
-            ("docker", "stop", "--time", "1", container_id),
-            capture_output=True, text=True, check=False, timeout=20,
-        )
+        try:
+            subprocess.run(
+                ("docker", "stop", "--time", "1", container_id),
+                capture_output=True, text=True, check=False, timeout=20,
+            )
+        except subprocess.TimeoutExpired:
+            # A public check may leave a stuck process behind.  Cleanup must be
+            # best-effort so one dead container cannot abort generation
+            # preflight or hide the actual case result.
+            try:
+                subprocess.run(
+                    ("docker", "kill", container_id),
+                    capture_output=True, text=True, check=False, timeout=10,
+                )
+            except (OSError, subprocess.TimeoutExpired):
+                pass
 
     def _container(self, repository: Path) -> str:
         key = str(repository)

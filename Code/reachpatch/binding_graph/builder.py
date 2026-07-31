@@ -567,7 +567,7 @@ def build_binding_graph(
     return binding_graph
 
 
-def build_active_binding_graph(
+def build_legacy_active_binding_product(
     requirement_graph: RequirementGraph,
     program_graph: ProgramGraph,
     *,
@@ -578,7 +578,7 @@ def build_active_binding_graph(
     max_preservation_units: int,
     deadline: float | None = None,
 ) -> BindingGraph:
-    """Build the bounded executable part of the Requirement x Program product."""
+    """Compatibility-only pre-diff Requirement x Program product builder."""
 
     if max_target_units < 1 or max_preservation_units < 1:
         raise ValueError("active binding limits must be positive")

@@ -2,6 +2,10 @@
 
 from typing import Any
 
+from .coverage import (
+    RequirementCoverageRow, RequirementCoverageStatus,
+    RequirementCoverageTable, update_requirement_coverage,
+)
 from .domains import promote_program_predicates, symbolic_scenario_partitions
 from .models import (
     ExecutableRequirement,
@@ -51,6 +55,9 @@ __all__ = [
     "NormativeRequirement",
     "ExecutableRequirement",
     "ExecutableRequirementOverlay",
+    "RequirementCoverageRow",
+    "RequirementCoverageStatus",
+    "RequirementCoverageTable",
     "compile_assignment_overlay",
     "compile_requirement_core",
     "compile_executable_requirement_overlay",
@@ -59,4 +66,5 @@ __all__ = [
     "promote_domains_from_diff",
     "promote_program_predicates",
     "symbolic_scenario_partitions",
+    "update_requirement_coverage",
 ]

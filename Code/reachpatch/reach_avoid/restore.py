@@ -6,6 +6,7 @@ from reachpatch.binding_graph.models import (
     BindingGraph, BindingStatus, BindingUnit, ExecutableBindingGraph,
     ExecutableBindingUnit, OracleFrontier, ProjectionWitness, RepairComponent,
 )
+from reachpatch.binding_graph import active_binding_graph_from_dict
 from reachpatch.challenge_graph.models import (
     ChallengeCell, ChallengeGraph, ChallengePriority, DICCCertificate, DICCStatus,
 )
@@ -15,6 +16,7 @@ from reachpatch.execution.models import (
     ExecutableCheck, RejectedCheck,
 )
 from reachpatch.execution.target_recovery import TargetRecoveryResult
+from reachpatch.execution.target_recovery import TargetCandidate
 from reachpatch.challenge_graph.recipes import (
     InputRecipe, ResourceLimits, TraceSpec,
 )
@@ -405,6 +407,15 @@ def environment_frontier_from_dict(raw: dict[str, Any]) -> EnvironmentFrontier:
 
 
 def target_recovery_from_dict(raw: dict[str, Any]) -> TargetRecoveryResult:
+    def _candidate(item: dict[str, Any]) -> TargetCandidate:
+        values = dict(item)
+        values["setup_commands"] = tuple(values.get("setup_commands", ()))
+        values["source_evidence"] = tuple(values.get("source_evidence", ()))
+        contract = values.get("observation_contract")
+        if isinstance(contract, dict):
+            values["observation_contract"] = _observation(contract)
+        return TargetCandidate(**values)
+
     return TargetRecoveryResult(
         targets=tuple(executable_check_from_dict(item) for item in raw.get("targets", ())),
         preservation_checks=tuple(
@@ -427,6 +438,13 @@ def target_recovery_from_dict(raw: dict[str, Any]) -> TargetRecoveryResult:
             for item in raw.get("health_checks", ())
         ),
         directed_reproduction_requests=int(raw.get("directed_reproduction_requests", 0)),
+        status=str(raw.get("status", "TARGET_UNAVAILABLE")),
+        candidates=tuple(_candidate(item) for item in raw.get("candidates", ())),
+        exploration_candidates=tuple(
+            _candidate(item) for item in raw.get("exploration_candidates", ())
+        ),
+        elapsed_seconds=float(raw.get("elapsed_seconds", 0.0)),
+        timed_out=bool(raw.get("timed_out", False)),
     )
 
 

@@ -4,7 +4,11 @@ import ast
 import json
 import os
 import re
+import threading
+import time
+from queue import Queue
 from dataclasses import dataclass
+from enum import StrEnum
 from pathlib import Path
 from typing import Any, Iterable
 
@@ -21,6 +25,28 @@ from reachpatch.execution.models import (
 from reachpatch.execution.runners import BaseProjectRunner
 from reachpatch.models.base import SerializableRecord, stable_id
 from reachpatch.models.isolation import assert_generation_payload, is_official_only_path
+from reachpatch.oracle.models import ObservationContract
+
+
+class TargetRecoveryStatus(StrEnum):
+    TARGET_AVAILABLE = "TARGET_AVAILABLE"
+    TARGET_UNAVAILABLE = "TARGET_UNAVAILABLE"
+    TARGET_ENVIRONMENT_BLOCKED = "TARGET_ENVIRONMENT_BLOCKED"
+
+
+@dataclass(frozen=True, slots=True)
+class TargetCandidate(SerializableRecord):
+    target_id: str
+    strategy: str
+    authority: str
+    setup_commands: tuple[str, ...]
+    command: str
+    observation_contract: ObservationContract
+    expected_relation: dict[str, Any] | None
+    source_evidence: tuple[str, ...]
+    stability_runs: int
+    confidence: float
+    status: str
 
 
 @dataclass(frozen=True, slots=True)
@@ -32,11 +58,30 @@ class TargetRecoveryResult(SerializableRecord):
     baseline_executions: tuple[CheckExecution, ...] = ()
     health_checks: tuple[EnvironmentHealth, ...] = ()
     directed_reproduction_requests: int = 0
+    status: str = TargetRecoveryStatus.TARGET_UNAVAILABLE.value
+    candidates: tuple[TargetCandidate, ...] = ()
+    exploration_candidates: tuple[TargetCandidate, ...] = ()
+    elapsed_seconds: float = 0.0
+    timed_out: bool = False
 
     def execution_for(self, check_id: str) -> CheckExecution | None:
         return next(
             (item for item in self.baseline_executions if item.check_id == check_id),
             None,
+        )
+
+    @classmethod
+    def unavailable(
+        cls, *, environment_blocked: bool = False, timed_out: bool = False
+    ) -> "TargetRecoveryResult":
+        return cls(
+            targets=(), preservation_checks=(), rejected_checks=(),
+            environment_frontiers=(),
+            status=(
+                TargetRecoveryStatus.TARGET_ENVIRONMENT_BLOCKED.value
+                if environment_blocked else TargetRecoveryStatus.TARGET_UNAVAILABLE.value
+            ),
+            timed_out=timed_out,
         )
 
 
@@ -297,8 +342,6 @@ def _is_script_level_reproduction_failure(
     script_names = {
         Path(path).name for path in check.temporary_artifact_paths
     }
-    if execution.first_project_frame is not None:
-        return False
     if not any(name and name in diagnostic for name in script_names):
         return False
     # The compiler appends the observation assertion. Other uncaught
@@ -449,8 +492,23 @@ def recover_executable_targets(
     project_runner: BaseProjectRunner,
     generator_agent: Any,
     artifact_store: Any,
+    *,
+    max_target_candidates: int = 3,
+    max_llm_reproduction_attempts: int = 2,
+    max_stability_runs: int = 2,
+    wall_time_seconds: float = 90.0,
 ) -> TargetRecoveryResult:
     """Recover stable baseline targets without using official-only evidence."""
+
+    if min(
+        max_target_candidates, max_llm_reproduction_attempts,
+        max_stability_runs, wall_time_seconds,
+    ) <= 0:
+        raise ValueError("target recovery budgets must be positive")
+    started = time.monotonic()
+
+    def expired() -> bool:
+        return time.monotonic() - started >= wall_time_seconds
 
     issue = _public_issue(instance)
     root = _artifact_root(artifact_store)
@@ -531,7 +589,9 @@ def recover_executable_targets(
                 check.selector,
             ))
 
-    for check in unique.values():
+    for check in tuple(unique.values())[: max_target_candidates * 4]:
+        if expired():
+            break
         evaluate(check)
 
     reproduction_method = getattr(
@@ -541,22 +601,36 @@ def recover_executable_targets(
         not targets
         and callable(reproduction_method)
         and _issue_describes_executable_behavior(issue)
+        and not expired()
     ):
-        directed_requests = 1
         public_discussion = str(
             dict(getattr(instance, "public_metadata", {}) or {}).get(
                 "hints_text", "",
             )
         ).strip()
-        proposal = reproduction_method(
-            issue=str(getattr(instance, "issue", "")),
-            public_discussion=public_discussion,
-            source_context=_directed_source_context(
-                issue, repository_index, project_runner.repository,
-            ),
-            project_runner=project_runner.name,
-        )
-        if proposal is not None:
+        seen_proposals: set[str] = set()
+        for attempt in range(max_llm_reproduction_attempts):
+            if targets or expired():
+                break
+            directed_requests += 1
+            proposal = reproduction_method(
+                issue=str(getattr(instance, "issue", "")),
+                public_discussion=public_discussion,
+                source_context=_directed_source_context(
+                    issue, repository_index, project_runner.repository,
+                ),
+                project_runner=project_runner.name,
+            )
+            if proposal is None:
+                continue
+            proposal_key = stable_id(
+                "directed-proposal",
+                str(proposal.get("source", "")),
+                str(proposal.get("expected_observation", "")),
+            )
+            if proposal_key in seen_proposals:
+                continue
+            seen_proposals.add(proposal_key)
             directed = _write_reproduction(
                 root,
                 Path(str(proposal["filename"])).name,
@@ -566,9 +640,83 @@ def recover_executable_targets(
                     "directed-public-reproduction",
                     issue,
                     str(proposal["expected_observation"]),
+                    attempt,
                 ),
             )
             evaluate(directed)
+
+    targets = targets[:max_target_candidates]
+    preservation = preservation[:max_target_candidates]
+    execution_by_id = {item.check_id: item for item in executions}
+
+    def candidate_strategy(check: ExecutableCheck) -> str:
+        evidence = " ".join(check.source_evidence_ids).lower()
+        selector = str(check.selector).lower()
+        if "directed-public-reproduction" in evidence:
+            return "llm_reproduction"
+        if "issue-behavior" in evidence:
+            return "return_or_exception_api_contract"
+        if "code-block" in evidence or "reproduction" in selector:
+            return "issue_executable_witness"
+        if "test" in selector or "test" in evidence:
+            return "related_public_test"
+        if check.role == CheckRole.PRESERVATION:
+            return "baseline_differential_relation"
+        return "object_state_or_protocol_relation"
+
+    def as_candidate(check: ExecutableCheck, *, trusted: bool) -> TargetCandidate:
+        execution = execution_by_id.get(check.check_id)
+        channels = (
+            "process_status", "return_value", "exception", "stdout", "stderr",
+        )
+        contract = ObservationContract(
+            contract_id=stable_id("target-observation-contract", check.check_id, channels),
+            channels=channels,
+            capture_protocol_selection=(
+                "protocol" in " ".join(check.source_evidence_ids).lower()
+            ),
+        )
+        relation = None
+        if trusted and execution is not None:
+            relation = {
+                "kind": (
+                    "baseline_failure_must_become_pass"
+                    if check.role == CheckRole.TARGET
+                    else "baseline_pass_must_be_preserved"
+                ),
+                "baseline_status": execution.status.value,
+                "expected_status": "PASS",
+            }
+        return TargetCandidate(
+            target_id=check.check_id,
+            strategy=candidate_strategy(check),
+            authority=check.authority,
+            setup_commands=(),
+            command=" ".join(check.command),
+            observation_contract=contract,
+            expected_relation=relation,
+            source_evidence=check.source_evidence_ids,
+            stability_runs=min(max_stability_runs, 2),
+            confidence=(0.95 if trusted else 0.35),
+            status=("MECHANICALLY_VERIFIED" if trusted else "EXPLORATION_ONLY"),
+        )
+
+    verified_candidates = tuple(
+        as_candidate(check, trusted=True) for check in (*targets, *preservation)
+    )
+    verified_ids = {item.target_id for item in verified_candidates}
+    exploration_candidates = tuple(
+        as_candidate(check, trusted=False)
+        for check in unique.values()
+        if check.check_id not in verified_ids
+    )[:max_target_candidates]
+    timed_out = expired()
+    if targets:
+        recovery_status = TargetRecoveryStatus.TARGET_AVAILABLE.value
+    elif frontiers:
+        recovery_status = TargetRecoveryStatus.TARGET_ENVIRONMENT_BLOCKED.value
+    else:
+        recovery_status = TargetRecoveryStatus.TARGET_UNAVAILABLE.value
 
     result = TargetRecoveryResult(
         targets=tuple(targets),
@@ -578,9 +726,56 @@ def recover_executable_targets(
         baseline_executions=tuple(executions),
         health_checks=tuple(health_checks),
         directed_reproduction_requests=directed_requests,
+        status=recovery_status,
+        candidates=verified_candidates,
+        exploration_candidates=exploration_candidates,
+        elapsed_seconds=time.monotonic() - started,
+        timed_out=timed_out,
     )
     audit_path = root / "target_recovery_result.json"
     audit_path.write_text(
         json.dumps(result.to_dict(), sort_keys=True, indent=2), encoding="utf-8",
     )
     return result
+
+
+def recover_executable_targets_bounded(
+    instance: Any,
+    repository_index: Any,
+    project_runner: BaseProjectRunner,
+    generator_agent: Any,
+    artifact_store: Any,
+    **kwargs: Any,
+) -> TargetRecoveryResult:
+    """Run optional recovery on a daemon worker so a wall timeout is real."""
+
+    timeout = float(kwargs.get("wall_time_seconds", 90.0))
+    result_queue: Queue[tuple[str, Any]] = Queue(maxsize=1)
+
+    def worker() -> None:
+        try:
+            result_queue.put((
+                "ok",
+                recover_executable_targets(
+                    instance, repository_index, project_runner,
+                    generator_agent, artifact_store, **kwargs,
+                ),
+            ))
+        except BaseException as exc:  # propagate only on the caller thread
+            result_queue.put(("error", exc))
+
+    thread = threading.Thread(
+        target=worker, name="reachpatch-target-recovery", daemon=True,
+    )
+    thread.start()
+    thread.join(timeout=max(0.001, timeout))
+    if thread.is_alive():
+        return TargetRecoveryResult.unavailable(timed_out=True)
+    if result_queue.empty():
+        return TargetRecoveryResult.unavailable()
+    status, payload = result_queue.get()
+    if status == "error":
+        if type(payload).__name__ == "GeneratorBlockedExternal":
+            raise payload
+        raise payload
+    return payload

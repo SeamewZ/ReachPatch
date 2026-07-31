@@ -32,13 +32,140 @@ def test_archive_path_preserves_each_attempt(tmp_path: Path) -> None:
 def test_generation_worker_count_preserves_memory_headroom() -> None:
     assert runner._safe_generation_worker_count(4, {
         "memavailable_mib": 64 * 1024,
-    }) == 4
+    }) == 3
     assert runner._safe_generation_worker_count(10, {
         "memavailable_mib": 40 * 1024,
-    }) == 3
+    }) == 1
     assert runner._safe_generation_worker_count(4, {
         "memavailable_mib": 20 * 1024,
     }) == 0
+
+
+def test_method_config_hash_changes_with_dirty_production_source(
+    tmp_path: Path, monkeypatch,
+) -> None:
+    code_root = tmp_path / "Code"
+    package = code_root / "reachpatch"
+    package.mkdir(parents=True)
+    source = package / "module.py"
+    source.write_text("VALUE = 1\n", encoding="utf-8")
+    runner_file = code_root / "runner.py"
+    runner_file.write_text("RUNNER = 1\n", encoding="utf-8")
+    monkeypatch.setattr(runner, "CODE_ROOT", code_root)
+    monkeypatch.setattr(runner, "__file__", str(runner_file))
+
+    before = runner._method_config_hash("model", 6)
+    source.write_text("VALUE = 2\n", encoding="utf-8")
+    after = runner._method_config_hash("model", 6)
+
+    assert before != after
+
+
+def test_broker_socket_path_is_bounded_for_long_instance_id(
+    tmp_path: Path, monkeypatch,
+) -> None:
+    monkeypatch.setattr(runner, "RUN_ROOT", tmp_path / "runs")
+
+    path = runner._broker_socket_path("scikit-learn__scikit-learn-" + "9" * 200)
+
+    assert len(str(path).encode()) < 104
+    assert path.parent == (tmp_path / "runs" / "_b").resolve()
+    assert "scikit-learn" not in path.name
+
+
+def test_prepare_case_trees_checks_out_exact_public_base_commit(
+    tmp_path: Path, monkeypatch,
+) -> None:
+    origin = tmp_path / "origin"
+    subprocess.run(
+        ["git", "init", "--initial-branch=main", str(origin)],
+        check=True, capture_output=True, text=True,
+    )
+    (origin / "module.py").write_text("VALUE = 1\n", encoding="utf-8")
+    subprocess.run(
+        ["git", "add", "module.py"], cwd=origin,
+        check=True, capture_output=True, text=True,
+    )
+    subprocess.run(
+        [
+            "git", "-c", "user.name=ReachPatch Test",
+            "-c", "user.email=reachpatch@example.invalid",
+            "commit", "-m", "base",
+        ],
+        cwd=origin, check=True, capture_output=True, text=True,
+    )
+    base_commit = subprocess.run(
+        ["git", "rev-parse", "HEAD"], cwd=origin,
+        check=True, capture_output=True, text=True,
+    ).stdout.strip()
+    repo_root = tmp_path / "repos"
+    tree_root = tmp_path / "trees"
+    monkeypatch.setattr(runner, "REPO_ROOT", repo_root)
+    monkeypatch.setattr(runner, "TREE_ROOT", tree_root)
+    monkeypatch.setattr(runner, "_repository_url", lambda _: str(origin))
+    records = [{
+        "instance_id": "owner__project-1",
+        "repo": "owner/project",
+        "base_commit": base_commit,
+    }]
+
+    created = runner.prepare_case_trees(records)
+    reused = runner.prepare_case_trees(records)
+
+    assert created["created_case_trees"] == ["owner__project-1"]
+    assert reused["reused_case_trees"] == ["owner__project-1"]
+    assert subprocess.run(
+        ["git", "rev-parse", "HEAD"],
+        cwd=tree_root / "owner__project-1",
+        check=True, capture_output=True, text=True,
+    ).stdout.strip() == base_commit
+    assert (tree_root / "owner__project-1" / "module.py").read_text(
+        encoding="utf-8"
+    ) == "VALUE = 1\n"
+
+
+def test_generation_preflight_rejects_official_field_before_api_call(
+    tmp_path: Path, monkeypatch,
+) -> None:
+    case_id = "owner__project-1"
+    key_path = tmp_path / "key"
+    key_path.write_text("secret", encoding="utf-8")
+    monkeypatch.setattr(runner, "EXPERIMENT_ROOT", tmp_path)
+    monkeypatch.setattr(runner, "TREE_ROOT", tmp_path / "trees")
+    monkeypatch.setattr(runner, "_run_git", lambda *args, **kwargs: "base")
+    monkeypatch.setattr(runner.shutil, "which", lambda _: "/usr/bin/bwrap")
+    monkeypatch.setattr(
+        runner, "_memory_snapshot",
+        lambda: {"memavailable_mib": 64 * 1024},
+    )
+    monkeypatch.setattr(
+        runner, "_disk_snapshot",
+        lambda: {"disk_total_mib": 100_000, "disk_used_mib": 10_000,
+                 "disk_free_mib": 90_000},
+    )
+    image = runner.public_swebench_image(case_id)
+    monkeypatch.setattr(
+        runner.subprocess,
+        "run",
+        lambda *args, **kwargs: subprocess.CompletedProcess(
+            args=args[0], returncode=0, stdout=image + "\n", stderr="",
+        ),
+    )
+
+    with pytest.raises(RuntimeError, match="generation preflight failed"):
+        runner.validate_generation_preflight([{
+            "instance_id": case_id,
+            "repo": "owner/project",
+            "base_commit": "base",
+            "problem_statement": "public issue",
+            "test_patch": "official-only",
+        }], key_path=key_path)
+
+    report = json.loads(
+        (tmp_path / "generation_preflight.json").read_text(encoding="utf-8")
+    )
+    assert report["status"] == "FAIL"
+    assert any(item["check"] == "public_payload" for item in report["failures"])
 
 
 def test_generate_only_replaces_selected_and_retains_other_results(
@@ -58,6 +185,10 @@ def test_generate_only_replaces_selected_and_retains_other_results(
     monkeypatch.setattr(runner, "PUBLIC_PATH", public_path)
     monkeypatch.setattr(runner, "EXPERIMENT_ROOT", experiment_root)
     monkeypatch.setattr(runner, "RESULT_ROOT", result_root)
+    monkeypatch.setattr(runner, "prepare_case_trees", lambda _: {})
+    monkeypatch.setattr(
+        runner, "validate_generation_preflight", lambda *args, **kwargs: {},
+    )
 
     calls: list[tuple[str, bool]] = []
 
@@ -73,13 +204,12 @@ def test_generate_only_replaces_selected_and_retains_other_results(
 
     assert calls == [("case-a", True)]
     assert summary["selected_case_count"] == 1
+    assert summary["current_run_generated_count"] == 1
+    assert summary["observed_case_count"] == 2
     assert {item["instance_id"] for item in summary["results"]} == {
         "case-a", "case-b",
     }
-    retained = next(
-        item for item in summary["results"] if item["instance_id"] == "case-b"
-    )
-    assert retained["status"] == "REACHED"
+    assert summary["cache_rejected_count"] == 0
 
 
 def test_generation_sandbox_hides_official_inputs_and_harness_outputs(
@@ -87,10 +217,12 @@ def test_generation_sandbox_hides_official_inputs_and_harness_outputs(
 ) -> None:
     if shutil.which("bwrap") is None:
         pytest.skip("bubblewrap is unavailable")
-    dataset_root = tmp_path / "dataset"
+    dataset_collection_root = tmp_path / "datasets"
+    dataset_root = dataset_collection_root / "current"
     public_path = dataset_root / "generation_public_instances.jsonl"
     official_path = dataset_root / "official_instances.jsonl"
     raw_cases = dataset_root / "cases"
+    sibling_official = dataset_collection_root / "prior" / "official_instances.jsonl"
     experiment_root = tmp_path / "experiment"
     harness_root = experiment_root / "harness"
     repo_root = experiment_root / "repos"
@@ -103,10 +235,13 @@ def test_generation_sandbox_hides_official_inputs_and_harness_outputs(
     result_root.mkdir(parents=True)
     public_path.write_text('{"instance_id":"public"}\n', encoding="utf-8")
     official_path.write_text('{"test_patch":"secret"}\n', encoding="utf-8")
+    sibling_official.parent.mkdir(parents=True)
+    sibling_official.write_text('{"test_patch":"prior-secret"}\n', encoding="utf-8")
     (raw_cases / "case.json").write_text("secret", encoding="utf-8")
     (harness_root / "report.json").write_text("secret", encoding="utf-8")
     (experiment_root / "harness_summary.json").write_text("secret", encoding="utf-8")
 
+    monkeypatch.setattr(runner, "DATASET_COLLECTION_ROOT", dataset_collection_root)
     monkeypatch.setattr(runner, "DATASET_ROOT", dataset_root)
     monkeypatch.setattr(runner, "PUBLIC_PATH", public_path)
     monkeypatch.setattr(runner, "OFFICIAL_PATH", official_path)
@@ -133,6 +268,7 @@ print(json.dumps({{
     "isolated": os.environ.get("REACHPATCH_GENERATION_ISOLATED"),
     "public": (p / "generation_public_instances.jsonl").is_file(),
     "official": (p / "official_instances.jsonl").exists(),
+    "sibling_official": Path({str(sibling_official)!r}).exists(),
     "raw_cases": (p / "cases").exists(),
     "harness_report": (e / "harness" / "report.json").exists(),
     "prior_summary": prior_summary,
@@ -159,6 +295,7 @@ print(json.dumps({{
         "isolated": "1",
         "public": True,
         "official": False,
+        "sibling_official": False,
         "raw_cases": False,
         "harness_report": False,
         "prior_summary": "BLOCKED",
@@ -183,16 +320,38 @@ def test_harness_cached_patch_is_not_reexecuted(tmp_path: Path, monkeypatch) -> 
     result_root.mkdir(parents=True)
     monkeypatch.setattr(runner, "HARNESS_RESULT_ROOT", result_root)
     monkeypatch.setattr(runner, "HARNESS_ROOT", tmp_path / "harness")
+    patch = tmp_path / "final_patch.diff"
+    patch.write_text("diff --git a/a.py b/a.py\n", encoding="utf-8")
+    patch_hash = runner.content_hash(patch.read_text(encoding="utf-8"))
+    patch_sha = __import__("hashlib").sha256(
+        patch.read_text(encoding="utf-8").encode("utf-8")
+    ).hexdigest()
+    harness_run_id = f"sealed-{patch_hash[:16]}"
+    lineage = {
+        "instance_id": "case-a",
+        "code_commit_sha": "code",
+        "implementation_tree_hash": "tree",
+        "method_config_hash": "config",
+        "prompt_hash": "prompt",
+        "generation_run_id": "generation",
+        "patch_hash": patch_hash,
+        "patch_file_sha256": patch_sha,
+        "dataset_manifest_hash": "dataset",
+        "harness_engine": "official_swebench_docker_v1",
+        "harness_run_id": harness_run_id,
+    }
     runner._write_json(result_root / "case-a.json", {
         "instance_id": "case-a",
         "status": "PASS",
-        "generation_patch_hash": "patch-1",
-        "harness_engine": "official_swebench_docker_v1",
+        "generation_patch_hash": patch_hash,
+        **lineage,
     })
 
     result = runner._harness_one(
         {"instance_id": "case-a"},
-        {"patch_hash": "patch-1"},
+        {"patch_hash": patch_hash, "patch_path": str(patch), **{
+            key: value for key, value in lineage.items() if key != "instance_id"
+        }},
         1,
     )
 
@@ -271,13 +430,8 @@ def test_harness_only_merges_previous_case_results(tmp_path: Path, monkeypatch) 
 
     assert calls == ["case-a"]
     assert summary["selected_case_count"] == 1
-    assert {item["instance_id"] for item in summary["results"]} == {
-        "case-a", "case-b",
-    }
-    retained = next(
-        item for item in summary["results"] if item["instance_id"] == "case-b"
-    )
-    assert retained["status"] == "PASS"
+    assert {item["instance_id"] for item in summary["results"]} == {"case-a"}
+    assert summary["cache_rejected_count"] >= 1
 
 
 def test_case_process_report_records_graphs_and_successful_transition(

@@ -24,15 +24,15 @@ def root_recovery(state: ReachAvoidState, core: LosingCore) -> RootRecoveryRecor
     compile_requirement_paths(requirements, program)
     binding = build_binding_graph(requirements, program)
     challenges = materialize_challenges(requirements, program, binding)
-    old_paths = set(state.binding_graph.by_path_obligation)
+    old_paths = set(state.active_binding_graph.by_path_obligation)
     new_paths = set(binding.by_path_obligation)
-    old_units = set(state.binding_graph.units)
+    old_units = set(state.active_binding_graph.units)
     new_units = set(binding.units)
     old_cuts = {
         node_id
         for unit_id in core.unit_ids
-        if unit_id in state.binding_graph.units
-        for node_id in state.binding_graph.units[unit_id].repair_cut_node_ids
+        if unit_id in state.active_binding_graph.units
+        for node_id in state.active_binding_graph.units[unit_id].repair_cut_node_ids
     }
     new_cuts = {
         node_id
@@ -72,7 +72,7 @@ def root_recovery(state: ReachAvoidState, core: LosingCore) -> RootRecoveryRecor
         resolution = "terminate after all grounded mechanisms were exhausted"
     state.program_graph = program
     state.requirement_graph = requirements
-    state.binding_graph = binding
+    state.active_binding_graph = binding
     state.challenge_graph = challenges
     new_hashes = state.graph_hashes()
     record = RootRecoveryRecord(

@@ -52,7 +52,7 @@ def outcomes_from_challenges(
         "diff": challenge_graph.diff_hash,
     }
     for cell in challenge_graph.cells.values():
-        unit = state.binding_graph.units.get(cell.binding_unit_id)
+        unit = state.active_binding_graph.units.get(cell.binding_unit_id)
         if unit is None:
             continue
         leaf = state.requirement_graph.leaves[unit.leaf_id]

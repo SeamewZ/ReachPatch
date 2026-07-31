@@ -125,7 +125,7 @@ def counterexample_from_challenge(
     bundle: PairedTraceBundle | None = None,
 ) -> CounterexamplePacket:
     cell = challenge_graph.cells[challenge_id]
-    unit = state.binding_graph.units.get(cell.binding_unit_id)
+    unit = state.active_binding_graph.units.get(cell.binding_unit_id)
     path = (
         state.requirement_graph.path_obligations.get(unit.path_obligation_id)
         if unit is not None else None
@@ -245,6 +245,7 @@ def counterexample_from_check_comparison(
     *,
     transition_id: str,
     repair_cuts=(),
+    active_binding_graph=None,
 ) -> CounterexamplePacket | None:
     """Create repair feedback only for stable behavior failures."""
 
@@ -270,6 +271,21 @@ def counterexample_from_check_comparison(
         if item.classification == CheckClassification.PASS_PRESERVED
     ))
     frame = comparison.patched.first_project_frame
+    graph = active_binding_graph or getattr(state, "active_binding_graph", None)
+    binding_unit = next((
+        unit for unit in getattr(graph, "units", {}).values()
+        if check.check_id in {
+            *unit.target_check_ids,
+            *unit.preservation_check_ids,
+            *unit.challenge_check_ids,
+        }
+    ), None)
+    binding_cuts = tuple(
+        binding_unit.causal_cut_ids if binding_unit is not None else ()
+    )
+    selected_cut_ids = tuple(dict.fromkeys((
+        *(item.cut_id for item in repair_cuts), *binding_cuts,
+    )))
     failure_origin = {
         CheckClassification.PRESERVATION_REGRESSION: "PUBLIC_PRESERVATION_REGRESSION",
         CheckClassification.TARGET_STILL_FAILING: "PUBLIC_TARGET_STILL_FAILING",
@@ -282,7 +298,7 @@ def counterexample_from_check_comparison(
         ),
         transition_id=transition_id,
         path_obligation_id=None,
-        binding_unit_id=None,
+        binding_unit_id=(binding_unit.binding_id if binding_unit else None),
         challenge_id=None,
         public_trigger_id=check.check_id,
         entrypoint_id=str(frame.get("symbol")) if frame else None,
@@ -306,7 +322,7 @@ def counterexample_from_check_comparison(
             for item in repair_cuts
         ),
         causal_touch_witness_ids=(),
-        candidate_repair_cut_ids=tuple(item.cut_id for item in repair_cuts),
+        candidate_repair_cut_ids=selected_cut_ids,
         protected_sibling_path_ids=(),
         preservation_path_ids=(),
         forbidden_behavior_ids=protected,
@@ -326,6 +342,44 @@ def counterexample_from_check_comparison(
         previous_diff=state.checkpoint.patch.canonical_diff,
         protected_behavior=protected,
         environment_valid=True,
+        requirement_id=(binding_unit.requirement_id if binding_unit else None),
+        authority=check.authority,
+        setup=(),
+        command=" ".join(check.command),
+        concrete_input={"selector": check.selector},
+        input_derivation=(
+            "replayed the stable public baseline check on the working patch",
+        ),
+        baseline_observation={
+            "status": comparison.baseline.status.value,
+            "stdout": comparison.baseline.stdout,
+            "stderr": comparison.baseline.stderr,
+            "return_code": comparison.baseline.return_code,
+        },
+        patched_observation={
+            "status": comparison.patched.status.value,
+            "stdout": comparison.patched.stdout,
+            "stderr": comparison.patched.stderr,
+            "return_code": comparison.patched.return_code,
+        },
+        expected_relation=(
+            "baseline failure becomes PASS"
+            if check.role.value == "TARGET" else "baseline PASS remains PASS"
+        ),
+        oracle_result=comparison.classification.value,
+        failure_location=(
+            f"{frame.get('relative_path', '')}:{frame.get('line', '')}"
+            if frame else "process observation"
+        ),
+        causal_cut_ids=selected_cut_ids,
+        impact_risks=(
+            tuple(binding_unit.impact_cone_ids) if binding_unit else ()
+        ),
+        suggested_action_families=(
+            "preserve_target_and_repair_regression",
+            "revise_causal_expression_or_guard",
+            "inspect_direct_consumers",
+        ),
     )
 
 

@@ -1,6 +1,9 @@
 from __future__ import annotations
 
-from reachpatch.evidence import build_semantic_graph, enumerate_assignments, freeze_assignment
+from reachpatch.evidence import (
+    build_semantic_graph, enumerate_assignments, freeze_assignment,
+    public_discussion_evidence,
+)
 from reachpatch.evidence.hypotheses import build_hypothesis_set
 from reachpatch.models.enums import Authority, SemanticNodeKind
 from reachpatch.models.graph import GraphEdge
@@ -100,3 +103,24 @@ def test_provisional_hypothesis_refuted_by_normative_evidence_keeps_unknown():
     assert hypothesis_set.alternatives
     assert hypothesis_set.alternatives[0].authority_complete
     assert hypothesis_set.alternatives[0].assignment_node_ids == ()
+
+
+def test_public_discussion_modal_language_never_becomes_normative() -> None:
+    discussion = public_discussion_evidence(
+        "The implementation should use a wrapper. Documentation is required."
+    )
+    result = build_semantic_graph(
+        "api.render() must preserve absolute URLs.",
+        extra_evidence=discussion,
+    )
+
+    trusted_obligations = [
+        claim.formula for claim in result.graph.claims.values()
+        if claim.kind in {
+            SemanticNodeKind.NORMATIVE_REQUIREMENT,
+            SemanticNodeKind.PRESERVATION_CONTRACT,
+        } and claim.authority.trusted
+    ]
+
+    assert trusted_obligations == ["api.render() must preserve absolute URLs."]
+    assert all(item.authority == Authority.PROVISIONAL for item in discussion)

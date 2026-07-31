@@ -59,6 +59,10 @@ for _artifact_type, _fields in {
     "requirement_graph": ("nodes", "edges", "leaves", "graph_hash"),
     "program_graph": ("nodes", "edges", "graph_hash"),
     "binding_graph": ("units", "components", "graph_hash"),
+    "active_binding_graph": (
+        "instance_id", "revision", "diff_hash", "units", "edges",
+        "unresolved_gaps", "graph_hash",
+    ),
     "challenge_graph": ("cells", "graph_hash"),
     "trace_bundle": ("recipe_id", "runs", "stability_status"),
     "public_check_comparison": (
@@ -100,6 +104,9 @@ for _artifact_type, _fields in {
     "discriminator_result": ("probe_id", "correctness_status"),
     "path_class": ("path_class_id", "entrypoint_id", "exit_kind"),
     "binding_unit": ("unit_id", "path_obligation_id", "status"),
+    "active_binding_unit": (
+        "binding_id", "requirement_id", "changed_hunk_ids", "status",
+    ),
     "challenge_cell": ("challenge_id", "binding_unit_id", "terminal_status"),
     "input_recipe": ("recipe_id", "stimulus", "resource_limits"),
     "observation_contract": ("contract_id", "channels"),

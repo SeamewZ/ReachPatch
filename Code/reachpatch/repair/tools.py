@@ -166,6 +166,12 @@ class RepairToolExecutor:
         candidate: list[ProposedEdit] = []
         relocated: list[dict[str, int | str]] = []
         for edit in edits:
+            if not edit.replacement.strip() and not edit.expected_source.strip():
+                raise ValueError("empty edit is not a repair")
+            if edit.replacement.rstrip("\n") == edit.expected_source.rstrip("\n"):
+                raise ValueError(
+                    f"no-op edit is not a repair: {edit.relative_path}:{edit.start_line}"
+                )
             path = self._path(edit.relative_path, for_edit=True)
             lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
             expected_lines = edit.expected_source.rstrip("\n").splitlines()
@@ -217,6 +223,8 @@ class RepairToolExecutor:
             if any(not (edit.end_line < start or edit.start_line > end) for start, end in ranges):
                 raise ValueError("overlapping edits in one revision")
             ranges.append((edit.start_line, edit.end_line))
+        if not candidate:
+            raise ValueError("apply_edits requires at least one non-empty edit")
         self.staged_edits.extend(candidate)
         return {"accepted": True, "edit_count": len(candidate),
                 "paths": sorted({item.relative_path for item in candidate}),

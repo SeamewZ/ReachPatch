@@ -41,7 +41,7 @@ def _state():
     )
     return SimpleNamespace(
         outcomes={failed.outcome_id: failed},
-        binding_graph=SimpleNamespace(
+        active_binding_graph=SimpleNamespace(
             units={unit.unit_id: unit},
             components={component.component_id: component},
         ),

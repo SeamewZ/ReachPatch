@@ -13,8 +13,10 @@ from pathlib import Path
 from typing import Any, Iterable
 
 from reachpatch.adapters import select_adapter
-from reachpatch.binding_graph import build_active_binding_graph, build_executable_bindings
-from reachpatch.binding_graph.models import BindingGraph
+from reachpatch.binding_graph import (
+    ActiveBindingGraph, active_binding_graph_from_dict,
+    build_active_binding_graph, empty_active_binding_graph, update_active_binding_graph,
+)
 from reachpatch.challenge_graph.dicc import (
     compile_executable_challenge_evidence,
     diff_induced_challenge_plan,
@@ -26,13 +28,17 @@ from reachpatch.challenge_graph.materialize import (
     materialize_active_challenges,
 )
 from reachpatch.challenge_graph.models import ChallengeGraph, DiffClosureCertificate
-from reachpatch.evidence import build_hypothesis_set, build_semantic_graph
-from reachpatch.evidence.extract import issue_evidence
+from reachpatch.evidence import (
+    build_hypothesis_set, build_semantic_graph, public_discussion_evidence,
+)
 from reachpatch.evidence.hypotheses import enumerate_assignments
 from reachpatch.execution import (
     CheckClassification, CheckComparison, TraceExecutor, WorktreeManager,
     mechanical_pass, run_mechanical_checks,
     is_executable_test_path, recover_executable_targets, select_project_runner,
+)
+from reachpatch.execution.target_recovery import (
+    TargetRecoveryResult, recover_executable_targets_bounded,
 )
 from reachpatch.execution.reconcile import ActualDiff, reconcile_actual_diff
 from reachpatch.execution.worktree import tree_hash
@@ -62,14 +68,17 @@ from reachpatch.program_graph import (
     update_active_program_slice,
 )
 from reachpatch.program_graph.models import ProgramGraph
-from reachpatch.reach_avoid.gates import in_target_set, terminal_avoid_reason
+from reachpatch.reach_avoid.gates import (
+    evidence_limited_complete, in_target_set, terminal_avoid_reason,
+)
 from reachpatch.reach_avoid.persistence import RunArtifacts
 from reachpatch.reach_avoid.state import outcomes_from_challenges
+from reachpatch.reach_avoid.observations import ObservationBundle
 from reachpatch.reach_avoid.transition import evaluate_patch_revision
 from reachpatch.reach_avoid.restore import (
-    binding_graph_from_dict, challenge_graph_from_dict, conversation_from_dict,
+    challenge_graph_from_dict, conversation_from_dict,
     check_comparison_from_dict, causal_slice_from_dict, dicc_certificate_from_dict,
-    environment_frontier_from_dict, executable_binding_graph_from_dict,
+    environment_frontier_from_dict,
     executable_overlay_from_dict, hypothesis_set_from_dict, impact_slice_from_dict,
     outcome_from_dict, program_graph_from_dict, repository_index_from_dict,
     requirement_graph_from_dict, target_recovery_from_dict,
@@ -81,6 +90,7 @@ from reachpatch.repair.ablation import (
     edit_retention_ablation,
 )
 from reachpatch.repair.session import ActionProvider, PersistentGeneratorSession
+from reachpatch.repair.policy import next_untried_repair_intent
 from reachpatch.repair.deepseek_agent import (
     ActionConversionStatus, GeneratorBlockedExternal, GeneratorConversation,
     PersistentDeepSeekAgent, convert_revision_action,
@@ -90,6 +100,7 @@ from reachpatch.requirement_graph import (
     compile_assignment_overlay, compile_executable_requirement_overlay,
     compile_requirement_core, compile_requirement_paths, promote_domains_from_diff,
     refresh_requirement_paths,
+    update_requirement_coverage,
 )
 
 
@@ -104,14 +115,28 @@ class AnalysisBlocked(RuntimeError):
 class ReachPatchConfig(SerializableRecord):
     selection_mode: str = "hypothesis_set"
     max_submitted_revisions: int = 6
+    max_total_revisions: int = 6
+    initial_generator_max_turns: int = 10
+    revision_generator_max_turns: int = 6
+    root_recovery_max_turns: int = 8
     max_internal_tool_turns_per_revision: int = 6
     equivalent_failures_before_new_mechanism: int = 2
     nonprogress_before_root_recovery: int = 3
+    max_same_mechanism_failures: int = 2
+    max_distinct_mechanisms_per_failure: int = 3
+    target_recovery_wall_time_s: float = 90.0
+    target_recovery_max_candidates: int = 3
+    max_llm_reproduction_attempts: int = 2
+    max_stability_runs: int = 2
     max_ablation_groups: int = 32
     enable_ablation: bool = False
     max_index_files: int = 10_000
-    max_precise_files: int = 8
+    max_precise_files: int = 12
     max_precise_functions: int = 40
+    active_slice_max_files: int = 12
+    active_slice_max_symbols: int = 40
+    direct_caller_depth: int = 2
+    impact_cone_depth: int = 2
     max_program_nodes: int = 8_000
     max_program_edges: int = 24_000
     max_protocol_candidates_per_operation: int = 8
@@ -140,11 +165,23 @@ class ReachPatchConfig(SerializableRecord):
             raise ValueError("max_ablation_groups must be positive")
         positive = (
             self.max_internal_tool_turns_per_revision,
+            self.max_total_revisions,
+            self.initial_generator_max_turns,
+            self.revision_generator_max_turns,
+            self.root_recovery_max_turns,
             self.equivalent_failures_before_new_mechanism,
             self.nonprogress_before_root_recovery,
+            self.max_same_mechanism_failures,
+            self.max_distinct_mechanisms_per_failure,
+            self.target_recovery_wall_time_s,
+            self.target_recovery_max_candidates,
+            self.max_llm_reproduction_attempts,
+            self.max_stability_runs,
             self.max_index_files, self.max_precise_files,
             self.max_precise_functions, self.max_program_nodes,
             self.max_program_edges, self.max_protocol_candidates_per_operation,
+            self.active_slice_max_files, self.active_slice_max_symbols,
+            self.direct_caller_depth, self.impact_cone_depth,
             self.max_path_classes_per_leaf, self.max_active_target_bindings,
             self.max_active_preservation_bindings, self.max_active_challenges,
             self.max_parallel_challenge_executions,
@@ -258,7 +295,8 @@ def _counterexample(raw: dict) -> CounterexamplePacket:
         "relevant_source_slice_ids", "causal_touch_witness_ids",
         "candidate_repair_cut_ids", "protected_sibling_path_ids",
         "preservation_path_ids", "forbidden_behavior_ids",
-        "uncertain_information",
+        "uncertain_information", "setup", "input_derivation", "causal_cut_ids",
+        "impact_risks", "suggested_action_families",
     ):
         values[name] = tuple(values.get(name, ()))
     return CounterexamplePacket(**values)
@@ -272,6 +310,10 @@ def _transition_certificate(raw: dict) -> TransitionCertificate:
         "eliminated_counterexample_ids", "impact_regression_ids",
         "adjacent_partition_obligation_ids", "hard_frontier_ids",
         "repaired_losing_path_ids", "input_artifact_ids",
+        "affected_binding_unit_ids", "executed_check_ids", "target_comparisons",
+        "preservation_comparisons", "challenge_comparisons",
+        "requirements_improved", "requirements_regressed",
+        "counterexamples_closed", "counterexamples_opened", "evidence_hashes",
     ):
         values[name] = tuple(values.get(name, ()))
     values["decision"] = Decision(values["decision"])
@@ -306,7 +348,7 @@ class _AblationEvaluation:
     cumulative_diff: ActualDiff
     check_comparisons: tuple[Any, ...]
     impact_slice: Any
-    executable_binding_graph: Any
+    active_binding_graph: Any
     dicc_certificate: Any
     safe: bool
     graph_reached: bool
@@ -325,10 +367,7 @@ class ReachPatchController:
         self.action_provider = action_provider
         self.generator_agent = generator_agent
         if self.generator_agent is not None:
-            self.generator_agent.max_tool_turns = min(
-                self.generator_agent.max_tool_turns,
-                self.config.max_internal_tool_turns_per_revision,
-            )
+            self.generator_agent.max_revisions = self.config.max_total_revisions
         self.implementation_root = Path(
             implementation_root or Path(__file__).parents[2]
         ).resolve()
@@ -392,7 +431,10 @@ class ReachPatchController:
                 "GenerationInstance visible_tests contains official-only evidence",
             )
         public_hints = str(instance.public_metadata.get("hints_text", "")).strip()
-        hint_evidence = tuple(issue_evidence(public_hints)) if public_hints else ()
+        hint_evidence = (
+            tuple(public_discussion_evidence(public_hints))
+            if public_hints else ()
+        )
         semantic_started = time.perf_counter()
         semantic_result = build_semantic_graph(
             instance.issue,
@@ -454,21 +496,11 @@ class ReachPatchController:
         )
         project_runner.explicit_commands = tuple(self.config.mechanical_commands)
         recovery_instance = replace(instance, visible_tests=visible_tests)
-        recovery_started = time.perf_counter()
-        try:
-            target_recovery = recover_executable_targets(
-                recovery_instance,
-                repository_index,
-                project_runner,
-                self.generator_agent,
-                root / "execution",
-            )
-        except GeneratorBlockedExternal as exc:
-            raise AnalysisBlocked(
-                "GENERATOR_BLOCKED_EXTERNAL",
-                f"target reproduction request failed: {exc}",
-            ) from exc
-        timings["target_recovery_seconds"] = time.perf_counter() - recovery_started
+        # Recovery is deliberately deferred until after the first complete
+        # Generator attempt. A missing public oracle is evidence state, never
+        # generation permission.
+        target_recovery = TargetRecoveryResult.unavailable()
+        timings["target_recovery_seconds"] = 0.0
         requirement_started = time.perf_counter()
         requirements = compile_requirement_core(
             semantic_result.graph, hypothesis_set, repository_index,
@@ -531,9 +563,6 @@ class ReachPatchController:
                 ),
                 target_check_by_id[execution.check_id],
             ))
-        executable_binding = build_executable_bindings(
-            executable_overlay, target_slice, tuple(causal_slices), None,
-        )
         timings["active_program_slice_seconds"] = slice_result.elapsed_seconds
         # The first Generator call must precede path enumeration and product
         # materialization.  Empty sparse products keep the state schema and
@@ -541,10 +570,10 @@ class ReachPatchController:
         # first actual diff and executable evidence.
         requirement_hash = requirements.semantic_layer_hash()
         program_hash = program.program_hash()
-        binding = BindingGraph(
-            requirement_graph_hash=requirement_hash,
-            program_graph_hash=program_hash,
-            assignment_id=requirements.assignment_id,
+        binding = empty_active_binding_graph(
+            instance_id=instance.instance_id,
+            requirement_graph=requirements,
+            program_slice=program,
         )
         challenges = ChallengeGraph(
             requirement_graph_hash=requirement_hash,
@@ -611,19 +640,17 @@ class ReachPatchController:
             if check.check_id in baseline_by_check
         )
         initial_dicc = evaluate_dicc(
-            executable_binding.executable_targets,
+            target_recovery.targets,
             initial_comparisons,
             empty_diff,
             None,
             compile_executable_challenge_evidence(
-                executable_binding, initial_comparisons, empty_diff, None,
+                binding, initial_comparisons, empty_diff, None,
             ),
             path_obligation_count=len(
-                executable_overlay.executable_requirements
+                requirements.leaves
             ),
-            active_binding_count=sum(
-                unit.check_id is not None for unit in executable_binding.units
-            ),
+            active_binding_count=binding.executable_unit_count,
         )
         remaining = budget or default_budget()
         legacy_session = PersistentGeneratorSession(
@@ -649,7 +676,7 @@ class ReachPatchController:
             base_commit=instance.base_commit, run_root=str(root),
             assignment=assignment, semantic_graph=semantic_result.graph,
             requirement_graph=requirements, program_graph=program,
-            binding_graph=binding, challenge_graph=challenges,
+            active_binding_graph=binding, challenge_graph=challenges,
             checkpoint=checkpoint, outcomes={}, trace_bundles={},
             counterexamples=[], repair_history=[], mechanism_memory={},
             root_recoveries=[], diff_closure_certificates=[],
@@ -699,10 +726,7 @@ class ReachPatchController:
                 "normative_active_binding_count": binding.build_stats.get(
                     "active_count", 0
                 ),
-                "active_binding_count": sum(
-                    unit.check_id is not None
-                    for unit in executable_binding.units
-                ),
+                "active_binding_count": binding.executable_unit_count,
                 "deferred_binding_count": binding.build_stats.get("deferred_count", 0),
                 "normative_challenge_cell_count": len(challenges.cells),
                 "active_challenge_count": 0,
@@ -736,10 +760,22 @@ class ReachPatchController:
             executable_requirement_overlay=executable_overlay,
             target_slice=target_slice,
             causal_slices=tuple(causal_slices),
-            executable_binding_graph=executable_binding,
             check_comparisons=initial_comparisons,
             dicc_certificate=initial_dicc,
             environment_frontiers=target_recovery.environment_frontiers,
+            observations=ObservationBundle.create(
+                revision=0, check_comparisons=initial_comparisons,
+                environment_frontier_ids=(
+                    item.frontier_id for item in target_recovery.environment_frontiers
+                ),
+            ),
+            requirement_coverage=update_requirement_coverage(
+                None, binding, initial_comparisons, (),
+            ),
+            generation_run_id=root.name,
+            method_config_hash=content_hash(self.config.to_dict()),
+            prompt_hash=content_hash(instance.issue),
+            current_patch_hash=working_patch.canonical_diff_hash,
         )
         state.transition_phase(ControllerPhase.INDEX, event="semantic_hypothesis_set_built")
         state.transition_phase(ControllerPhase.INITIAL_LOCALIZATION, event="repository_index_built")
@@ -786,43 +822,37 @@ class ReachPatchController:
         artifacts.put(
             "target_recovery", target_recovery, state=state,
             producer="reachpatch.target-recovery", confidence=Confidence.CONFIRMED,
-            status=(
-                "RECOVERED" if target_recovery.targets
-                else "TARGET_RECOVERY_BLOCKED"
-            ),
+            status=target_recovery.status,
         )
         artifacts.put(
             "executable_requirement_overlay", executable_overlay, state=state,
             producer="reachpatch.requirement-overlay", confidence=Confidence.CONFIRMED,
         )
         artifacts.put(
-            "executable_binding_graph", executable_binding, state=state,
-            producer="reachpatch.executable-binding", confidence=Confidence.CONFIRMED,
-        )
-        artifacts.put(
             "dicc_certificate", initial_dicc, state=state,
             producer="reachpatch.dicc", confidence=Confidence.CONFIRMED,
             status=initial_dicc.status.value,
         )
-        if not target_recovery.targets:
-            state.termination_status = "TARGET_RECOVERY_BLOCKED"
-            state.runtime_metrics["root_cause_labels"] = [
-                "NO_EXECUTABLE_CHALLENGE", "NO_TARGET_PROGRESS",
-                *(
-                    ["ENVIRONMENT_UNHEALTHY"]
-                    if target_recovery.environment_frontiers else []
-                ),
-            ]
         first_patch_started = time.perf_counter()
-        if self.generator_agent is not None and target_recovery.targets:
+        if self.generator_agent is not None:
+            self.generator_agent.max_tool_turns = self.config.initial_generator_max_turns
             tools = self._repair_tools(state)
-            try:
-                revision = self.generator_agent.generate_initial_patch(
-                    state, conversation, tools
-                )
-            except GeneratorBlockedExternal as exc:
-                revision = None
-                self._record_generator_block(state, exc)
+            revision = None
+            initial_error: GeneratorBlockedExternal | None = None
+            for initial_attempt in range(2):
+                try:
+                    revision = self.generator_agent.generate_initial_patch(
+                        state, conversation, tools
+                    )
+                    initial_error = None
+                    break
+                except GeneratorBlockedExternal as exc:
+                    initial_error = exc
+                    state.runtime_metrics["initial_generator_retry_count"] = (
+                        initial_attempt + 1
+                    )
+            if initial_error is not None:
+                self._record_generator_block(state, initial_error)
             timings["first_patch_generation_seconds"] = (
                 time.perf_counter() - first_patch_started
             )
@@ -837,6 +867,113 @@ class ReachPatchController:
                         + revision.tool_turns
                     ),
                 )
+            recovery_started = time.perf_counter()
+            try:
+                target_recovery = recover_executable_targets_bounded(
+                    recovery_instance,
+                    repository_index,
+                    project_runner,
+                    self.generator_agent,
+                    root / "execution",
+                    max_target_candidates=self.config.target_recovery_max_candidates,
+                    max_llm_reproduction_attempts=(
+                        self.config.max_llm_reproduction_attempts
+                    ),
+                    max_stability_runs=self.config.max_stability_runs,
+                    wall_time_seconds=self.config.target_recovery_wall_time_s,
+                )
+            except GeneratorBlockedExternal as exc:
+                target_recovery = TargetRecoveryResult.unavailable()
+                state.runtime_metrics["target_recovery_generator_error"] = str(exc)
+            timings["target_recovery_seconds"] = (
+                time.perf_counter() - recovery_started
+            )
+            state.target_recovery = target_recovery
+            state.environment_frontiers = target_recovery.environment_frontiers
+            executable_overlay = compile_executable_requirement_overlay(
+                state.requirement_graph,
+                target_recovery,
+                hypothesis_assignment_ids=hypothesis_set.active_assignment_ids,
+            )
+            state.executable_requirement_overlay = executable_overlay
+            state.target_slice = build_target_slice(
+                target_recovery, repository_index, state.program_graph,
+            )
+            target_checks_by_id = {
+                item.check_id: item for item in target_recovery.targets
+            }
+            state.causal_slices = tuple(
+                recover_causal_slice(
+                    execution,
+                    repository_index,
+                    state.program_graph,
+                    GraphBudget.from_limits(
+                        seconds=self.config.program_slice_deadline_seconds,
+                        max_nodes=self.config.max_program_nodes,
+                        max_edges=self.config.max_program_edges,
+                        max_files=self.config.active_slice_max_files,
+                        max_functions=self.config.active_slice_max_symbols,
+                        max_rss_mib=self.config.graph_memory_limit_mib,
+                        max_protocol_candidates_per_operation=(
+                            self.config.max_protocol_candidates_per_operation
+                        ),
+                    ),
+                    target_checks_by_id[execution.check_id],
+                )
+                for execution in target_recovery.baseline_executions
+                if execution.check_id in target_checks_by_id
+            )
+            baseline_by_check = {
+                item.check_id: item for item in target_recovery.baseline_executions
+            }
+            state.check_comparisons = tuple(
+                CheckComparison.create(
+                    baseline_by_check[check.check_id],
+                    baseline_by_check[check.check_id],
+                    check.role,
+                )
+                for check in (
+                    *target_recovery.targets,
+                    *target_recovery.preservation_checks,
+                )
+                if check.check_id in baseline_by_check
+            )
+            state.observations = ObservationBundle.create(
+                revision=0,
+                check_comparisons=state.check_comparisons,
+                environment_frontier_ids=(
+                    item.frontier_id for item in target_recovery.environment_frontiers
+                ),
+            )
+            state.runtime_config["public_check_commands"] = [
+                list(check.command) for check in (
+                    *target_recovery.targets,
+                    *target_recovery.preservation_checks,
+                )
+            ]
+            state.runtime_metrics.update({
+                "target_recovery_status": target_recovery.status,
+                "target_recovery_timed_out": target_recovery.timed_out,
+                "executable_target_count": len(target_recovery.targets),
+                "executable_preservation_count": len(
+                    target_recovery.preservation_checks
+                ),
+                "baseline_real_execution_count": len(
+                    target_recovery.baseline_executions
+                ),
+                "environment_frontier_count": len(
+                    target_recovery.environment_frontiers
+                ),
+                "directed_reproduction_requests": (
+                    target_recovery.directed_reproduction_requests
+                ),
+            })
+            artifacts.put(
+                "target_recovery", target_recovery, state=state,
+                producer="reachpatch.target-recovery",
+                confidence=Confidence.CONFIRMED,
+                status=target_recovery.status,
+            )
             if revision is not None and revision.edits:
                 validation_started = time.perf_counter()
                 conversion = convert_revision_action(state, revision)
@@ -864,10 +1001,10 @@ class ReachPatchController:
             elif revision is not None and revision.context_requests:
                 state.runtime_metrics["initial_context_only"] = True
             elif revision is not None and revision.status == "GENERATOR_BROWSE_LOOP":
-                state.termination_status = "GENERATOR_NONPROGRESS"
                 state.runtime_metrics.setdefault("root_cause_labels", []).append(
                     "GENERATOR_BROWSE_LOOP"
                 )
+                state.runtime_metrics["initial_generator_nonprogress"] = True
         else:
             timings["first_patch_generation_seconds"] = 0.0
         timings["analysis_total_seconds"] = time.perf_counter() - started
@@ -884,7 +1021,7 @@ class ReachPatchController:
                     "semantic_hypothesis_graph": {"hash": semantic_result.graph.to_dict()["graph_hash"]},
                     "requirement_graph": {"hash": state.requirement_graph.semantic_layer_hash()},
                     "program_graph": {"hash": state.program_graph.program_hash()},
-                    "binding_graph": {"hash": state.binding_graph.graph_hash()},
+                    "binding_graph": {"hash": state.active_binding_graph.graph_hash()},
                     "challenge_graph": {"hash": state.challenge_graph.graph_hash()},
                 },
             },
@@ -1193,7 +1330,7 @@ class ReachPatchController:
             semantic_graph=semantic_result.graph,
             requirement_graph=requirements,
             program_graph=program,
-            binding_graph=binding,
+            active_binding_graph=binding,
             challenge_graph=challenges,
             checkpoint=checkpoint,
             outcomes={},
@@ -1251,7 +1388,7 @@ class ReachPatchController:
         analysis_timings["baseline_execution_replay_seconds"] = time.perf_counter() - stage_started
         state.requirement_graph = requirements
         state.program_graph = program
-        state.binding_graph = binding
+        state.active_binding_graph = binding
         state.challenge_graph = challenges
         state.trace_bundles.update({item.paired_bundle_id: item for item in bundles})
         state.outcomes = outcomes_from_challenges(state, challenges, bundles)
@@ -1582,7 +1719,7 @@ class ReachPatchController:
         graph_envelopes = {
             artifact_type: artifacts.store.latest(instance.instance_id, artifact_type)
             for artifact_type in (
-                "requirement_graph", "program_graph", "binding_graph",
+                "requirement_graph", "program_graph", "active_binding_graph",
                 "challenge_graph", "repository_index", "hypothesis_set",
             )
         }
@@ -1598,7 +1735,9 @@ class ReachPatchController:
             graph_envelopes["requirement_graph"].payload
         )
         program = program_graph_from_dict(graph_envelopes["program_graph"].payload)
-        binding = binding_graph_from_dict(graph_envelopes["binding_graph"].payload)
+        binding = active_binding_graph_from_dict(
+            graph_envelopes["active_binding_graph"].payload
+        )
         challenges = challenge_graph_from_dict(
             graph_envelopes["challenge_graph"].payload
         )
@@ -1684,10 +1823,6 @@ class ReachPatchController:
             impact_slice_from_dict(state_raw["impact_slice"])
             if state_raw.get("impact_slice") else None
         )
-        executable_binding = (
-            executable_binding_graph_from_dict(state_raw["executable_binding_graph"])
-            if state_raw.get("executable_binding_graph") else None
-        )
         comparisons = tuple(
             check_comparison_from_dict(item)
             for item in state_raw.get("check_comparisons", ())
@@ -1715,7 +1850,7 @@ class ReachPatchController:
             semantic_graph=semantic_result.graph,
             requirement_graph=requirements,
             program_graph=program,
-            binding_graph=binding,
+            active_binding_graph=binding,
             challenge_graph=challenges,
             checkpoint=checkpoint,
             outcomes={
@@ -1753,13 +1888,36 @@ class ReachPatchController:
             target_slice=target_slice,
             causal_slices=causal_slices,
             impact_slice=impact_slice,
-            executable_binding_graph=executable_binding,
             check_comparisons=comparisons,
             dicc_certificate=dicc_certificate,
             environment_frontiers=environment_frontiers,
             working_trial=(
                 dict(state_raw["working_trial"])
                 if state_raw.get("working_trial") is not None else None
+            ),
+            observations=ObservationBundle.create(
+                revision=int(state_raw.get("transition_index", 0)),
+                check_comparisons=comparisons,
+                environment_frontier_ids=(
+                    item.frontier_id for item in environment_frontiers
+                ),
+            ),
+            requirement_coverage=update_requirement_coverage(
+                None, binding, comparisons, counterexamples,
+            ),
+            verified_safe_patch=(
+                _working_patch(state_raw["verified_safe_patch"])
+                if state_raw.get("verified_safe_patch") else None
+            ),
+            prohibited_mechanisms=set(state_raw.get("prohibited_mechanisms", ())),
+            reach_status=str(state_raw.get("reach_status", "NOT_REACHED")),
+            avoid_status=str(state_raw.get("avoid_status", "NOT_AVOIDED")),
+            generation_run_id=str(state_raw.get("generation_run_id", root.name)),
+            code_commit_sha=str(state_raw.get("code_commit_sha", "")),
+            method_config_hash=str(state_raw.get("method_config_hash", "")),
+            prompt_hash=str(state_raw.get("prompt_hash", "")),
+            current_patch_hash=str(
+                state_raw.get("current_patch_hash", checkpoint.patch.canonical_diff_hash)
             ),
         )
         passed = [item for item in state.outcomes.values() if item.status == OutcomeStatus.PASS]
@@ -1901,18 +2059,27 @@ class ReachPatchController:
             for obligation in requirements.path_obligations.values()
             if set(obligation.path_edge_ids) & set(delta.added_edge_ids)
         )
+        cumulative = reconcile_actual_diff(state.base_repository, snapshot)
         requirement_seconds = time.perf_counter() - graph_started
         graph_started = time.perf_counter()
         binding = build_active_binding_graph(
-            requirements, delta.graph, previous=state.binding_graph,
-            affected_leaf_ids=selected_leaves,
-            affected_path_ids=affected_paths,
-            max_target_units=self.config.max_active_target_bindings,
-            max_preservation_units=self.config.max_active_preservation_bindings,
-            deadline=time.monotonic() + self.config.binding_deadline_seconds,
+            requirements,
+            delta.graph,
+            cumulative,
+            state.target_recovery,
+            (
+                *state.target_recovery.targets,
+                *state.target_recovery.preservation_checks,
+            ) if state.target_recovery is not None else (),
+            previous_graph=state.active_binding_graph,
+            instance_id=state.instance_id,
+            revision=state.transition_index + 1,
+            active_slice_max_files=self.config.active_slice_max_files,
+            active_slice_max_symbols=self.config.active_slice_max_symbols,
+            direct_caller_depth=self.config.direct_caller_depth,
+            impact_cone_depth=self.config.impact_cone_depth,
         )
         binding_seconds = time.perf_counter() - graph_started
-        cumulative = reconcile_actual_diff(state.base_repository, snapshot)
         graph_started = time.perf_counter()
         challenges = materialize_active_challenges(
             requirements, delta.graph, binding, actual_diff=cumulative,
@@ -1923,7 +2090,7 @@ class ReachPatchController:
         challenge_seconds = time.perf_counter() - graph_started
         state.requirement_graph = requirements
         state.program_graph = delta.graph
-        state.binding_graph = binding
+        state.active_binding_graph = binding
         state.challenge_graph = challenges
         state.checkpoint = replace(
             state.checkpoint, graph_hashes=state.graph_hashes()
@@ -2038,7 +2205,10 @@ class ReachPatchController:
         # analyze() owns the initial generation. A context-only initial answer
         # reaches this loop with transition_index == 0 and is retried after the
         # requested local slice has been materialized.
-        while submitted < self.config.max_submitted_revisions:
+        revision_limit = min(
+            self.config.max_submitted_revisions, self.config.max_total_revisions
+        )
+        while submitted < revision_limit:
             if in_target_set(state):
                 break
             terminal = terminal_avoid_reason(state)
@@ -2053,6 +2223,10 @@ class ReachPatchController:
                 packet for packet in state.counterexamples
                 if packet.counterexample_id not in conversation.delivered_counterexamples
             )
+            intent = next_untried_repair_intent(state)
+            state.runtime_metrics["current_repair_intent"] = (
+                intent.to_dict() if intent is not None else None
+            )
             if state.phase == ControllerPhase.TRANSITION_GATE:
                 state.transition_phase(
                     ControllerPhase.COUNTEREXAMPLE_FEEDBACK,
@@ -2063,12 +2237,18 @@ class ReachPatchController:
                     ControllerPhase.ROOT_RECOVERY,
                     event="initial_generation_requested_context",
                 )
-            if nonprogress >= self.config.nonprogress_before_root_recovery:
+            if (
+                nonprogress >= self.config.nonprogress_before_root_recovery
+                or state.runtime_metrics.pop("root_recovery_required", False)
+            ):
                 state.transition_phase(
                     ControllerPhase.ROOT_RECOVERY, event="patch_first_nonprogress"
                 )
                 tools = self._repair_tools(state)
                 try:
+                    self.generator_agent.max_tool_turns = (
+                        self.config.root_recovery_max_turns
+                    )
                     revision = self.generator_agent.root_recovery(
                         state, conversation, tools
                     )
@@ -2084,6 +2264,9 @@ class ReachPatchController:
                     )
                 tools = self._repair_tools(state)
                 try:
+                    self.generator_agent.max_tool_turns = (
+                        self.config.revision_generator_max_turns
+                    )
                     if packets:
                         revision = self.generator_agent.repair_from_counterexamples(
                             state, conversation, packets, tools
@@ -2115,24 +2298,49 @@ class ReachPatchController:
                 ),
             )
             if not revision.edits:
+                if (
+                    not revision.context_requests
+                    and not state.checkpoint.patch.canonical_diff
+                    and self.generator_agent.requested_max_tool_turns <= 2
+                ):
+                    state.termination_status = "GENERATOR_NONPROGRESS"
+                    state.runtime_metrics.setdefault("root_cause_labels", []).append(
+                        "GENERATOR_CONTEXTLESS"
+                    )
+                    break
                 if revision.status == "NO_NEW_REPAIR_EVIDENCE":
-                    state.termination_status = "NO_NEW_REPAIR_EVIDENCE"
-                    state.runtime_metrics.setdefault("root_cause_labels", []).append(
-                        "NO_TARGET_PROGRESS"
-                    )
-                    break
+                    nonprogress += 1
+                    state.runtime_metrics["same_evidence_revision_count"] = int(
+                        state.runtime_metrics.get("same_evidence_revision_count", 0)
+                    ) + 1
+                    continue
                 if revision.status == "DECLARED_BLOCKER":
-                    state.termination_status = "GENERATOR_NONPROGRESS"
                     state.runtime_metrics.setdefault("root_cause_labels", []).append(
-                        "GENERATOR_BROWSE_LOOP"
+                        "GENERATOR_DECLARED_BLOCKER"
                     )
-                    break
+                    nonprogress += 1
+                    # A model-level blocker is not an external/API blocker. Keep
+                    # the same conversation alive so root recovery can widen the
+                    # bounded slice and try a causal edit.
+                    if (
+                        not state.checkpoint.patch.canonical_diff
+                        and self.generator_agent.requested_max_tool_turns <= 2
+                    ):
+                        state.termination_status = "GENERATOR_NONPROGRESS"
+                        break
+                    continue
                 if revision.status == "GENERATOR_BROWSE_LOOP":
-                    state.termination_status = "GENERATOR_NONPROGRESS"
                     state.runtime_metrics.setdefault("root_cause_labels", []).append(
                         "GENERATOR_BROWSE_LOOP"
                     )
-                    break
+                    nonprogress += 1
+                    if (
+                        not state.checkpoint.patch.canonical_diff
+                        and self.generator_agent.requested_max_tool_turns <= 2
+                    ):
+                        state.termination_status = "GENERATOR_NONPROGRESS"
+                        break
+                    continue
                 if revision.status == "REVISION_BUDGET_EXHAUSTED":
                     state.termination_status = (
                         "REVISION_BUDGET_EXHAUSTED_WITH_UNCERTIFIED_PATCH"
@@ -2154,19 +2362,16 @@ class ReachPatchController:
                     # producing evidence, context requests, or edits.  Do
                     # not repeatedly reset root recovery and spend every
                     # submitted revision on the same browse-only response.
-                    if contextless >= max(
-                        2, self.config.nonprogress_before_root_recovery
-                    ):
-                        state.termination_status = "GENERATOR_NONPROGRESS"
-                        state.runtime_metrics["generator_nonprogress_reason"] = (
-                            "consecutive revisions contained neither edits nor "
-                            "targeted context requests"
-                        )
-                        break
                 else:
                     nonprogress += 1
                 continue
             conversion = convert_revision_action(state, revision)
+            if revision.mechanism in state.prohibited_mechanisms:
+                state.runtime_metrics.setdefault(
+                    "rejected_prohibited_mechanisms", []
+                ).append(revision.mechanism)
+                nonprogress += 1
+                continue
             if conversion.status not in {
                 ActionConversionStatus.ACCEPTED,
                 ActionConversionStatus.NEEDS_SLICE_EXPANSION,
@@ -2180,7 +2385,7 @@ class ReachPatchController:
                 state.runtime_metrics["accepted_transitions"] = int(
                     state.runtime_metrics.get("accepted_transitions", 0)
                 ) + 1
-                nonprogress = 0
+                nonprogress = 0 if result.certificate.progress else nonprogress + 1
             elif result.decision == Decision.KEEP_UNCERTIFIED:
                 state.runtime_metrics["kept_uncertified_transitions"] = int(
                     state.runtime_metrics.get("kept_uncertified_transitions", 0)
@@ -2194,7 +2399,7 @@ class ReachPatchController:
                 ).append(revision.mechanism)
                 nonprogress += 1
             self._persist_transition(state, result)
-        if submitted >= self.config.max_submitted_revisions and not in_target_set(state):
+        if submitted >= revision_limit and not in_target_set(state):
             state.termination_status = (
                 "REVISION_BUDGET_EXHAUSTED_WITH_UNCERTIFIED_PATCH"
                 if state.checkpoint.patch.canonical_diff
@@ -2316,7 +2521,7 @@ class ReachPatchController:
             )
             current_binding = (
                 previous_evaluation.binding_graph
-                if previous_evaluation else state.binding_graph
+                if previous_evaluation else state.active_binding_graph
             )
             incremental = reconcile_actual_diff(
                 current_tree,
@@ -2373,12 +2578,21 @@ class ReachPatchController:
                 affected_paths.update(removed_paths)
                 affected_paths.update(added_paths)
             candidate_binding = build_active_binding_graph(
-                candidate_requirements, candidate_program,
-                previous=current_binding, affected_leaf_ids=affected_leaves,
-                affected_path_ids=affected_paths,
-                max_target_units=self.config.max_active_target_bindings,
-                max_preservation_units=self.config.max_active_preservation_bindings,
-                deadline=time.monotonic() + self.config.binding_deadline_seconds,
+                candidate_requirements,
+                candidate_program,
+                incremental,
+                state.target_recovery,
+                (
+                    *state.target_recovery.targets,
+                    *state.target_recovery.preservation_checks,
+                ) if state.target_recovery is not None else (),
+                previous_graph=current_binding,
+                instance_id=state.instance_id,
+                revision=state.transition_index + attempt_number,
+                active_slice_max_files=self.config.active_slice_max_files,
+                active_slice_max_symbols=self.config.active_slice_max_symbols,
+                direct_caller_depth=self.config.direct_caller_depth,
+                impact_cone_depth=self.config.impact_cone_depth,
             )
             cumulative = reconcile_actual_diff(
                 state.base_repository,
@@ -2466,7 +2680,7 @@ class ReachPatchController:
             candidate_state = copy.copy(state)
             candidate_state.requirement_graph = candidate_requirements
             candidate_state.program_graph = candidate_program
-            candidate_state.binding_graph = candidate_binding
+            candidate_state.active_binding_graph = candidate_binding
             candidate_state.challenge_graph = candidate_challenges
             candidate_state.outcomes = outcomes_from_challenges(
                 candidate_state, candidate_challenges, candidate_bundles
@@ -2485,26 +2699,16 @@ class ReachPatchController:
                     ),
                 ),
             )
-            executable_binding = build_executable_bindings(
-                state.executable_requirement_overlay,
-                state.target_slice,
-                state.causal_slices,
-                impact_slice,
-            )
             executable_challenges = compile_executable_challenge_evidence(
-                executable_binding, public_comparisons, cumulative, impact_slice,
+                candidate_binding, public_comparisons, cumulative, impact_slice,
                 trace_results=(candidate_bundles, dicc_bundles),
                 checks=recovered_checks,
                 repository_index=state.repository_index,
             )
-            executable_obligation_count = len(
-                state.executable_requirement_overlay.executable_requirements
-            )
-            active_executable_binding_count = sum(
-                unit.check_id is not None for unit in executable_binding.units
-            )
+            executable_obligation_count = len(candidate_requirements.leaves)
+            active_executable_binding_count = candidate_binding.executable_unit_count
             dicc = evaluate_dicc(
-                executable_binding.executable_targets,
+                state.target_recovery.targets,
                 public_comparisons,
                 cumulative,
                 impact_slice,
@@ -2561,7 +2765,7 @@ class ReachPatchController:
             ]
             candidate_state.check_comparisons = public_comparisons
             candidate_state.impact_slice = impact_slice
-            candidate_state.executable_binding_graph = executable_binding
+            candidate_state.active_binding_graph = candidate_binding
             candidate_state.dicc_certificate = dicc
             candidate_state.runtime_metrics = {
                 **state.runtime_metrics,
@@ -2599,7 +2803,7 @@ class ReachPatchController:
                 cumulative_diff=cumulative,
                 check_comparisons=public_comparisons,
                 impact_slice=impact_slice,
-                executable_binding_graph=executable_binding,
+                active_binding_graph=candidate_binding,
                 dicc_certificate=dicc,
                 safe=safe,
                 graph_reached=graph_reached,
@@ -2640,12 +2844,12 @@ class ReachPatchController:
                 raise RuntimeError("committed ablation lacks its validation snapshot")
             state.requirement_graph = evaluation.requirement_graph
             state.program_graph = evaluation.program_graph
-            state.binding_graph = evaluation.binding_graph
+            state.active_binding_graph = evaluation.binding_graph
             state.challenge_graph = evaluation.challenge_graph
             state.outcomes = evaluation.outcomes
             state.check_comparisons = evaluation.check_comparisons
             state.impact_slice = evaluation.impact_slice
-            state.executable_binding_graph = evaluation.executable_binding_graph
+            state.active_binding_graph = evaluation.active_binding_graph
             state.dicc_certificate = evaluation.dicc_certificate
             state.runtime_metrics.update({
                 "normative_requirement_path_obligations": len(
@@ -2785,19 +2989,8 @@ class ReachPatchController:
         session: PersistentGeneratorSession | None = None,
     ) -> TerminalCertificate:
         reached = in_target_set(state)
-        if (
-            reached and state.checkpoint.patch.canonical_diff
-            and self.config.enable_ablation
-            and state.remaining_budget.available()
-        ):
-            if state.phase != ControllerPhase.INCUMBENT_CLOSE:
-                state.transition_phase(
-                    ControllerPhase.INCUMBENT_CLOSE,
-                    event="prepare_edit_retention_ablation",
-                )
-            self._ablate_reached_patch(state, session)
-            reached = in_target_set(state)
-        status = "REACHED" if reached else (
+        limited = evidence_limited_complete(state)
+        status = "REACHED" if reached else "EVIDENCE_LIMITED_COMPLETE" if limited else (
             state.termination_status or (
                 "REVISION_BUDGET_EXHAUSTED_WITH_UNCERTIFIED_PATCH"
                 if state.checkpoint.patch.canonical_diff
@@ -2825,7 +3018,7 @@ class ReachPatchController:
                 )
             ):
                 root_causes.add("NO_PATH_OBLIGATION")
-            if not getattr(state.executable_binding_graph, "units", ()):
+            if not state.active_binding_graph.units:
                 root_causes.add("NO_ACTIVE_BINDING")
             if (
                 state.dicc_certificate is None
@@ -2867,23 +3060,27 @@ class ReachPatchController:
         state.runtime_metrics.update({
             "normative_candidate_binding_count": sum(
                 unit.status == "CANDIDATE"
-                for unit in state.binding_graph.units.values()
+                for unit in state.active_binding_graph.units.values()
             ),
             "candidate_binding_count": sum(
-                unit.check_id is not None
-                for unit in getattr(state.executable_binding_graph, "units", ())
+                bool(unit.changed_hunk_ids)
+                for unit in state.active_binding_graph.units.values()
             ),
             "normative_active_binding_count": sum(
                 unit.status in {"ACTIVE", "READY"}
-                for unit in state.binding_graph.units.values()
+                for unit in state.active_binding_graph.units.values()
             ),
             "active_binding_count": sum(
-                unit.check_id is not None
-                for unit in getattr(state.executable_binding_graph, "units", ())
+                bool(
+                    unit.target_check_ids
+                    or unit.preservation_check_ids
+                    or unit.challenge_check_ids
+                )
+                for unit in state.active_binding_graph.units.values()
             ),
             "deferred_binding_count": sum(
                 unit.status == "DEFERRED"
-                for unit in state.binding_graph.units.values()
+                for unit in state.active_binding_graph.units.values()
             ),
             "normative_challenge_cell_count": len(state.challenge_graph.cells),
             "active_challenge_count": (
@@ -2912,6 +3109,14 @@ class ReachPatchController:
                 producer="reachpatch.dicc",
                 confidence=Confidence.CONFIRMED,
                 status=state.dicc_certificate.status.value,
+            )
+        if state.generator_conversation is not None:
+            artifacts.put(
+                "generator_conversation", state.generator_conversation,
+                state=state,
+                producer="reachpatch.deepseek-agent",
+                confidence=Confidence.CONFIRMED,
+                status=status,
             )
         artifacts.persist_state(state)
         self._update_run_manifest(state)
@@ -2945,7 +3150,7 @@ class ReachPatchController:
             for source in (
                 state.requirement_graph.frontiers.values(),
                 state.program_graph.frontiers.values(),
-                state.binding_graph.frontiers.values(),
+                state.active_binding_graph.frontiers.values(),
                 state.challenge_graph.frontiers.values(),
             )
             for frontier in source

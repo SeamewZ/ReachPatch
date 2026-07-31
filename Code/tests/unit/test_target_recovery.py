@@ -563,6 +563,47 @@ def test_django_script_configuration_failure_is_rejected_with_project_frame(tmp_
     assert _is_script_level_reproduction_failure(check, execution)
 
 
+def test_django_templates_setup_failure_is_rejected_with_project_frame(tmp_path) -> None:
+    check = ExecutableCheck(
+        check_id="template-reproduction",
+        role=CheckRole.EXPLORATION,
+        authority="ISSUE_PUBLIC_REPRODUCTION",
+        command=("python", "template_repro.py"),
+        cwd=str(tmp_path),
+        environment={},
+        timeout_seconds=60.0,
+        source_evidence_ids=(),
+        target_requirement_ids=(),
+        temporary_artifact_paths=(str(tmp_path / "template_repro.py"),),
+        selector="template_repro.py",
+    )
+    execution = CheckExecution(
+        execution_id="template-execution",
+        check_id=check.check_id,
+        tree_hash="base",
+        status=CheckStatus.FAIL,
+        return_code=1,
+        stdout="",
+        stderr=(
+            f"File \"{tmp_path / 'template_repro.py'}\", line 7, in <module>\n"
+            "  rendered = form.as_p()\n"
+            "File \"django/forms/utils.py\", line 87, in as_p\n"
+            "django.core.exceptions.ImproperlyConfigured: "
+            "No DjangoTemplates backend is configured.\n"
+        ),
+        duration_seconds=0.1,
+        stable=True,
+        failure_signature="django-template-setup",
+        first_project_frame={
+            "path": "django/forms/utils.py",
+            "line": 87,
+            "symbol": "RenderableFormMixin.as_p",
+        },
+    )
+
+    assert _is_script_level_reproduction_failure(check, execution)
+
+
 def test_public_issue_includes_public_discussion_and_test_paths_are_strict() -> None:
     instance = Instance(
         "public-hints", "/repo", "base", "Allow path to accept a callable.",

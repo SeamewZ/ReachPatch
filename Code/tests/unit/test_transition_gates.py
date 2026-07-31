@@ -2,8 +2,12 @@ from __future__ import annotations
 
 from types import SimpleNamespace
 
+from reachpatch.execution.models import (
+    CheckClassification, CheckStatus, CheckComparison, CheckExecution,
+)
 from reachpatch.models.controller import UnitOutcome
 from reachpatch.models.enums import OutcomeStatus
+from reachpatch.reach_avoid.metrics import progress_vector_from_comparisons
 from reachpatch.reach_avoid.gates import in_target_set, raw_avoid_reasons
 
 
@@ -75,3 +79,28 @@ def test_reach_requires_at_least_one_executable_active_target():
     )
 
     assert not in_target_set(state)
+
+
+def test_target_infrastructure_failure_is_unknown_not_preservation_regression():
+    baseline = CheckExecution(
+        execution_id="baseline", check_id="target", tree_hash="base",
+        status=CheckStatus.FAIL, return_code=1, stdout="", stderr="failure",
+        duration_seconds=0.1, stable=True, failure_signature="baseline-failure",
+        first_project_frame=None,
+    )
+    patched = CheckExecution(
+        execution_id="patched", check_id="target", tree_hash="patch",
+        status=CheckStatus.INVALID_ENVIRONMENT, return_code=1, stdout="",
+        stderr="environment failure", duration_seconds=0.1, stable=True,
+        failure_signature="environment-failure", first_project_frame=None,
+    )
+    comparison = CheckComparison(
+        comparison_id="comparison", check_id="target",
+        baseline=baseline, patched=patched,
+        classification=CheckClassification.NEW_INFRA_FAILURE,
+    )
+
+    progress = progress_vector_from_comparisons((), (comparison,))
+
+    assert progress.preservation_regression_delta == 0
+    assert progress.unresolved_frontier_delta == 1

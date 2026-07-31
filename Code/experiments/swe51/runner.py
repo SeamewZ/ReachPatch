@@ -20,7 +20,11 @@ if str(CODE_ROOT) not in sys.path:
     sys.path.insert(0, str(CODE_ROOT))
 
 from reachpatch.models.base import content_hash, utc_now
-from reachpatch.models.isolation import GenerationInstance, HarnessEvaluationInstance
+from reachpatch.models.isolation import (
+    GenerationInstance,
+    HarnessEvaluationInstance,
+    assert_generation_payload,
+)
 from reachpatch.execution.official_harness import (
     OfficialHarnessUnavailable,
     run_official_swebench_instance,
@@ -41,10 +45,31 @@ from reachpatch.repair.deepseek_agent import (
 )
 
 
-DATASET_ROOT = CODE_ROOT / "dataset" / "patchpsro_55_unique51"
+def _configured_root(environment_name: str, default: Path) -> Path:
+    raw = os.environ.get(environment_name)
+    configured = Path(raw).expanduser().resolve() if raw else default.resolve()
+    if not configured.is_relative_to(CODE_ROOT):
+        raise ValueError(
+            f"{environment_name} must stay inside the ReachPatch Code root: "
+            f"{configured}"
+        )
+    return configured
+
+
+DATASET_COLLECTION_ROOT = CODE_ROOT / "dataset"
+DATASET_ROOT = _configured_root(
+    "REACHPATCH_DATASET_ROOT",
+    DATASET_COLLECTION_ROOT / "patchpsro_55_unique51",
+)
+if not DATASET_ROOT.is_relative_to(DATASET_COLLECTION_ROOT):
+    raise ValueError("REACHPATCH_DATASET_ROOT must stay inside Code/dataset")
 PUBLIC_PATH = DATASET_ROOT / "generation_public_instances.jsonl"
 OFFICIAL_PATH = DATASET_ROOT / "official_instances.jsonl"
-EXPERIMENT_ROOT = CODE_ROOT / "experiments" / "swe51"
+EXPERIMENT_ROOT = _configured_root(
+    "REACHPATCH_EXPERIMENT_ROOT",
+    CODE_ROOT / "experiments" / "swe51",
+)
+EXPERIMENT_LABEL = os.environ.get("REACHPATCH_EXPERIMENT_LABEL", "SWE51")
 REPO_ROOT = EXPERIMENT_ROOT / "repos"
 TREE_ROOT = EXPERIMENT_ROOT / "case_trees"
 RUN_ROOT = EXPERIMENT_ROOT / "runs"
@@ -60,7 +85,91 @@ PUBLIC_RUNTIME_DEPENDENCY_ROOT = CODE_ROOT / ".reachpatch_runtime_deps" / "pytho
 GENERATION_ISOLATION_ENV = "REACHPATCH_GENERATION_ISOLATED"
 GENERATION_ISOLATION_ENGINE = "bubblewrap_public_only_v1"
 GENERATION_MEMORY_RESERVE_MIB = 16 * 1024
-GENERATION_MEMORY_PER_WORKER_MIB = 8 * 1024
+GENERATION_MEMORY_PER_WORKER_MIB = 16 * 1024
+GENERATION_DISK_RESERVE_MIB = 40 * 1024
+LINEAGE_ENV = "REACHPATCH_GENERATION_LINEAGE"
+
+
+def _code_commit_sha() -> str:
+    try:
+        completed = subprocess.run(
+            ["git", "rev-parse", "HEAD"],
+            cwd=CODE_ROOT,
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=30,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return ""
+    return completed.stdout.strip() if completed.returncode == 0 else ""
+
+
+def _dataset_manifest_hash() -> str:
+    try:
+        return hashlib.sha256(PUBLIC_PATH.read_bytes()).hexdigest()
+    except OSError:
+        return ""
+
+
+def _implementation_tree_hash() -> str:
+    """Fingerprint production code so dirty-tree runs cannot reuse old caches."""
+
+    digest = hashlib.sha256()
+    paths = sorted((CODE_ROOT / "reachpatch").rglob("*.py"))
+    paths.append(Path(__file__).resolve())
+    for path in paths:
+        relative = path.relative_to(CODE_ROOT).as_posix()
+        digest.update(relative.encode("utf-8"))
+        digest.update(b"\0")
+        try:
+            digest.update(path.read_bytes())
+        except OSError:
+            return ""
+        digest.update(b"\0")
+    return digest.hexdigest()
+
+
+def _prompt_hash(raw: dict[str, Any]) -> str:
+    return content_hash({
+        "problem_statement": str(raw.get("problem_statement", "")),
+        "hints_text": str(raw.get("hints_text", "")),
+    })
+
+
+def _method_config_hash(model: str, max_revisions: int) -> str:
+    return content_hash({
+        "implementation": "patch_first_incremental_v1",
+        "implementation_tree_hash": _implementation_tree_hash(),
+        "model": model,
+        "max_revisions": int(max_revisions),
+        "controller": "ReachPatchConfig",
+    })
+
+
+def _lineage_for(
+    raw: dict[str, Any],
+    *,
+    generation_run_id: str,
+    model: str,
+    max_revisions: int,
+) -> dict[str, str]:
+    implementation_tree_hash = _implementation_tree_hash()
+    return {
+        "instance_id": str(raw["instance_id"]),
+        "code_commit_sha": _code_commit_sha(),
+        "implementation_tree_hash": implementation_tree_hash,
+        "method_config_hash": _method_config_hash(model, max_revisions),
+        "prompt_hash": _prompt_hash(raw),
+        "generation_run_id": generation_run_id,
+        "dataset_manifest_hash": _dataset_manifest_hash(),
+    }
+
+
+def _lineage_matches(value: dict[str, Any] | None, expected: dict[str, Any]) -> bool:
+    if not isinstance(value, dict):
+        return False
+    return all(str(value.get(key, "")) == str(expected.get(key, "")) for key in expected)
 
 
 def _memory_snapshot() -> dict[str, float]:
@@ -94,6 +203,16 @@ def _safe_generation_worker_count(
     return min(requested, 10, int(headroom // GENERATION_MEMORY_PER_WORKER_MIB))
 
 
+def _disk_snapshot(path: Path = CODE_ROOT) -> dict[str, float]:
+    usage = shutil.disk_usage(path)
+    divisor = 1024.0 * 1024.0
+    return {
+        "disk_total_mib": usage.total / divisor,
+        "disk_used_mib": usage.used / divisor,
+        "disk_free_mib": usage.free / divisor,
+    }
+
+
 def _generation_sandbox_command(command: list[str]) -> list[str]:
     """Hide all official-only inputs and outputs from a generation worker."""
 
@@ -118,7 +237,8 @@ def _generation_sandbox_command(command: list[str]) -> list[str]:
         # Replace the combined dataset with a filesystem containing exactly
         # the public generation records. Raw cases and official fields do not
         # exist in the worker namespace.
-        "--tmpfs", str(DATASET_ROOT),
+        "--tmpfs", str(DATASET_COLLECTION_ROOT),
+        "--dir", str(DATASET_ROOT),
         "--ro-bind", str(PUBLIC_PATH), str(PUBLIC_PATH),
         # Git mirrors may contain later public commits, while prior harness
         # artifacts contain direct oracle outcomes. Neither is generation
@@ -132,6 +252,27 @@ def _generation_sandbox_command(command: list[str]) -> list[str]:
         "--setenv", "PYTHONDONTWRITEBYTECODE", "1",
         "--chdir", str(CODE_ROOT),
     ]
+    external_private_root = Path("/home/slt/AAAI2027")
+    if external_private_root.is_dir():
+        sandbox.extend(("--tmpfs", str(external_private_root)))
+    experiments_root = CODE_ROOT / "experiments"
+    if experiments_root.is_dir():
+        for experiment in experiments_root.iterdir():
+            if not experiment.is_dir() or experiment.resolve() == EXPERIMENT_ROOT:
+                continue
+            for private_directory in (
+                "harness", "runs", "results", "repos", "case_trees",
+            ):
+                path = experiment / private_directory
+                if path.is_dir():
+                    sandbox.extend(("--tmpfs", str(path)))
+            for private_name in (
+                "harness_summary.json", "experiment_report.json",
+                "case_process_report.json", "failure_report.json",
+            ):
+                path = experiment / private_name
+                if path.is_file():
+                    sandbox.extend(("--ro-bind", "/dev/null", str(path)))
     resolver = Path("/etc/resolv.conf").resolve()
     if resolver.is_file() and resolver.is_relative_to(Path("/run")):
         relative_parent = resolver.parent.relative_to("/run")
@@ -173,6 +314,344 @@ def _read_jsonl(path: Path) -> list[dict[str, Any]]:
     return [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines() if line.strip()]
 
 
+def _repository_cache_name(repository: str) -> str:
+    if not repository or any(
+        part in {"", ".", ".."} for part in repository.split("/")
+    ) or repository.count("/") != 1:
+        raise ValueError(f"invalid public repository name: {repository!r}")
+    allowed = set("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-_.")
+    if any(character not in allowed and character != "/" for character in repository):
+        raise ValueError(f"invalid public repository name: {repository!r}")
+    return repository.replace("/", "__")
+
+
+def _repository_url(repository: str) -> str:
+    return f"https://github.com/{repository}.git"
+
+
+def _broker_socket_path(case_id: str) -> Path:
+    digest = hashlib.sha256(case_id.encode("utf-8")).hexdigest()[:16]
+    path = (RUN_ROOT / "_b" / f"{digest}.sock").resolve()
+    if len(os.fsencode(path)) >= 104:
+        raise OSError(f"public broker socket path is too long: {path}")
+    return path
+
+
+def _run_git(arguments: list[str], *, cwd: Path | None = None) -> str:
+    completed = subprocess.run(
+        ["git", *arguments],
+        cwd=cwd,
+        capture_output=True,
+        text=True,
+        check=False,
+        timeout=1800,
+    )
+    if completed.returncode != 0:
+        detail = (completed.stderr or completed.stdout).strip()[-4000:]
+        raise RuntimeError(f"git {' '.join(arguments)} failed: {detail}")
+    return completed.stdout.strip()
+
+
+def prepare_case_trees(
+    records: list[dict[str, Any]],
+) -> dict[str, Any]:
+    """Prepare exact public base-commit worktrees without official evidence."""
+
+    REPO_ROOT.mkdir(parents=True, exist_ok=True)
+    TREE_ROOT.mkdir(parents=True, exist_ok=True)
+    repositories: dict[str, Path] = {}
+    cloned: list[str] = []
+    created: list[str] = []
+    reused: list[str] = []
+    fetched_commits: list[str] = []
+    for raw in records:
+        repository = str(raw["repo"])
+        cache = repositories.get(repository)
+        if cache is None:
+            cache = REPO_ROOT / _repository_cache_name(repository)
+            repositories[repository] = cache
+            if not (cache / ".git").is_dir():
+                if cache.exists():
+                    raise RuntimeError(
+                        f"repository cache exists but is not a Git repository: {cache}"
+                    )
+                _run_git([
+                    "clone", "--filter=blob:none", "--no-checkout",
+                    _repository_url(repository), str(cache),
+                ])
+                cloned.append(repository)
+
+        case_id = str(raw["instance_id"])
+        base_commit = str(raw["base_commit"])
+        tree = TREE_ROOT / case_id
+        if tree.exists():
+            # A previous worker can leave a checked-out patch tree behind, and
+            # interrupted runs can even leave a copied repository without its
+            # own .git metadata.  Never reuse either form: archive it and make a
+            # fresh detached worktree at the dataset-declared base commit.
+            try:
+                observed_root = Path(
+                    _run_git(["rev-parse", "--show-toplevel"], cwd=tree)
+                ).resolve()
+                observed = _run_git(["rev-parse", "HEAD"], cwd=tree)
+            except (OSError, RuntimeError):
+                observed_root = None
+                observed = ""
+            if observed_root != tree.resolve() or observed != base_commit:
+                _archive_path(tree, TREE_ROOT / "_history", case_id)
+                _run_git(["worktree", "prune"], cwd=cache)
+            else:
+                reused.append(case_id)
+                continue
+        present = subprocess.run(
+            ["git", "cat-file", "-e", f"{base_commit}^{{commit}}"],
+            cwd=cache,
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=60,
+        )
+        if present.returncode != 0:
+            _run_git(["fetch", "--filter=blob:none", "origin", base_commit], cwd=cache)
+            fetched_commits.append(case_id)
+        _run_git([
+            "worktree", "add", "--detach", str(tree), base_commit,
+        ], cwd=cache)
+        created.append(case_id)
+    return {
+        "repository_count": len(repositories),
+        "cloned_repositories": cloned,
+        "created_case_trees": created,
+        "reused_case_trees": reused,
+        "fetched_commit_cases": fetched_commits,
+    }
+
+
+def _project_import_name(repository: str) -> str:
+    known = {
+        "astropy/astropy": "astropy",
+        "django/django": "django",
+        "matplotlib/matplotlib": "matplotlib",
+        "mwaskom/seaborn": "seaborn",
+        "pallets/flask": "flask",
+        "psf/requests": "requests",
+        "pydata/xarray": "xarray",
+        "pylint-dev/pylint": "pylint",
+        "pytest-dev/pytest": "pytest",
+        "scikit-learn/scikit-learn": "sklearn",
+        "sphinx-doc/sphinx": "sphinx",
+        "sympy/sympy": "sympy",
+    }
+    if repository not in known:
+        raise ValueError(f"no public smoke import configured for {repository}")
+    return known[repository]
+
+
+def _project_smoke_preflight(
+    records: list[dict[str, Any]],
+) -> tuple[list[dict[str, Any]], list[dict[str, str]], str]:
+    representatives: dict[str, dict[str, Any]] = {}
+    for raw in records:
+        representatives.setdefault(str(raw["repo"]), raw)
+    fingerprint = content_hash([
+        {
+            "repo": repository,
+            "instance_id": raw["instance_id"],
+            "base_commit": raw["base_commit"],
+            "image": public_swebench_image(str(raw["instance_id"])),
+        }
+        for repository, raw in sorted(representatives.items())
+    ])
+    previous = _read_json(EXPERIMENT_ROOT / "generation_preflight.json") or {}
+    cached_smoke = previous.get("project_smoke", [])
+    if (
+        previous.get("project_smoke_fingerprint") == fingerprint
+        and isinstance(cached_smoke, list)
+        and cached_smoke
+        and all(item.get("status") == "PASS" for item in cached_smoke)
+    ):
+        return list(cached_smoke), [], fingerprint
+
+    observations: list[dict[str, Any]] = []
+    failures: list[dict[str, str]] = []
+    for repository, raw in sorted(representatives.items()):
+        case_id = str(raw["instance_id"])
+        tree = TREE_ROOT / case_id
+        run_root = EXPERIMENT_ROOT / "preflight" / case_id
+        run_root.mkdir(parents=True, exist_ok=True)
+        image = public_swebench_image(case_id)
+        try:
+            package = _project_import_name(repository)
+            broker = PublicDockerExecutionBroker(
+                socket_path=_broker_socket_path(f"preflight:{case_id}"),
+                image=image,
+                case_tree=tree,
+                case_run_root=run_root,
+                max_live_containers=1,
+            )
+            with broker:
+                response = broker.execute({
+                    "token": broker.token,
+                    "repository": str(tree),
+                    "command": [
+                        "python", "-c",
+                        f"import {package}; print({package}.__name__)",
+                    ],
+                    "environment": {"PYTHONPATH": str(tree)},
+                    "timeout": 120,
+                })
+            return_code = response.get("return_code")
+            status = "PASS" if return_code == 0 else "FAIL"
+            detail = str(response.get("stderr") or response.get("error") or "")[-4000:]
+        except (OSError, RuntimeError, ValueError) as exc:
+            status = "FAIL"
+            return_code = None
+            detail = f"{type(exc).__name__}: {exc}"
+        observation = {
+            "repo": repository,
+            "instance_id": case_id,
+            "image": image,
+            "status": status,
+            "return_code": return_code,
+            "detail": detail,
+        }
+        observations.append(observation)
+        if status != "PASS":
+            failures.append({
+                "instance_id": case_id,
+                "check": "project_container_smoke",
+                "detail": detail or f"return code {return_code}",
+            })
+    return observations, failures, fingerprint
+
+
+def validate_generation_preflight(
+    records: list[dict[str, Any]],
+    *,
+    key_path: Path,
+) -> dict[str, Any]:
+    """Reject systemic input/runtime failures before any Generator API call."""
+
+    failures: list[dict[str, str]] = []
+    case_ids: set[str] = set()
+    for raw in records:
+        case_id = str(raw.get("instance_id", ""))
+        if not case_id or case_id in case_ids:
+            failures.append({
+                "instance_id": case_id,
+                "check": "unique_instance_id",
+                "detail": "missing or duplicate public instance id",
+            })
+            continue
+        case_ids.add(case_id)
+        try:
+            assert_generation_payload(raw, path=f"public[{case_id}]")
+            GenerationInstance.from_public_record(raw)
+        except (KeyError, TypeError, ValueError) as exc:
+            failures.append({
+                "instance_id": case_id,
+                "check": "public_payload",
+                "detail": f"{type(exc).__name__}: {exc}",
+            })
+        tree = TREE_ROOT / case_id
+        try:
+            observed = _run_git(["rev-parse", "HEAD"], cwd=tree)
+        except (OSError, RuntimeError, subprocess.TimeoutExpired) as exc:
+            failures.append({
+                "instance_id": case_id,
+                "check": "base_tree",
+                "detail": f"{type(exc).__name__}: {exc}",
+            })
+        else:
+            expected = str(raw.get("base_commit", ""))
+            if observed != expected:
+                failures.append({
+                    "instance_id": case_id,
+                    "check": "base_tree",
+                    "detail": f"expected {expected}, observed {observed}",
+                })
+
+    available_images = subprocess.run(
+        ["docker", "images", "--format", "{{.Repository}}:{{.Tag}}"],
+        capture_output=True,
+        text=True,
+        check=False,
+        timeout=120,
+    )
+    image_names = set(available_images.stdout.splitlines())
+    if available_images.returncode != 0:
+        failures.append({
+            "instance_id": "*",
+            "check": "docker_runtime",
+            "detail": available_images.stderr.strip() or "docker images failed",
+        })
+    missing_images = [
+        str(raw["instance_id"])
+        for raw in records
+        if public_swebench_image(str(raw["instance_id"])) not in image_names
+    ]
+    for case_id in missing_images:
+        failures.append({
+            "instance_id": case_id,
+            "check": "public_image",
+            "detail": public_swebench_image(case_id),
+        })
+    if shutil.which("bwrap") is None:
+        failures.append({
+            "instance_id": "*",
+            "check": "generation_isolation",
+            "detail": "bubblewrap is unavailable",
+        })
+    if not key_path.is_file() or key_path.stat().st_size <= 0:
+        failures.append({
+            "instance_id": "*",
+            "check": "generator_key",
+            "detail": "DeepSeek API key file is missing or empty",
+        })
+    memory = _memory_snapshot()
+    disk = _disk_snapshot()
+    if _safe_generation_worker_count(1, memory) == 0:
+        failures.append({
+            "instance_id": "*",
+            "check": "memory_headroom",
+            "detail": json.dumps(memory, sort_keys=True),
+        })
+    if disk["disk_free_mib"] < GENERATION_DISK_RESERVE_MIB:
+        failures.append({
+            "instance_id": "*",
+            "check": "disk_headroom",
+            "detail": json.dumps(disk, sort_keys=True),
+        })
+    project_smoke: list[dict[str, Any]] = []
+    project_smoke_fingerprint = ""
+    if not failures:
+        project_smoke, smoke_failures, project_smoke_fingerprint = (
+            _project_smoke_preflight(records)
+        )
+        failures.extend(smoke_failures)
+    report = {
+        "status": "PASS" if not failures else "FAIL",
+        "experiment_label": EXPERIMENT_LABEL,
+        "case_count": len(records),
+        "unique_case_count": len(case_ids),
+        "public_image_count": len(records) - len(missing_images),
+        "memory": memory,
+        "disk": disk,
+        "disk_reserve_mib": GENERATION_DISK_RESERVE_MIB,
+        "project_smoke_fingerprint": project_smoke_fingerprint,
+        "project_smoke": project_smoke,
+        "failures": failures,
+        "completed_at": utc_now(),
+    }
+    _write_json(EXPERIMENT_ROOT / "generation_preflight.json", report)
+    if failures:
+        raise RuntimeError(
+            f"generation preflight failed with {len(failures)} issue(s); "
+            f"see {EXPERIMENT_ROOT / 'generation_preflight.json'}"
+        )
+    return report
+
+
 def _write_json(path: Path, payload: dict[str, Any]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     temporary = path.with_suffix(path.suffix + ".tmp")
@@ -208,7 +687,17 @@ def _archive_path(path: Path, history_root: Path, case_id: str) -> Path | None:
     stamp = f"{time.time_ns()}"
     suffix = path.suffix if path.is_file() else ""
     destination = destination_root / f"attempt-{stamp}{suffix}"
-    path.rename(destination)
+    try:
+        path.rename(destination)
+    except OSError as exc:
+        if getattr(exc, "errno", None) != 18:
+            raise
+        if path.is_dir():
+            shutil.copytree(path, destination)
+            shutil.rmtree(path)
+        else:
+            shutil.copy2(path, destination)
+            path.unlink()
     return destination
 
 
@@ -218,7 +707,9 @@ def _validate_only_ids(records: list[dict[str, Any]], only: set[str] | None) -> 
     known = {str(item["instance_id"]) for item in records}
     unknown = sorted(only - known)
     if unknown:
-        raise ValueError(f"unknown SWE51 instance ids: {', '.join(unknown)}")
+        raise ValueError(
+            f"unknown {EXPERIMENT_LABEL} instance ids: {', '.join(unknown)}"
+        )
 
 
 def _failure_rows(stage_summary: dict[str, Any], stage: str) -> list[dict[str, Any]]:
@@ -357,7 +848,7 @@ def write_failure_report(
     }
     _write_json(EXPERIMENT_ROOT / "failure_report.json", report)
     lines = [
-        "# SWE51 Failure Report",
+        f"# {EXPERIMENT_LABEL} Failure Report",
         "",
         f"- Cases observed: `{report['case_count']}`",
         f"- Failure/unknown rows: `{report['failure_count']}`",
@@ -494,7 +985,7 @@ def write_experiment_report(
     }
     _write_json(EXPERIMENT_ROOT / "experiment_report.json", report)
     lines = [
-        "# SWE51 Experiment Report",
+        f"# {EXPERIMENT_LABEL} Experiment Report",
         "",
         f"- Cases: `{report['case_count']}`",
         f"- Generation counts: `{json.dumps(report['generation_counts'], sort_keys=True)}`",
@@ -671,7 +1162,7 @@ def write_case_process_report(
     }
     _write_json(EXPERIMENT_ROOT / "case_process_report.json", report)
     lines = [
-        "# SWE51 Case Process Report",
+        f"# {EXPERIMENT_LABEL} Case Process Report",
         "",
         f"- Cases observed: `{len(rows)}`",
         "- Every row records generation phases, all five graph timings, DeepSeek calls, transitions, component outcomes, and isolated harness results.",
@@ -732,7 +1223,9 @@ def _public_instance(raw: dict[str, Any], tree: Path):
 
 def _component_effectiveness(state) -> list[dict[str, Any]]:
     rows: list[dict[str, Any]] = []
-    for component_id, component in sorted(state.binding_graph.components.items()):
+    for component_id, component in sorted(
+        getattr(state.active_binding_graph, "components", {}).items()
+    ):
         unit_ids = tuple(component.unit_ids)
         outcomes = [item for item in state.outcomes.values() if item.unit_id in unit_ids]
         counts: dict[str, int] = {}
@@ -769,8 +1262,8 @@ def _graph_summary(state) -> dict[str, Any]:
             "artifact_ids": list(state.artifact_ids.get("program_graph", ())),
         },
         "binding_graph": {
-            "hash": state.binding_graph.graph_hash(),
-            "artifact_ids": list(state.artifact_ids.get("binding_graph", ())),
+            "hash": state.active_binding_graph.graph_hash(),
+            "artifact_ids": list(state.artifact_ids.get("active_binding_graph", ())),
         },
         "challenge_graph": {
             "hash": state.challenge_graph.graph_hash(),
@@ -802,8 +1295,37 @@ def _generate_one(
     tree = TREE_ROOT / case_id
     run_root = RUN_ROOT / case_id
     result_path = RESULT_ROOT / f"{case_id}.json"
+    raw_lineage = os.environ.get(LINEAGE_ENV, "")
+    try:
+        lineage = json.loads(raw_lineage) if raw_lineage else {}
+    except json.JSONDecodeError:
+        lineage = {}
+    if not lineage:
+        lineage = _lineage_for(
+            raw,
+            generation_run_id=run_root.name,
+            model=getattr(transport, "model", "deepseek-chat"),
+            max_revisions=max_revisions,
+        )
+    else:
+        lineage = {
+            **lineage,
+            "instance_id": case_id,
+            "code_commit_sha": str(lineage.get("code_commit_sha", "")),
+            "implementation_tree_hash": str(
+                lineage.get("implementation_tree_hash", "")
+            ),
+            "method_config_hash": str(lineage.get("method_config_hash", "")),
+            "prompt_hash": _prompt_hash(raw),
+            "dataset_manifest_hash": str(lineage.get("dataset_manifest_hash", "")),
+        }
     previous = _read_json(result_path)
-    if previous is not None and not force:
+    if (
+        previous is not None
+        and not force
+        and _lineage_matches(previous, lineage)
+        and Path(str(previous.get("patch_path", ""))).is_file()
+    ):
         return previous
     if force:
         _archive_path(result_path, GENERATION_HISTORY_ROOT, case_id)
@@ -819,6 +1341,7 @@ def _generate_one(
         "generation_isolation_engine": GENERATION_ISOLATION_ENGINE,
         "public_environment_image": os.environ.get(PUBLIC_IMAGE_ENV, ""),
         "implementation": "patch_first_incremental_v1",
+        **lineage,
     }
     if not tree.is_dir():
         result.update({"status": "BLOCKED_REPOSITORY", "error": str(tree)})
@@ -849,6 +1372,9 @@ def _generate_one(
             "terminal_certificate": certificate.to_dict(),
             "patch_path": str(run_root / "final_patch.diff"),
             "patch_hash": state.checkpoint.patch.canonical_diff_hash,
+            "patch_file_sha256": hashlib.sha256(
+                (run_root / "final_patch.diff").read_bytes()
+            ).hexdigest(),
             "transition_count": state.transition_index,
             "reach_avoid": {
                 "termination_status": state.termination_status,
@@ -907,6 +1433,7 @@ def _run_case_subprocess(
     max_revisions: int,
     timeout: int | None,
     force: bool,
+    lineage: dict[str, str] | None = None,
 ) -> dict[str, Any]:
     case_id = str(raw["instance_id"])
     result_path = RESULT_ROOT / f"{case_id}.json"
@@ -942,11 +1469,13 @@ def _run_case_subprocess(
         _write_json(result_path, result)
         return result
     child_environment = dict(os.environ)
+    if lineage is not None:
+        child_environment[LINEAGE_ENV] = json.dumps(lineage, sort_keys=True)
     child_environment["PYTHONPATH"] = _public_runtime_pythonpath(
         child_environment.get("PYTHONPATH", "")
     )
     broker = PublicDockerExecutionBroker(
-        socket_path=RUN_ROOT / "_brokers" / f"{case_id}.sock",
+        socket_path=_broker_socket_path(case_id),
         image=public_swebench_image(case_id),
         case_tree=TREE_ROOT / case_id,
         case_run_root=RUN_ROOT / case_id,
@@ -1030,15 +1559,41 @@ def generate(
     public = all_public
     if only:
         public = [item for item in all_public if str(item["instance_id"]) in only]
+    all_public_ids = {str(item["instance_id"]) for item in all_public}
+    selected_ids = {str(item["instance_id"]) for item in public}
+    generation_run_id = f"{EXPERIMENT_LABEL.lower()}-{time.time_ns()}"
+    lineage_by_id = {
+        str(item["instance_id"]): _lineage_for(
+            item,
+            generation_run_id=generation_run_id,
+            model=model,
+            max_revisions=max_revisions,
+        )
+        for item in public
+    }
+    tree_preparation = prepare_case_trees(public)
+    generation_preflight = validate_generation_preflight(
+        public, key_path=key_path,
+    )
     # Incremental batches must not erase results from earlier batches. Load
     # both the prior summary and per-case result artifacts, then replace only
     # the cases selected for this invocation.
     prior_by_id: dict[str, dict[str, Any]] = {}
+    cache_rejected_count = 0
+    reused_cache_count = 0
     summary_path = EXPERIMENT_ROOT / "generation_summary.json"
     if summary_path.is_file():
         try:
             prior = json.loads(summary_path.read_text(encoding="utf-8"))
-            prior_by_id.update({str(item["instance_id"]): item for item in prior.get("results", [])})
+            for item in prior.get("results", []):
+                case_id = str(item.get("instance_id", ""))
+                expected = lineage_by_id.get(case_id)
+                if case_id in all_public_ids and case_id not in selected_ids:
+                    prior_by_id[case_id] = item
+                elif expected is not None and _lineage_matches(item, expected):
+                    prior_by_id[case_id] = item
+                elif case_id in lineage_by_id:
+                    cache_rejected_count += 1
         except (OSError, json.JSONDecodeError, KeyError, TypeError) as exc:
             print(json.dumps({
                 "warning": "generation_summary_ignored",
@@ -1049,7 +1604,14 @@ def generate(
         try:
             item = json.loads(result_path.read_text(encoding="utf-8"))
             if isinstance(item, dict) and item.get("instance_id"):
-                prior_by_id[str(item["instance_id"])] = item
+                case_id = str(item["instance_id"])
+                expected = lineage_by_id.get(case_id)
+                if case_id in all_public_ids and case_id not in selected_ids:
+                    prior_by_id[case_id] = item
+                elif expected is not None and _lineage_matches(item, expected):
+                    prior_by_id[case_id] = item
+                elif case_id in lineage_by_id:
+                    cache_rejected_count += 1
         except (OSError, json.JSONDecodeError, TypeError):
             continue
     results: list[dict[str, Any]] = []
@@ -1064,7 +1626,7 @@ def generate(
     pending = iter(public)
     exhausted = False
     with ThreadPoolExecutor(
-        max_workers=max(1, effective_workers), thread_name_prefix="swe51-gen",
+        max_workers=max(1, effective_workers), thread_name_prefix="reachpatch-gen",
     ) as pool:
         active: dict[Any, dict[str, Any]] = {}
 
@@ -1074,6 +1636,9 @@ def generate(
                 return
             current = _memory_snapshot()
             current_limit = _safe_generation_worker_count(max_workers, current)
+            disk = _disk_snapshot()
+            if disk["disk_free_mib"] < GENERATION_DISK_RESERVE_MIB:
+                return
             while len(active) < min(effective_workers, current_limit):
                 try:
                     item = next(pending)
@@ -1088,6 +1653,7 @@ def generate(
                     max_revisions=max_revisions,
                     timeout=case_timeout,
                     force=force,
+                    lineage=lineage_by_id.get(str(item["instance_id"])),
                 )
                 active[future] = item
 
@@ -1109,6 +1675,7 @@ def generate(
                 "completed_cases": len(results),
                 "active_cases": len(active),
                 **_memory_snapshot(),
+                **_disk_snapshot(),
             })
             submit_available()
         if not exhausted:
@@ -1131,6 +1698,17 @@ def generate(
         "memory_observations": memory_observations,
         "case_timeout_seconds": None if case_timeout is None or case_timeout <= 0 else case_timeout,
         "forced": force,
+        "generation_run_id": generation_run_id,
+        "code_commit_sha": _code_commit_sha(),
+        "implementation_tree_hash": _implementation_tree_hash(),
+        "method_config_hash": _method_config_hash(model, max_revisions),
+        "dataset_manifest_hash": _dataset_manifest_hash(),
+        "current_run_generated_count": len(results),
+        "reused_cache_count": reused_cache_count,
+        "cache_rejected_count": cache_rejected_count,
+        "missing_generation_count": max(0, len(public) - len(results)),
+        "tree_preparation": tree_preparation,
+        "generation_preflight": generation_preflight,
         "completed_at": utc_now(),
     }
     _write_json(EXPERIMENT_ROOT / "generation_summary.json", summary)
@@ -1181,6 +1759,15 @@ def _harness_one(
     root = HARNESS_CASE_ROOT / case_id
     result_path = HARNESS_RESULT_ROOT / f"{case_id}.json"
     patch_hash = str(generation.get("patch_hash") or "")
+    patch_path = Path(str(generation.get("patch_path", "")))
+    patch_text = patch_path.read_text(encoding="utf-8") if patch_path.is_file() else ""
+    actual_patch_hash = content_hash(patch_text) if patch_text.strip() else ""
+    patch_file_sha256 = (
+        hashlib.sha256(patch_text.encode("utf-8")).hexdigest()
+        if patch_text else ""
+    )
+    harness_engine = "official_swebench_docker_v1"
+    expected_run_id = f"sealed-{(actual_patch_hash or patch_hash)[:16]}"
     cached = _read_json(result_path)
     official_cache = bool(cached) and (
         cached.get("harness_engine") == "official_swebench_docker_v1"
@@ -1189,34 +1776,49 @@ def _harness_one(
             and str(cached.get("image", "")).startswith("swebench/")
         )
     )
+    cache_lineage = {
+        "instance_id": case_id,
+        "code_commit_sha": generation.get("code_commit_sha", ""),
+        "implementation_tree_hash": generation.get(
+            "implementation_tree_hash", ""
+        ),
+        "method_config_hash": generation.get("method_config_hash", ""),
+        "prompt_hash": generation.get("prompt_hash", ""),
+        "generation_run_id": generation.get("generation_run_id", ""),
+        "patch_hash": actual_patch_hash or patch_hash,
+        "patch_file_sha256": patch_file_sha256,
+        "dataset_manifest_hash": generation.get("dataset_manifest_hash", ""),
+        "harness_engine": harness_engine,
+        "harness_run_id": expected_run_id,
+    }
     if (
         cached is not None
         and not force
         and official_cache
-        and str(cached.get("generation_patch_hash") or "") == patch_hash
+        and _lineage_matches(cached, cache_lineage)
     ):
-        return cached
+        return {**cached, "cache_reused": True}
     if cached is not None:
         _archive_path(result_path, HARNESS_HISTORY_ROOT, case_id)
     if root.exists():
         _archive_path(root, HARNESS_HISTORY_ROOT / "trees", case_id)
     root.mkdir(parents=True)
-    patch_path = Path(str(generation.get("patch_path", "")))
     result: dict[str, Any] = {
         "instance_id": case_id,
         "generation_status": generation.get("status"),
         "generation_patch_hash": patch_hash,
         "patch_path": str(patch_path),
         "official_source": "official_instances.jsonl (post-generation only)",
-        "harness_engine": "official_swebench_docker_v1",
+        "harness_engine": harness_engine,
+        **cache_lineage,
         "started_at": utc_now(),
+        "cache_reused": False,
     }
     if not patch_path.is_file():
         result.update({"status": "BLOCKED_GENERATION", "error": "missing sealed patch"})
         result["finished_at"] = utc_now()
         _write_json(result_path, result)
         return result
-    patch_text = patch_path.read_text(encoding="utf-8")
     if not patch_text.strip():
         result.update({
             "status": "BLOCKED_GENERATION",
@@ -1225,8 +1827,6 @@ def _harness_one(
         })
         _write_json(result_path, result)
         return result
-    actual_patch_hash = content_hash(patch_text)
-    patch_file_sha256 = hashlib.sha256(patch_text.encode("utf-8")).hexdigest()
     if patch_hash and patch_hash != actual_patch_hash:
         result.update({
             "status": "BLOCKED_GENERATION",
@@ -1241,7 +1841,7 @@ def _harness_one(
         raw, patch_path=patch_path
     )
     _write_json(root / "harness_evaluation_instance.json", evaluation.to_dict())
-    run_id = f"sealed-{actual_patch_hash[:16]}"
+    run_id = expected_run_id
     if force:
         run_id += f"-{time.time_ns()}"
     try:
@@ -1259,8 +1859,10 @@ def _harness_one(
         result["root_cause_labels"] = ["HARNESS_NOT_OFFICIAL"]
     result.update({
         "generation_patch_hash": actual_patch_hash,
+        "patch_hash": actual_patch_hash,
         "patch_file_sha256": patch_file_sha256,
         "official_run_id": run_id,
+        "harness_run_id": run_id,
         "finished_at": utc_now(),
     })
     _write_json(result_path, result)
@@ -1305,18 +1907,58 @@ def harness(
         if not only or case_id in only
     }
     prior_by_id: dict[str, dict[str, Any]] = {}
+    cache_rejected_count = 0
+    reused_cache_count = 0
+    missing_harness_count = 0
     previous_summary = _read_json(EXPERIMENT_ROOT / "harness_summary.json") or {}
-    prior_by_id.update({
-        str(item["instance_id"]): item
-        for item in previous_summary.get("results", ())
-        if item.get("instance_id")
-    })
+    for item in previous_summary.get("results", ()):
+        case_id = str(item.get("instance_id", ""))
+        generation_item = generated.get(case_id)
+        if not generation_item:
+            continue
+        if _lineage_matches(item, {
+            "instance_id": case_id,
+            "code_commit_sha": generation_item.get("code_commit_sha", ""),
+            "implementation_tree_hash": generation_item.get(
+                "implementation_tree_hash", ""
+            ),
+            "method_config_hash": generation_item.get("method_config_hash", ""),
+            "prompt_hash": generation_item.get("prompt_hash", ""),
+            "generation_run_id": generation_item.get("generation_run_id", ""),
+            "patch_hash": generation_item.get("patch_hash", ""),
+            "patch_file_sha256": item.get("patch_file_sha256", ""),
+            "dataset_manifest_hash": generation_item.get("dataset_manifest_hash", ""),
+            "harness_engine": "official_swebench_docker_v1",
+            "harness_run_id": item.get("harness_run_id", item.get("official_run_id", "")),
+        }):
+            prior_by_id[case_id] = item
+        else:
+            cache_rejected_count += 1
     for result_path in sorted(HARNESS_RESULT_ROOT.glob("*.json")):
         item = _read_json(result_path)
         if item and item.get("instance_id"):
-            prior_by_id[str(item["instance_id"])] = item
+            case_id = str(item["instance_id"])
+            generation_item = generated.get(case_id)
+            if generation_item and _lineage_matches(item, {
+                "instance_id": case_id,
+                "code_commit_sha": generation_item.get("code_commit_sha", ""),
+                "implementation_tree_hash": generation_item.get(
+                    "implementation_tree_hash", ""
+                ),
+                "method_config_hash": generation_item.get("method_config_hash", ""),
+                "prompt_hash": generation_item.get("prompt_hash", ""),
+                "generation_run_id": generation_item.get("generation_run_id", ""),
+                "patch_hash": generation_item.get("patch_hash", ""),
+                "patch_file_sha256": item.get("patch_file_sha256", ""),
+                "dataset_manifest_hash": generation_item.get("dataset_manifest_hash", ""),
+                "harness_engine": "official_swebench_docker_v1",
+                "harness_run_id": item.get("harness_run_id", item.get("official_run_id", "")),
+            }):
+                prior_by_id[case_id] = item
+            elif case_id in generated:
+                cache_rejected_count += 1
     results: list[dict[str, Any]] = []
-    with ThreadPoolExecutor(max_workers=min(max_workers, 10), thread_name_prefix="swe51-harness") as pool:
+    with ThreadPoolExecutor(max_workers=min(max_workers, 10), thread_name_prefix="reachpatch-harness") as pool:
         futures = [
             pool.submit(
                 _harness_one, item, generated.get(case_id, {}), timeout,
@@ -1328,6 +1970,7 @@ def harness(
             result = future.result()
             results.append(result)
             prior_by_id[str(result["instance_id"])] = result
+            reused_cache_count += int(bool(result.get("cache_reused")))
             print(json.dumps({"instance_id": result["instance_id"], "status": result.get("status")}, sort_keys=True), flush=True)
     output = {
         "stage": "official_harness",
@@ -1337,6 +1980,12 @@ def harness(
         "sealed_prediction_count": len(predictions),
         "predictions_path": str(HARNESS_PREDICTIONS_PATH),
         "forced": force,
+        "current_run_harness_count": len(results),
+        "reused_cache_count": reused_cache_count,
+        "cache_rejected_count": cache_rejected_count,
+        "missing_harness_count": sum(
+            1 for case_id in selected if case_id not in prior_by_id
+        ),
         "results": sorted(prior_by_id.values(), key=lambda item: item["instance_id"]),
         "completed_at": utc_now(),
     }

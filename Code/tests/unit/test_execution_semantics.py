@@ -313,7 +313,7 @@ def test_real_target_fix_and_preservation_pass_commit_close_and_reach():
 
     assert decide_execution_transition(None, evidence) == Decision.COMMIT
     assert dicc.status == DICCStatus.CLOSED
-    assert dicc.real_challenge_execution_count == 1
+    assert dicc.real_challenge_execution_count == 2
     assert dicc.executed_challenge_ids
     assert in_target_set(state)
 
@@ -354,7 +354,7 @@ def test_target_fix_commits_but_zero_graph_or_execution_evidence_cannot_reach():
     assert not in_target_set(state)
 
 
-def test_comparisons_alone_never_count_as_challenge_executions():
+def test_target_comparisons_count_as_real_challenge_executions():
     target = _check("target", CheckRole.TARGET)
     baseline = _execution(target.check_id, CheckStatus.FAIL, "base")
     fixed = CheckComparison.create(
@@ -370,8 +370,8 @@ def test_comparisons_alone_never_count_as_challenge_executions():
         active_binding_count=1,
     )
 
-    assert dicc.real_challenge_execution_count == 0
-    assert dicc.status == DICCStatus.NOT_EVALUABLE
+    assert dicc.real_challenge_execution_count == 1
+    assert dicc.status == DICCStatus.CLOSED
 
 
 def test_state_target_deficit_uses_real_comparisons_not_graph_products():

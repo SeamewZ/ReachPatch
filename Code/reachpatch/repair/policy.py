@@ -23,12 +23,16 @@ def _unit_statuses(state: ReachAvoidState) -> dict[str, list[UnitOutcome]]:
     grouped: dict[str, list[UnitOutcome]] = defaultdict(list)
     for outcome in state.outcomes.values():
         grouped[outcome.unit_id].append(outcome)
-    for unit_id in state.binding_graph.units:
+    graph = getattr(state, "active_binding_graph", None)
+    for unit_id in getattr(graph, "units", {}):
         grouped.setdefault(unit_id, [])
     return grouped
 
 
 def select_losing_core(state: ReachAvoidState) -> LosingCore | None:
+    graph = getattr(state, "active_binding_graph", None)
+    if graph is None:
+        return None
     grouped = _unit_statuses(state)
     protected = tuple(sorted(
         (item.path_obligation_id, item.scenario_id or "")
@@ -36,7 +40,7 @@ def select_losing_core(state: ReachAvoidState) -> LosingCore | None:
         if item.status == OutcomeStatus.PASS
     ))
     ranked: list[tuple[float, str, tuple[str, ...]]] = []
-    for component in state.binding_graph.components.values():
+    for component in getattr(graph, "components", {}).values():
         losing = tuple(sorted(
             unit_id
             for unit_id in component.unit_ids
@@ -47,21 +51,21 @@ def select_losing_core(state: ReachAvoidState) -> LosingCore | None:
             continue
         pressure = 0.0
         for unit_id in losing:
-            leaf = state.requirement_graph.leaves[state.binding_graph.units[unit_id].leaf_id]
+            leaf = state.requirement_graph.leaves[graph.units[unit_id].leaf_id]
             outcomes = grouped[unit_id]
             pressure += leaf.weight
             pressure += max(
                 (_STATUS_PRESSURE.get(item.status, 1.0) for item in outcomes),
                 default=3.0,
             )
-            pressure += len(state.binding_graph.units[unit_id].bypass_path_ids) * 0.5
-            pressure += len(state.binding_graph.units[unit_id].frontier_ids) * 0.75
+            pressure += len(getattr(graph.units[unit_id], "bypass_path_ids", ())) * 0.5
+            pressure += len(getattr(graph.units[unit_id], "frontier_ids", ())) * 0.75
         ranked.append((pressure, component.component_id, losing))
     if not ranked:
         return None
     pressure, component_id, losing = max(ranked, key=lambda item: (item[0], item[1]))
-    component = state.binding_graph.components[component_id]
-    cuts = [set(state.binding_graph.units[unit_id].repair_cut_node_ids) for unit_id in losing]
+    component = graph.components[component_id]
+    cuts = [set(graph.units[unit_id].repair_cut_node_ids) for unit_id in losing]
     common = set.intersection(*cuts) if cuts else set()
     if not common:
         common = set(component.legal_repair_cut_ids)
@@ -72,7 +76,7 @@ def select_losing_core(state: ReachAvoidState) -> LosingCore | None:
         if item.status != OutcomeStatus.PASS
     }
     paths = tuple(sorted(
-        state.binding_graph.units[unit_id].path_obligation_id for unit_id in losing
+        graph.units[unit_id].path_obligation_id for unit_id in losing
     ))
     scenarios = tuple(sorted({
         item.scenario_id
@@ -114,8 +118,212 @@ def _mechanism_candidates(state: ReachAvoidState, core: LosingCore) -> list[str]
 
 def next_untried_repair_intent(
     state: ReachAvoidState,
-    core: LosingCore,
+    core: LosingCore | None = None,
 ) -> RepairIntent | None:
+    active_graph = getattr(state, "active_binding_graph", None)
+    if active_graph is not None and hasattr(active_graph, "diff_hash"):
+        priority = {
+            "PRESERVATION_RISK": 0,
+            "FAILING": 1,
+            "COUNTEREXAMPLE_OPEN": 2,
+            "UNBOUND": 3,
+            "UNKNOWN": 4,
+            "ORACLE_UNAVAILABLE": 5,
+            "BOUND_EXECUTABLE": 6,
+            "BOUND_STATIC": 7,
+            "PASSING": 9,
+        }
+        units = sorted(
+            state.active_binding_graph.units.values(),
+            key=lambda unit: (priority.get(unit.status, 8), unit.binding_id),
+        )
+        unit = next((item for item in units if item.status != "PASSING"), None)
+        if unit is None:
+            # A mechanically rejected first patch can precede executable graph
+            # bindings. Its concrete check output still defines a causal repair
+            # intent and must not be discarded merely because the graph is empty.
+            packet = next((
+                item for item in reversed(state.counterexamples)
+                if item.suggested_action_families
+            ), None)
+            if packet is None:
+                return None
+            mechanism = next((
+                item for item in packet.suggested_action_families
+                if item not in state.prohibited_mechanisms
+            ), None)
+            if mechanism is None:
+                return None
+            actual = (
+                packet.actual_observation
+                if isinstance(packet.actual_observation, dict) else {}
+            )
+            changed_files = tuple(map(str, actual.get("changed_files", ())))
+            requirements = tuple(
+                row.requirement_id
+                for row in (
+                    state.requirement_coverage.unresolved_rows()
+                    if state.requirement_coverage is not None else ()
+                )
+            )
+            return RepairIntent(
+                intent_id=stable_id(
+                    "unbound-counterexample-intent", state.instance_id,
+                    packet.failure_signature, mechanism,
+                ),
+                source_checkpoint_id=state.checkpoint.checkpoint_id,
+                losing_core_id=packet.counterexample_id,
+                component_id="UNBOUND_MECHANICAL_COUNTEREXAMPLE",
+                losing_path_obligation_ids=(),
+                complete_component_path_ids=(),
+                repair_cut_ids=packet.causal_cut_ids,
+                root_mechanism_class=mechanism,
+                actual_failure_execution_ids=packet.raw_execution_ids,
+                protected_pass_pairs=(),
+                preservation_ids=packet.preservation_path_ids,
+                forbidden_fingerprints=tuple(sorted(state.prohibited_mechanisms)),
+                frontier_resolution_ids=(),
+                selection_witness={
+                    "failure_origin": packet.failure_origin,
+                    "failure_signature": packet.failure_signature,
+                    "suggested_action_families": list(
+                        packet.suggested_action_families
+                    ),
+                    "actual_observation": packet.actual_observation,
+                    "working_diff_hash": active_graph.diff_hash,
+                },
+                mechanism_id=mechanism,
+                requirements_to_satisfy=requirements,
+                counterexample_ids=(packet.counterexample_id,),
+                observed_failures=(
+                    str(packet.failure_signature or packet.failure_origin),
+                ),
+                root_cause=(
+                    packet.failure_location
+                    or "mechanical failure in the changed hunk"
+                ),
+                files_to_modify=changed_files,
+                causal_cut_ids=packet.causal_cut_ids,
+                behavior_to_preserve=packet.protected_behavior,
+                expected_effects=(
+                    "make the same working repair mechanically importable/applicable",
+                ),
+                known_risks=packet.impact_risks,
+            )
+        packets = tuple(
+            packet for packet in state.counterexamples
+            if packet.binding_unit_id in {None, unit.binding_id}
+        )[-10:]
+        candidates: list[str] = [
+            family for packet in reversed(packets)
+            for family in packet.suggested_action_families
+        ]
+        relation_text = " ".join(unit.causal_cut_ids).lower()
+        if "guard" in relation_text:
+            candidates.extend(("guard_expand", "guard_tighten"))
+        if "dispatch" in relation_text or unit.protocol_edge_ids:
+            candidates.append("protocol_dispatch")
+        if "exception" in relation_text:
+            candidates.append("exception_edge")
+        if unit.status == "PRESERVATION_RISK":
+            candidates.extend(("restore_representation", "remove_wrapper"))
+        candidates.extend((
+            "operand_predicate", "causal_slice_rewrite", "state_update_order",
+        ))
+        mechanism = next(
+            (item for item in dict.fromkeys(candidates)
+             if item not in state.prohibited_mechanisms),
+            None,
+        )
+        if mechanism is None:
+            return None
+        files = tuple(dict.fromkeys(
+            str(state.program_graph.nodes[symbol_id].attributes.get("file", ""))
+            for symbol_id in unit.program_symbol_ids
+            if symbol_id in state.program_graph.nodes
+            and state.program_graph.nodes[symbol_id].attributes.get("file")
+        ))
+        symbols = tuple(dict.fromkeys(
+            str(state.program_graph.nodes[symbol_id].attributes.get(
+                "qualified_name", state.program_graph.nodes[symbol_id].label,
+            ))
+            for symbol_id in unit.program_symbol_ids
+            if symbol_id in state.program_graph.nodes
+        ))
+        unresolved_requirement_ids = tuple(
+            row.requirement_id
+            for row in (
+                state.requirement_coverage.unresolved_rows()
+                if state.requirement_coverage is not None else ()
+            )
+        ) or (unit.requirement_id,)
+        observed = tuple(dict.fromkeys(
+            str(packet.failure_signature or packet.oracle_result or packet.failure_origin)
+            for packet in packets
+        ))
+        preservation_ids = tuple(dict.fromkeys((
+            *unit.preservation_check_ids,
+            *(
+                item.check_id for item in state.check_comparisons
+                if item.classification.value == "PASS_PRESERVED"
+            ),
+        )))
+        intent_id = stable_id(
+            "active-repair-intent", state.instance_id, state.transition_index,
+            unit.binding_id, mechanism, observed,
+        )
+        return RepairIntent(
+            intent_id=intent_id,
+            source_checkpoint_id=state.checkpoint.checkpoint_id,
+            losing_core_id=unit.binding_id,
+            component_id=unit.binding_id,
+            losing_path_obligation_ids=unit.path_class_ids,
+            complete_component_path_ids=unit.path_class_ids,
+            repair_cut_ids=unit.causal_cut_ids,
+            root_mechanism_class=mechanism,
+            actual_failure_execution_ids=tuple(
+                execution_id for packet in packets
+                for execution_id in packet.raw_execution_ids
+            ),
+            protected_pass_pairs=(),
+            preservation_ids=preservation_ids,
+            forbidden_fingerprints=tuple(sorted(state.prohibited_mechanisms)),
+            frontier_resolution_ids=tuple(
+                gap.frontier_id for gap in state.active_binding_graph.unresolved_gaps
+                if gap.requirement_id == unit.requirement_id
+            ),
+            selection_witness={
+                "priority_status": unit.status,
+                "working_diff_hash": state.active_binding_graph.diff_hash,
+                "counterexample_ids": [item.counterexample_id for item in packets],
+                "coverage_statuses": {
+                    row.requirement_id: row.status
+                    for row in (
+                        state.requirement_coverage.unresolved_rows()
+                        if state.requirement_coverage is not None else ()
+                    )
+                },
+            },
+            mechanism_id=mechanism,
+            requirements_to_satisfy=unresolved_requirement_ids,
+            binding_unit_ids=(unit.binding_id,),
+            counterexample_ids=tuple(item.counterexample_id for item in packets),
+            observed_failures=observed,
+            root_cause=(
+                packets[-1].failure_location if packets
+                else unit.unresolved_reason or "unresolved active binding"
+            ),
+            files_to_modify=files,
+            symbols_to_modify=symbols,
+            causal_cut_ids=unit.causal_cut_ids,
+            behavior_to_preserve=preservation_ids,
+            expected_effects=(
+                f"move binding {unit.binding_id} from {unit.status} toward PASSING",
+            ),
+            known_risks=unit.impact_cone_ids,
+        )
+    if core is None:
+        return None
     attempts = state.mechanism_memory.get(core.core_id, [])
     forbidden_classes = {
         item.mechanism_class for item in attempts if item.forbidden_next
@@ -126,15 +334,18 @@ def next_untried_repair_intent(
     )
     if mechanism is None:
         return None
-    component = state.binding_graph.components[core.component_id]
+    graph = getattr(state, "active_binding_graph", None)
+    if graph is None:
+        return None
+    component = graph.components[core.component_id]
     complete_paths = tuple(sorted(
-        state.binding_graph.units[unit_id].path_obligation_id
+        graph.units[unit_id].path_obligation_id
         for unit_id in component.unit_ids
     ))
     frontier_ids = tuple(sorted({
         frontier_id
         for unit_id in core.unit_ids
-        for frontier_id in state.binding_graph.units[unit_id].frontier_ids
+        for frontier_id in graph.units[unit_id].frontier_ids
     }))
     execution_ids = tuple(sorted(
         item.execution_bundle_id
@@ -151,7 +362,7 @@ def next_untried_repair_intent(
         "cut_coverage": {
             cut_id: sorted(
                 unit_id for unit_id in component.unit_ids
-                if cut_id in state.binding_graph.units[unit_id].repair_cut_node_ids
+                if cut_id in graph.units[unit_id].repair_cut_node_ids
             )
             for cut_id in core.common_causal_cut_ids
         },

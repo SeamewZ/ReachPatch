@@ -74,13 +74,19 @@ def evaluate_dicc(
     uncovered = tuple(sorted(
         getattr(impact_slice, "uncovered_branch_partition_ids", ()) or ()
     ))
-    real_challenge_count = int(
+    # Every stable baseline/patched target comparison is already a concrete,
+    # highest-authority challenge. It must not disappear merely because no
+    # legacy ChallengeGraph cell wrapped it.
+    real_challenge_count = len(target_pairs) + int(
         getattr(challenge_results, "real_execution_count", 0) or 0
     )
-    executed_challenge_ids = tuple(sorted(set(map(
+    executed_challenge_ids = tuple(sorted({
+        *(f"target-comparison:{item.comparison_id}" for item in target_pairs),
+        *set(map(
         str, getattr(challenge_results, "executed_challenge_ids", ())
         or getattr(challenge_results, "challenge_ids", ()) or (),
-    ))))
+        )),
+    }))
     if not targets:
         status = DICCStatus.NOT_EVALUABLE
         reason = "no executable target"
@@ -175,11 +181,16 @@ def compile_executable_challenge_evidence(
         )
     }
 
-    preservation_check_ids = {
-        str(unit.check_id)
-        for unit in getattr(executable_bindings, "units", ())
-        if unit.kind == BindingStatus.EXECUTABLE_PRESERVATION and unit.check_id
-    }
+    if hasattr(executable_bindings, "preservation_check_ids"):
+        preservation_check_ids = set(map(
+            str, executable_bindings.preservation_check_ids
+        ))
+    else:
+        preservation_check_ids = {
+            str(unit.check_id)
+            for unit in getattr(executable_bindings, "units", ())
+            if unit.kind == BindingStatus.EXECUTABLE_PRESERVATION and unit.check_id
+        }
     checks_by_id = {
         str(check.check_id): check for check in checks
         if getattr(check, "check_id", None)

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import ast
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Iterable
 
@@ -147,6 +147,25 @@ def issue_evidence(issue: str, *, source: str = "issue") -> list[Evidence]:
             authority=authority,
         ))
     return records
+
+
+def public_discussion_evidence(
+    discussion: str,
+    *,
+    source: str = "public_discussion",
+) -> list[Evidence]:
+    """Retain public discussion as context without granting issue authority."""
+
+    return [
+        replace(
+            item,
+            kind=EvidenceKind.ISSUE_WITNESS,
+            authority=Authority.PROVISIONAL,
+            extraction_rule=f"public_discussion:{item.extraction_rule}",
+            metadata={**item.metadata, "context_role": "PUBLIC_DISCUSSION"},
+        )
+        for item in issue_evidence(discussion, source=source)
+    ]
 
 
 def _assert_formula(node: ast.AST, source_text: str) -> str:

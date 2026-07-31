@@ -49,7 +49,7 @@ class RunArtifacts:
             ("episode_assignment", state.assignment),
             ("requirement_graph", state.requirement_graph),
             ("program_graph", state.program_graph),
-            ("binding_graph", state.binding_graph),
+            ("active_binding_graph", state.active_binding_graph),
             ("challenge_graph", state.challenge_graph),
         ):
             identifier = self.put(
@@ -69,30 +69,13 @@ class RunArtifacts:
                 authority=Authority.C,
                 confidence=Confidence.HIGH,
             )
-        for unit in state.binding_graph.units.values():
+        for unit in state.active_binding_graph.units.values():
             self.put(
-                "binding_unit", unit, state=state,
-                producer="reachpatch.binding-graph",
+                "active_binding_unit", unit, state=state,
+                producer="reachpatch.active-binding-graph",
                 authority=Authority.C,
                 confidence=Confidence.HIGH,
             )
-        for oracle in state.binding_graph.oracles.values():
-            self.put(
-                "oracle", oracle, state=state,
-                producer="reachpatch.oracle",
-                authority=Authority.C,
-                confidence=Confidence.HIGH,
-            )
-        seen_contracts: set[str] = set()
-        for scenario in state.binding_graph.scenarios.values():
-            if scenario.observe.contract_id not in seen_contracts:
-                self.put(
-                    "observation_contract", scenario.observe, state=state,
-                    producer="reachpatch.oracle",
-                    authority=Authority.C,
-                    confidence=Confidence.HIGH,
-                )
-                seen_contracts.add(scenario.observe.contract_id)
         for recipe in state.challenge_graph.recipes.values():
             self.put(
                 "input_recipe", recipe, state=state,

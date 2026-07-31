@@ -14,7 +14,7 @@ def target_deficit(
     selected = outcomes if outcomes is not None else state.outcomes
     target_units = {
         unit.unit_id: state.requirement_graph.leaves[unit.leaf_id].weight
-        for unit in state.binding_graph.units.values()
+        for unit in state.active_binding_graph.units.values()
         if state.requirement_graph.leaves[unit.leaf_id].authority_class.value != "PRESERVATION"
     }
     return sum(
@@ -86,15 +86,15 @@ def _legacy_progress_metrics(
 
     old_frontiers = sum(_open_frontiers(graph) for graph in (
         state.requirement_graph, state.program_graph,
-        state.binding_graph, state.challenge_graph,
+        state.active_binding_graph, state.challenge_graph,
     ))
     new_frontiers = sum(_open_frontiers(graph) for graph in (
         new_requirement_graph or state.requirement_graph,
         new_program_graph or state.program_graph,
-        new_binding_graph or state.binding_graph,
+        new_binding_graph or state.active_binding_graph,
         new_challenge_graph or state.challenge_graph,
     ))
-    new_target_units = getattr(new_binding_graph, "units", state.binding_graph.units)
+    new_target_units = getattr(new_binding_graph, "units", state.active_binding_graph.units)
     worst_unit_deficit = max(
         (
             sum(
@@ -154,20 +154,46 @@ class ProgressMetrics:
 
 @dataclass(frozen=True, slots=True)
 class ProgressVector:
-    target_fixed_gain: int
-    target_deficit_reduction: float
-    counterexamples_eliminated: int
-    preservation_pass_retained: int
-    high_risk_unknown_reduction: int
-    new_regressions: int
+    target_pass_delta: int
+    target_failure_distance_delta: float
+    requirement_coverage_delta: int
+    counterexample_delta: int
+    preservation_regression_delta: int
+    unresolved_frontier_delta: int
+    syntax_health_delta: int
+
+    @property
+    def target_fixed_gain(self) -> int:
+        return self.target_pass_delta
+
+    @property
+    def target_deficit_reduction(self) -> float:
+        return self.target_failure_distance_delta
+
+    @property
+    def counterexamples_eliminated(self) -> int:
+        return self.counterexample_delta
+
+    @property
+    def preservation_pass_retained(self) -> int:
+        return max(0, -self.preservation_regression_delta)
+
+    @property
+    def high_risk_unknown_reduction(self) -> int:
+        return max(0, -self.unresolved_frontier_delta)
+
+    @property
+    def new_regressions(self) -> int:
+        return max(0, self.preservation_regression_delta)
 
     @property
     def meaningful(self) -> bool:
         return self.new_regressions == 0 and any((
-            self.target_fixed_gain > 0,
-            self.target_deficit_reduction > 0,
-            self.counterexamples_eliminated > 0,
-            self.high_risk_unknown_reduction > 0,
+            self.target_pass_delta > 0,
+            self.target_failure_distance_delta > 0,
+            self.requirement_coverage_delta > 0,
+            self.counterexample_delta > 0,
+            self.syntax_health_delta > 0,
         ))
 
 
@@ -208,7 +234,7 @@ def progress_vector_from_comparisons(
     """Measure progress only from actual paired check executions."""
 
     if not current:
-        return ProgressVector(0, 0.0, 0, 0, 0, 0)
+        return ProgressVector(0, 0.0, 0, 0, 0, 0, 0)
     weights = target_weights or {}
     old = {item.check_id: item for item in previous}
     new = {item.check_id: item for item in current}
@@ -261,19 +287,20 @@ def progress_vector_from_comparisons(
     regression_classes = {
         CheckClassification.TARGET_REGRESSED,
         CheckClassification.PRESERVATION_REGRESSION,
-        CheckClassification.NEW_INFRA_FAILURE,
     }
     return ProgressVector(
-        target_fixed_gain=len(fixed - old_fixed),
-        target_deficit_reduction=deficit_reduction,
-        counterexamples_eliminated=len(old_failure_signatures - new_failure_signatures),
-        preservation_pass_retained=sum(
-            item.classification == CheckClassification.PASS_PRESERVED
-            for item in new.values()
-        ),
-        high_risk_unknown_reduction=max(0, old_unknown - new_unknown),
-        new_regressions=sum(
+        target_pass_delta=len(fixed - old_fixed),
+        target_failure_distance_delta=deficit_reduction,
+        requirement_coverage_delta=len(fixed - old_fixed),
+        counterexample_delta=len(old_failure_signatures - new_failure_signatures),
+        preservation_regression_delta=sum(
             item.classification in regression_classes for item in new.values()
+        ),
+        unresolved_frontier_delta=new_unknown - old_unknown,
+        syntax_health_delta=sum(
+            item.patched.status.value == "PASS"
+            and item.baseline.status.value != "PASS"
+            for item in new.values()
         ),
     )
 
@@ -292,13 +319,11 @@ def should_commit(previous, trial) -> bool:
     ))
 
 
-def progress_metrics(old_state, trial_state, causal_touch=None, **legacy_graphs):
-    """Compare two states; retain compatibility with pre-refactor transition calls."""
+def progress_metrics(old_state, trial_state):
+    """Compare patch-first states using the unified execution/coverage view."""
 
     if not hasattr(trial_state, "outcomes"):
-        return _legacy_progress_metrics(
-            old_state, trial_state, causal_touch or {}, **legacy_graphs
-        )
+        raise TypeError("progress_metrics requires a patch-first ReachAvoidState")
     old_pass = {
         item.unit_id for item in old_state.outcomes.values()
         if item.kind == "TARGET" and item.status == OutcomeStatus.PASS

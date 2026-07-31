@@ -93,7 +93,7 @@ def _build_stage(args: argparse.Namespace, stage: str) -> int:
     graph_map = {
         "requirements": state.requirement_graph,
         "program": state.program_graph,
-        "binding": state.binding_graph,
+        "binding": state.active_binding_graph,
         "challenges": state.challenge_graph,
     }
     graph = graph_map[stage]
