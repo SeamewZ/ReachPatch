@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 import time
+from collections.abc import Mapping
 from pathlib import Path
 from typing import Any, Callable
 
@@ -147,7 +148,25 @@ def run_official_swebench_instance(
     case_report = report_payload.get(case_id, {})
     if not isinstance(case_report, dict):
         case_report = {}
-    completed = bool(upstream_result.get("completed")) and bool(case_report)
+    if isinstance(upstream_result, tuple) and len(upstream_result) == 2:
+        upstream_case_id, upstream_report = upstream_result
+        upstream_completed = bool(
+            str(upstream_case_id) == case_id
+            and isinstance(upstream_report, Mapping)
+            and upstream_report
+        )
+        normalized_upstream_result = {
+            "instance_id": str(upstream_case_id),
+            "completed": upstream_completed,
+            "report_available": bool(upstream_report),
+        }
+    elif isinstance(upstream_result, Mapping):
+        upstream_completed = bool(upstream_result.get("completed"))
+        normalized_upstream_result = dict(upstream_result)
+    else:
+        upstream_completed = False
+        normalized_upstream_result = {}
+    completed = upstream_completed and bool(case_report)
     tests_status = case_report.get("tests_status", {})
     if not isinstance(tests_status, dict):
         tests_status = {}
@@ -201,7 +220,7 @@ def run_official_swebench_instance(
         "official_test_command": _evaluation_command(eval_script),
         "official_fail_to_pass": list(map(str, test_spec.FAIL_TO_PASS)),
         "official_pass_to_pass_count": len(test_spec.PASS_TO_PASS),
-        "upstream_result": dict(upstream_result),
+        "upstream_result": normalized_upstream_result,
         "log_root": str(case_log_root),
         "report_path": str(report_path),
         "instance_log_path": str(instance_log_path),

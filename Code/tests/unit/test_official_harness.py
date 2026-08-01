@@ -89,6 +89,82 @@ def test_official_harness_parses_upstream_report(tmp_path: Path) -> None:
     assert result["pass_to_pass"]["status"] == "PASS"
 
 
+def test_official_harness_accepts_upstream_tuple_result(tmp_path: Path) -> None:
+    case_id = "owner__repo-tuple"
+    log_root = tmp_path / "official"
+    report = {
+        case_id: {
+            "patch_successfully_applied": True,
+            "resolved": True,
+            "tests_status": {
+                "FAIL_TO_PASS": {"success": ["target"], "failure": []},
+                "PASS_TO_PASS": {"success": ["preserve"], "failure": []},
+            },
+        }
+    }
+
+    def execute(spec, prediction, **kwargs):
+        case_root = log_root / kwargs["run_id"] / "reachpatch" / case_id
+        case_root.mkdir(parents=True)
+        (case_root / "run_instance.log").write_text(
+            ">>>>> Applied Patch\n", encoding="utf-8"
+        )
+        (case_root / "test_output.txt").write_text("official output", encoding="utf-8")
+        (case_root / "report.json").write_text(
+            json.dumps(report), encoding="utf-8"
+        )
+        return case_id, report
+
+    result = run_official_swebench_instance(
+        {"instance_id": case_id, "test_patch": "public test patch"},
+        patch_text="diff --git a/a.py b/a.py\n",
+        log_root=log_root,
+        run_id="run-tuple",
+        timeout=60,
+        client=_Client(),
+        make_test_spec_fn=lambda raw, namespace: _spec(),
+        run_instance_fn=execute,
+    )
+
+    assert result["status"] == "PASS"
+    assert result["upstream_result"] == {
+        "instance_id": case_id,
+        "completed": True,
+        "report_available": True,
+    }
+
+
+def test_official_harness_handles_upstream_timeout_result(tmp_path: Path) -> None:
+    case_id = "owner__repo-timeout"
+    log_root = tmp_path / "official"
+
+    def execute(spec, prediction, **kwargs):
+        case_root = log_root / kwargs["run_id"] / "reachpatch" / case_id
+        case_root.mkdir(parents=True)
+        (case_root / "run_instance.log").write_text(
+            "Test timed out after 60 seconds.\n", encoding="utf-8"
+        )
+        (case_root / "test_output.txt").write_text(
+            "Timeout error: 60 seconds exceeded.", encoding="utf-8"
+        )
+        return None
+
+    result = run_official_swebench_instance(
+        {"instance_id": case_id, "test_patch": "public test patch"},
+        patch_text="diff --git a/a.py b/a.py\n",
+        log_root=log_root,
+        run_id="run-timeout",
+        timeout=60,
+        client=_Client(),
+        make_test_spec_fn=lambda raw, namespace: _spec(),
+        run_instance_fn=execute,
+    )
+
+    assert result["status"] == "UNKNOWN_EXECUTION"
+    assert result["completed"] is False
+    assert result["upstream_result"] == {}
+
+
 def test_official_harness_distinguishes_patch_apply_failure(tmp_path: Path) -> None:
     case_id = "owner__repo-2"
     log_root = tmp_path / "official"
