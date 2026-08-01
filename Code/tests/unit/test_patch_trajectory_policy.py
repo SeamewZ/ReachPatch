@@ -302,6 +302,35 @@ def test_target_candidate_dynamic_symbols_override_static_check_inference():
     assert projected == ((), (), ())
 
 
+def test_check_projection_accepts_runtime_symbol_from_public_reexport():
+    graph = ProgramGraph(repository_root=".", source_hash="source")
+    definition = graph.index_node(GraphNode.create(
+        "class", "QTable",
+        attributes={"file": "astropy/table/table.py", "line": 1,
+                    "end_line": 2, "qualified_name": "astropy.table.QTable"},
+    ))
+    leaf = SimpleNamespace(
+        leaf_id="req", formula="QTable behavior must be fixed",
+        supporting_evidence=(), entrypoint_hypotheses=("astropy.table.QTable",),
+    )
+    check = ExecutableCheck(
+        check_id="target", role=CheckRole.TARGET, authority="PUBLIC",
+        command=("python", "check.py"), cwd=".", environment={},
+        timeout_seconds=5.0, source_evidence_ids=(),
+        target_requirement_ids=(), temporary_artifact_paths=(),
+    )
+    candidate = replace(
+        _candidate(), target_id="target",
+        executed_symbol_ids=("astropy.table.table.QTable",),
+    )
+
+    assert _check_projection(
+        leaf,
+        SimpleNamespace(targets=(check,), preservation_checks=(), candidates=(candidate,)),
+        (), symbol_ids=(definition.node_id,), program=graph,
+    ) == (("target",), (), ())
+
+
 def test_no_dynamic_target_symbol_creates_no_execution_edge_or_certification():
     graph = ProgramGraph(repository_root=".", source_hash="source")
     definition = graph.index_node(GraphNode.create(

@@ -542,12 +542,9 @@ def check_binds_requirement(
         str, getattr(binding_unit, "program_symbol_names", ()),
     ))
     symbol_execution_overlap = any(
-        executed == bound
-        or executed.endswith("." + bound)
-        or bound.endswith("." + executed)
+        _symbols_overlap(executed, bound)
         for executed in executed_symbols
         for bound in bound_symbols
-        if executed and bound
     )
     oracle = getattr(check, "oracle", None)
     return any((
@@ -556,6 +553,28 @@ def check_binds_requirement(
         symbol_execution_overlap,
         getattr(oracle, "requirement_id", None) == requirement_id,
     ))
+
+
+def _symbols_overlap(executed: str, bound: str) -> bool:
+    """Match runtime qualified names to definitions and public re-exports."""
+
+    if not executed or not bound:
+        return False
+    if (
+        executed == bound
+        or executed.endswith("." + bound)
+        or bound.endswith("." + executed)
+    ):
+        return True
+    # A public import may expose ``pkg.table.QTable`` while the callable's
+    # code object lives in ``pkg.table.table.QTable``.  This relaxed alias
+    # match is only applied to the dynamic execution stream and requires a
+    # dotted qualified name on both sides.
+    return (
+        "." in executed
+        and "." in bound
+        and executed.rsplit(".", 1)[-1] == bound.rsplit(".", 1)[-1]
+    )
 
 
 def _check_projection(
@@ -944,12 +963,7 @@ def build_active_binding_graph(
                 qualified = str(node.attributes.get(
                     "qualified_name", node.label,
                 ))
-                if any(
-                    executed == qualified
-                    or executed.endswith("." + qualified)
-                    or qualified.endswith("." + executed)
-                    for executed in executed_names
-                ):
+                if any(_symbols_overlap(executed, qualified) for executed in executed_names):
                     edges.append(BindingEdge(
                         check_id,
                         symbol_id,
