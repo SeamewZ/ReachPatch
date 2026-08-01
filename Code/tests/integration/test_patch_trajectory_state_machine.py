@@ -116,6 +116,29 @@ def test_no_trusted_target_outputs_first_patch_without_revision(tmp_path):
     )
 
 
+def test_initial_mechanical_rejection_preserves_first_patch(tmp_path):
+    transport = _Edits((
+        _edit(
+            "REGISTRY = {}",
+            "from pkg.api import public\n\nREGISTRY = {}",
+            start=1,
+            end=1,
+        ),
+    ))
+    state, certificate = _run(
+        tmp_path, transport, revisions=2, target=False,
+    )
+
+    assert state.patch_trajectory is not None
+    assert state.patch_trajectory.first_patch.patch.canonical_diff
+    assert state.patch_trajectory.first_patch.patch_hash == (
+        state.patch_trajectory.best_evidence_patch.patch_hash
+    )
+    assert state.checkpoint.patch.canonical_diff
+    assert state.runtime_metrics["first_patch_preserved_after_rejection"] is True
+    assert certificate.status == "EVIDENCE_LIMITED_COMPLETE"
+
+
 def test_initial_context_request_continues_same_first_patch_process(
     tmp_path, monkeypatch,
 ):

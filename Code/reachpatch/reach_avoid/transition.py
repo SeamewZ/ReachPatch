@@ -69,6 +69,7 @@ from reachpatch.reach_avoid.trajectory import (
     decide_transition,
     evaluate_trial_against_checkpoint,
     evidence_vector_from_comparison,
+    initialize_patch_trajectory,
     refresh_confirmed_failures,
     record_transition,
 )
@@ -625,6 +626,60 @@ def _build_checkpoint(
         safe=safe,
         graph_reached=False,
     )
+
+
+def _preserve_initial_patch_after_rejection(
+    state: ReachAvoidState,
+    manager: WorktreeManager,
+    trial,
+    cumulative: ActualDiff,
+    transition_id: str,
+    checks: Iterable[object],
+) -> tuple[IncumbentCheckpoint, object] | None:
+    """Persist the first generated diff before handling its diagnostics.
+
+    The first generator edit is the incumbent fallback even when mechanical
+    validation rejects it.  Keeping its tree in the normal checkpoint store
+    gives a subsequent confirmed mechanical repair a real working parent and
+    prevents a rejected initial trial from turning the final artifact into the
+    empty base patch.
+    """
+
+    if cumulative.empty or not cumulative.applies:
+        return None
+    checkpoint_id = stable_id(
+        "checkpoint", state.episode_id, "first-patch", cumulative.canonical_diff_hash,
+    )
+    receipt = manager.commit(trial, checkpoint_id)
+    snapshot = manager.checkpoint_tree(checkpoint_id)
+    checkpoint = _build_checkpoint(
+        state,
+        checkpoint_id,
+        str(snapshot),
+        cumulative,
+        state.outcomes,
+        transition_id,
+        state.generator_session.cursor,
+        safe=False,
+        patch_status="FIRST_PATCH_MECHANICAL_FAILURE",
+    )
+    checkpoint = replace(checkpoint, graph_hashes=state.graph_hashes())
+    state.checkpoint = checkpoint
+    state.checkpoint_history[checkpoint_id] = checkpoint
+    state.current_patch_hash = checkpoint.patch.canonical_diff_hash
+    mechanical_failure_ids = tuple(
+        str(getattr(item, "check_id", ""))
+        for item in checks
+        if str(getattr(getattr(item, "status", None), "value", getattr(item, "status", "")))
+        != OutcomeStatus.PASS.value
+    )
+    initialize_patch_trajectory(
+        state,
+        mechanical_failure_ids=mechanical_failure_ids,
+    )
+    state.runtime_metrics["first_patch_preserved_after_rejection"] = True
+    state.runtime_metrics["first_patch_checkpoint_id"] = checkpoint_id
+    return checkpoint, receipt
 
 
 def _legacy_evaluate_single_update(
@@ -1218,14 +1273,30 @@ def evaluate_patch_revision(
         incremental = reconcile_actual_diff(
             checkpoint_tree, trial_tree, forbidden_patterns=forbidden
         )
-        receipt = manager.rollback(trial)
+        preserved_initial = (
+            _preserve_initial_patch_after_rejection(
+                state, manager, trial, incremental, transition_id, ()
+            )
+            if initial_patch_submission else None
+        )
+        receipt = (
+            preserved_initial[1]
+            if preserved_initial is not None
+            else manager.rollback(trial)
+        )
         packet = _mechanical_packet(
             state, transition_id, incremental, f"EDIT_APPLY:{type(exc).__name__}:{exc}"
         )
         certificate = _revision_certificate(
             state, revision, transition_id, incremental, (),
-            decision=Decision.ROLLBACK, receipt_id=receipt.receipt_id,
-            result_checkpoint_id=None, graph_delta={
+            decision=(
+                Decision.KEEP_UNCERTIFIED
+                if preserved_initial is not None else Decision.ROLLBACK
+            ), receipt_id=receipt.receipt_id,
+            result_checkpoint_id=(
+                preserved_initial[0].checkpoint_id
+                if preserved_initial is not None else None
+            ), graph_delta={
                 "edit_error": str(exc),
                 "actual_diff": incremental.to_dict(),
             },
@@ -1241,8 +1312,10 @@ def evaluate_patch_revision(
             )
         state.transition_phase(ControllerPhase.COUNTEREXAMPLE_FEEDBACK, event="edit_apply_failed")
         return TransitionResult(
-            transition_id, False, Decision.ROLLBACK, certificate,
-            (packet,), state.checkpoint, revision, "EDIT_APPLY_FAILURE",
+            transition_id, False,
+            Decision.KEEP_UNCERTIFIED if preserved_initial is not None else Decision.ROLLBACK,
+            certificate, (packet,), state.checkpoint, revision,
+            "EDIT_APPLY_FAILURE",
         )
     checks = run_mechanical_checks(
         trial_tree, incremental,
@@ -1269,7 +1342,13 @@ def evaluate_patch_revision(
     if incremental.oracle_contamination_paths:
         avoid_reasons.add("ORACLE_CONTAMINATION")
     if avoid_reasons:
-        if state.patch_trajectory is not None:
+        preserved_initial = (
+            _preserve_initial_patch_after_rejection(
+                state, manager, trial, cumulative, transition_id, checks,
+            )
+            if initial_patch_submission else None
+        )
+        if state.patch_trajectory is not None and preserved_initial is None:
             archived_trial = checkpoint_from_trial_diff(
                 state,
                 cumulative,
@@ -1279,15 +1358,25 @@ def evaluate_patch_revision(
             state.patch_trajectory.checkpoint_archive[
                 archived_trial.checkpoint_id
             ] = archived_trial
-        receipt = manager.rollback(trial)
+        receipt = (
+            preserved_initial[1]
+            if preserved_initial is not None
+            else manager.rollback(trial)
+        )
         packet = _mechanical_packet(
             state, transition_id, incremental, ",".join(sorted(avoid_reasons)),
             checks,
         )
         certificate = _revision_certificate(
             state, revision, transition_id, incremental, checks,
-            decision=Decision.ROLLBACK, receipt_id=receipt.receipt_id,
-            result_checkpoint_id=None,
+            decision=(
+                Decision.KEEP_UNCERTIFIED
+                if preserved_initial is not None else Decision.ROLLBACK
+            ), receipt_id=receipt.receipt_id,
+            result_checkpoint_id=(
+                preserved_initial[0].checkpoint_id
+                if preserved_initial is not None else None
+            ),
             graph_delta={"actual_diff": incremental.to_dict()},
             outcomes=state.outcomes,
             packets=(packet,), safe=False, progress=False, reach=False,
@@ -1305,8 +1394,10 @@ def evaluate_patch_revision(
             )
         state.transition_phase(ControllerPhase.COUNTEREXAMPLE_FEEDBACK, event="mechanical_rollback")
         return TransitionResult(
-            transition_id, False, Decision.ROLLBACK, certificate,
-            (packet,), state.checkpoint, revision, ",".join(sorted(avoid_reasons)),
+            transition_id, False,
+            Decision.KEEP_UNCERTIFIED if preserved_initial is not None else Decision.ROLLBACK,
+            certificate, (packet,), state.checkpoint, revision,
+            ",".join(sorted(avoid_reasons)),
         )
     if not initial_patch_submission:
         scope_decision = accept_edit_scope(
@@ -2180,7 +2271,11 @@ def evaluate_patch_revision(
                     reason=transition_reason,
                 )
             elif initial_patch_submission:
-                state.patch_trajectory = None
+                # Establish the immutable first checkpoint immediately after
+                # the initial diff is committed.  The controller may still
+                # call initialize_patch_trajectory() defensively, but it must
+                # never have to reconstruct the first patch after a rollback.
+                initialize_patch_trajectory(state)
         if (
             (
                 initial_patch_submission

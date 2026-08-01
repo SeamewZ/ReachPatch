@@ -792,14 +792,28 @@ def checkpoint_from_trial_diff(
     )
 
 
-def initialize_patch_trajectory(state: ReachAvoidState) -> PatchTrajectory:
+def initialize_patch_trajectory(
+    state: ReachAvoidState,
+    *,
+    mechanical_failure_ids: Iterable[str] = (),
+) -> PatchTrajectory:
     if state.patch_trajectory is not None:
         return state.patch_trajectory
+    mechanical_failure_ids = tuple(dict.fromkeys(map(str, mechanical_failure_ids)))
     first = checkpoint_from_state(
         state,
         executed_check_ids=(item.check_id for item in state.check_comparisons),
         status="FIRST_PATCH",
     )
+    if mechanical_failure_ids:
+        first = replace(
+            first,
+            mechanical_failure_ids=mechanical_failure_ids,
+            evidence_vector=replace(
+                first.evidence_vector,
+                mechanical_failure_count=len(mechanical_failure_ids),
+            ),
+        )
     trajectory = PatchTrajectory(
         first_patch=first,
         best_evidence_patch=first,
