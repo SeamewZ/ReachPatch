@@ -17,6 +17,7 @@ from reachpatch.execution.models import (
     CheckExecution,
     CheckRole,
     CheckStatus,
+    EXECUTED_SYMBOLS_MARKER,
     EnvironmentHealth,
     EnvironmentHealthStatus,
     EnvironmentPreparation,
@@ -64,6 +65,136 @@ _DETERMINISTIC_ENVIRONMENT = {
     "LANG": "C.UTF-8",
     "LC_ALL": "C.UTF-8",
 }
+
+
+def _extract_executed_symbols(
+    stdout: str,
+    stderr: str,
+) -> tuple[str, str, tuple[str, ...]]:
+    """Remove the private trace marker and return stable project symbols."""
+
+    symbols: set[str] = set()
+
+    def clean(value: str) -> str:
+        retained: list[str] = []
+        for line in value.splitlines(keepends=True):
+            stripped = line.strip()
+            if not stripped.startswith(EXECUTED_SYMBOLS_MARKER):
+                retained.append(line)
+                continue
+            payload = stripped[len(EXECUTED_SYMBOLS_MARKER):]
+            try:
+                decoded = json.loads(payload)
+            except (json.JSONDecodeError, TypeError):
+                retained.append(line)
+                continue
+            if not isinstance(decoded, list) or not all(
+                isinstance(item, str) for item in decoded
+            ):
+                retained.append(line)
+                continue
+            symbols.update(item for item in decoded if item)
+        return "".join(retained)
+
+    return clean(stdout), clean(stderr), tuple(sorted(symbols))
+
+
+def _rebase_pythonpath(
+    configured: str,
+    source_repository: Path,
+    target_repository: Path,
+) -> str:
+    """Map repository-owned support paths onto the evaluated worktree."""
+
+    source = source_repository.resolve()
+    target = target_repository.resolve()
+    entries: list[str] = [str(target)]
+    for entry in configured.split(os.pathsep):
+        if not entry:
+            continue
+        resolved = Path(entry).resolve()
+        try:
+            relative = resolved.relative_to(source)
+        except ValueError:
+            mapped = resolved
+        else:
+            mapped = target / relative
+        text = str(mapped)
+        if text not in entries:
+            entries.append(text)
+    return os.pathsep.join(entries)
+
+
+def _install_execution_tracer(
+    run_directory: str,
+    repository: Path,
+    symbol_hints: tuple[str, ...] = (),
+) -> Path | None:
+    """Install a bounded sitecustomize profiler for every Python check."""
+
+    support = Path(run_directory) / "reachpatch-execution-tracer"
+    source = f'''import atexit as _reachpatch_atexit
+import json as _reachpatch_json
+import os as _reachpatch_os
+import sys as _reachpatch_sys
+
+_reachpatch_root = _reachpatch_os.path.realpath(
+    _reachpatch_os.environ.get("REACHPATCH_TRACE_ROOT", "")
+)
+_reachpatch_root_prefix = _reachpatch_root + _reachpatch_os.sep
+_reachpatch_hints = {tuple(sorted(set(map(str, symbol_hints))))!r}
+_reachpatch_symbols = set()
+
+def _reachpatch_profile(frame, event, arg):
+    if event != "call" or len(_reachpatch_symbols) >= 500:
+        return
+    raw_filename = frame.f_code.co_filename
+    if not raw_filename or raw_filename.startswith("<"):
+        return
+    if _reachpatch_os.path.isabs(raw_filename):
+        if not raw_filename.startswith(_reachpatch_root_prefix):
+            return
+        relative = raw_filename[len(_reachpatch_root_prefix):]
+    else:
+        filename = _reachpatch_os.path.realpath(raw_filename)
+        if not filename.startswith(_reachpatch_root_prefix):
+            return
+        relative = filename[len(_reachpatch_root_prefix):]
+    if not relative:
+        return
+    module = relative.replace(_reachpatch_os.sep, ".")
+    if module.endswith(".py"):
+        module = module[:-3]
+    if module.endswith(".__init__"):
+        module = module[:-9]
+    qualname = getattr(frame.f_code, "co_qualname", frame.f_code.co_name)
+    if qualname and qualname != "<module>":
+        symbol = module + "." + qualname
+        if not _reachpatch_hints or any(
+            symbol == hint
+            or symbol.endswith("." + hint)
+            or hint.endswith("." + symbol)
+            for hint in _reachpatch_hints
+        ):
+            _reachpatch_symbols.add(symbol)
+
+def _reachpatch_emit_symbols():
+    _reachpatch_sys.setprofile(None)
+    print(
+        {EXECUTED_SYMBOLS_MARKER!r}
+        + _reachpatch_json.dumps(sorted(_reachpatch_symbols), separators=(",", ":")),
+        file=_reachpatch_sys.stderr,
+    )
+
+_reachpatch_atexit.register(_reachpatch_emit_symbols)
+_reachpatch_sys.setprofile(_reachpatch_profile)
+'''
+    try:
+        support.mkdir(parents=True, exist_ok=False)
+        (support / "sitecustomize.py").write_text(source, encoding="utf-8")
+    except OSError:
+        return None
+    return support
 
 
 class BaseProjectRunner:
@@ -358,31 +489,41 @@ class BaseProjectRunner:
         self,
         check: ExecutableCheck,
         repository: Path,
-    ) -> tuple[CheckStatus, int | None, str, str, float, str | None, dict | None]:
+    ) -> tuple[
+        CheckStatus, int | None, str, str, float, str | None,
+        dict | None, tuple[str, ...],
+    ]:
         if not check.command:
             return (
                 CheckStatus.INVALID_SELECTOR, None, "", "invalid or unresolved selector",
-                0.0, content_hash("invalid-selector"), None,
+                0.0, content_hash("invalid-selector"), None, (),
             )
         preparation = self.prepare_environment(check.check_id)
         if preparation.status != EnvironmentHealthStatus.HEALTHY:
             return (
                 CheckStatus.INVALID_ENVIRONMENT, None, "", preparation.detail,
-                0.0, content_hash(preparation.detail), None,
+                0.0, content_hash(preparation.detail), None, (),
             )
         environment = {
             **os.environ,
             **preparation.environment,
             **check.environment,
         }
-        configured_pythonpath = environment.get("PYTHONPATH", "")
-        pythonpath_entries = [
-            entry for entry in configured_pythonpath.split(os.pathsep)
-            if entry and Path(entry).resolve() != self.repository
-        ]
-        environment["PYTHONPATH"] = os.pathsep.join((
-            str(repository), *pythonpath_entries,
-        ))
+        rebased_pythonpath = _rebase_pythonpath(
+            environment.get("PYTHONPATH", ""),
+            self.repository,
+            repository,
+        )
+        tracer_path = _install_execution_tracer(
+            preparation.run_directory,
+            repository,
+            tuple(map(str, check.executed_symbol_ids)),
+        )
+        environment["PYTHONPATH"] = os.pathsep.join(filter(None, (
+            str(tracer_path) if tracer_path is not None else "",
+            rebased_pythonpath,
+        )))
+        environment["REACHPATCH_TRACE_ROOT"] = str(repository)
         started = time.monotonic()
         try:
             broker_execution = run_via_public_execution_broker(
@@ -394,6 +535,9 @@ class BaseProjectRunner:
             if broker_execution is not None and broker_execution.get("timed_out"):
                 stdout = str(broker_execution.get("stdout") or "")[-30000:]
                 stderr = str(broker_execution.get("stderr") or "")[-30000:]
+                stdout, stderr, executed_symbols = _extract_executed_symbols(
+                    stdout, stderr,
+                )
                 duration = float(
                     broker_execution.get("duration_seconds")
                     or (time.monotonic() - started)
@@ -404,6 +548,7 @@ class BaseProjectRunner:
                         CheckStatus.TIMEOUT, None, stdout, stderr,
                     ),
                     self._first_project_frame(stdout, stderr, repository),
+                    executed_symbols,
                 )
             if broker_execution is None:
                 process = subprocess.run(
@@ -426,6 +571,9 @@ class BaseProjectRunner:
             duration = time.monotonic() - started
             stdout = process_stdout[-30000:]
             stderr = process_stderr[-30000:]
+            stdout, stderr, executed_symbols = _extract_executed_symbols(
+                stdout, stderr,
+            )
             infrastructure = self.classify_infrastructure_failure(
                 stdout, stderr, return_code,
             )
@@ -441,15 +589,20 @@ class BaseProjectRunner:
             return (
                 status, return_code, stdout, stderr, duration, signature,
                 self._first_project_frame(stdout, stderr, repository),
+                executed_symbols,
             )
         except subprocess.TimeoutExpired as exc:
             stdout = str(exc.stdout or "")[-30000:]
             stderr = str(exc.stderr or "")[-30000:]
+            stdout, stderr, executed_symbols = _extract_executed_symbols(
+                stdout, stderr,
+            )
             duration = time.monotonic() - started
             return (
                 CheckStatus.TIMEOUT, None, stdout, stderr, duration,
                 self._failure_signature(CheckStatus.TIMEOUT, None, stdout, stderr),
                 self._first_project_frame(stdout, stderr, repository),
+                executed_symbols,
             )
         except OSError as exc:
             duration = time.monotonic() - started
@@ -459,7 +612,7 @@ class BaseProjectRunner:
                 self._failure_signature(
                     CheckStatus.INVALID_ENVIRONMENT, None, "", diagnostic,
                 ),
-                None,
+                None, (),
             )
 
     @staticmethod
@@ -496,6 +649,9 @@ class BaseProjectRunner:
         stable = len(signatures) == 1
         selected = observations[0]
         status = selected[0] if stable else CheckStatus.FLAKY
+        stable_symbols = set(selected[7])
+        for observation in observations[1:]:
+            stable_symbols.intersection_update(observation[7])
         source_hash = tree_hash or self._tree_hash(root)
         execution_id = stable_id(
             "check-execution", check.check_id, source_hash,
@@ -513,6 +669,7 @@ class BaseProjectRunner:
             stable=stable,
             failure_signature=selected[5],
             first_project_frame=selected[6],
+            executed_symbol_ids=tuple(sorted(stable_symbols)),
         )
 
     def _baseline_cache_path(self, check: ExecutableCheck) -> Path:
@@ -540,6 +697,7 @@ class BaseProjectRunner:
                     stable=bool(raw.get("stable")),
                     failure_signature=raw.get("failure_signature"),
                     first_project_frame=raw.get("first_project_frame"),
+                    executed_symbol_ids=tuple(raw.get("executed_symbol_ids", ())),
                 )
             except (OSError, ValueError, KeyError, TypeError, json.JSONDecodeError):
                 pass

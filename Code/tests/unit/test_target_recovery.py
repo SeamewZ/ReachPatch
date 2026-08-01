@@ -1,13 +1,16 @@
 from __future__ import annotations
 
+import ast
 import json
 import os
 from types import SimpleNamespace
 
 from reachpatch.execution.models import CheckExecution, CheckRole, CheckStatus, ExecutableCheck
 from reachpatch.execution.runners import DjangoRunner, PytestProjectRunner
+from reachpatch.execution.runners.base import EXECUTED_SYMBOLS_MARKER
 from reachpatch.execution.target_recovery import (
     _ensure_django_reproduction_app_labels,
+    _instrument_reproduction_source,
     _is_script_level_reproduction_failure,
     _public_issue,
     _write_reproduction,
@@ -99,6 +102,52 @@ def test_directed_reproduction_runs_once_and_must_fail_stably(tmp_path) -> None:
     )
     reproduction = result.targets[0].temporary_artifact_paths[0]
     assert str(repository) not in reproduction
+
+
+def test_instrumented_reproduction_records_real_project_call_and_hides_marker(
+    tmp_path,
+) -> None:
+    repository = tmp_path / "repo"
+    (repository / "pkg").mkdir(parents=True)
+    (repository / "pkg" / "__init__.py").write_text("", encoding="utf-8")
+    (repository / "pkg" / "api.py").write_text(
+        "def public(value):\n    return value * 2\n", encoding="utf-8",
+    )
+    runner = PytestProjectRunner(
+        repository, artifact_root=tmp_path / "artifacts", base_commit="base",
+    )
+    check = _write_reproduction(
+        tmp_path / "artifacts",
+        "runtime-symbol.py",
+        "from pkg.api import public\nassert public(2) == 5\n",
+        runner,
+        "public-contract",
+    )
+
+    execution = runner.run_check(check, repository=repository, repeats=2)
+
+    assert execution.status == CheckStatus.FAIL
+    assert execution.stable
+    assert "pkg.api.public" in execution.executed_symbol_ids
+    assert EXECUTED_SYMBOLS_MARKER not in execution.stderr
+    assert EXECUTED_SYMBOLS_MARKER not in execution.stdout
+
+
+def test_instrumentation_preserves_docstring_and_future_import_position() -> None:
+    source = (
+        '"""public module documentation"""\n'
+        "from __future__ import annotations\n\n"
+        "value: str = 'ok'\n"
+    )
+
+    instrumented = _instrument_reproduction_source(source)
+    tree = ast.parse(instrumented)
+    compile(tree, "instrumented.py", "exec")
+
+    assert ast.get_docstring(tree) == "public module documentation"
+    assert instrumented.index("from __future__ import annotations") < instrumented.index(
+        "import atexit as _reachpatch_atexit"
+    )
 
 
 def test_script_level_reproduction_exception_is_rejected_not_target(tmp_path) -> None:

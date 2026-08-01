@@ -20,6 +20,7 @@ from reachpatch.execution.models import (
     EnvironmentHealth,
     EnvironmentHealthStatus,
     ExecutableCheck,
+    EXECUTED_SYMBOLS_MARKER,
     RejectedCheck,
 )
 from reachpatch.execution.runners import BaseProjectRunner
@@ -344,10 +345,13 @@ def _write_reproduction(
                 + source[match.start():]
             )
         source = _ensure_django_reproduction_app_labels(source)
+    imported_symbols = set(_called_import_symbols(source))
+    source = _instrument_reproduction_source(
+        source, tuple(sorted(imported_symbols)),
+    )
     path = reproduction_root / name
     path.write_text(source.rstrip() + "\n", encoding="utf-8")
     check_id = stable_id("temporary-public-reproduction", evidence_id, source)
-    imported_symbols = set(_called_import_symbols(source))
 
     source_evidence_ids = tuple(dict.fromkeys((
         evidence_id,
@@ -377,6 +381,87 @@ def _write_reproduction(
         selector=str(path),
         executed_symbol_ids=tuple(sorted(imported_symbols)),
     )
+
+
+def _instrument_reproduction_source(
+    source: str,
+    symbol_hints: tuple[str, ...] = (),
+) -> str:
+    """Capture calls that really entered the mounted public project tree."""
+
+    prelude = f'''import atexit as _reachpatch_atexit
+import json as _reachpatch_json
+import os as _reachpatch_os
+import sys as _reachpatch_sys
+
+_reachpatch_root = _reachpatch_os.path.realpath(_reachpatch_os.getcwd())
+_reachpatch_root_prefix = _reachpatch_root + _reachpatch_os.sep
+_reachpatch_hints = {tuple(sorted(set(map(str, symbol_hints))))!r}
+_reachpatch_symbols = set()
+
+def _reachpatch_profile(frame, event, arg):
+    if event != "call" or len(_reachpatch_symbols) >= 500:
+        return
+    raw_filename = frame.f_code.co_filename
+    if not raw_filename or raw_filename.startswith("<"):
+        return
+    if _reachpatch_os.path.isabs(raw_filename):
+        if not raw_filename.startswith(_reachpatch_root_prefix):
+            return
+        relative = raw_filename[len(_reachpatch_root_prefix):]
+    else:
+        filename = _reachpatch_os.path.realpath(raw_filename)
+        if not filename.startswith(_reachpatch_root_prefix):
+            return
+        relative = filename[len(_reachpatch_root_prefix):]
+    if not relative:
+        return
+    module = relative.replace(_reachpatch_os.sep, ".")
+    if module.endswith(".py"):
+        module = module[:-3]
+    if module.endswith(".__init__"):
+        module = module[:-9]
+    qualname = getattr(frame.f_code, "co_qualname", frame.f_code.co_name)
+    if qualname and qualname != "<module>":
+        symbol = module + "." + qualname
+        if not _reachpatch_hints or any(
+            symbol == hint
+            or symbol.endswith("." + hint)
+            or hint.endswith("." + symbol)
+            for hint in _reachpatch_hints
+        ):
+            _reachpatch_symbols.add(symbol)
+
+def _reachpatch_emit_symbols():
+    _reachpatch_sys.setprofile(None)
+    print(
+        {EXECUTED_SYMBOLS_MARKER!r}
+        + _reachpatch_json.dumps(sorted(_reachpatch_symbols), separators=(",", ":")),
+        file=_reachpatch_sys.stderr,
+    )
+
+_reachpatch_atexit.register(_reachpatch_emit_symbols)
+_reachpatch_sys.setprofile(_reachpatch_profile)
+'''
+    try:
+        tree = ast.parse(source)
+    except SyntaxError:
+        return prelude + "\n" + source
+    insert_after = 0
+    for index, node in enumerate(tree.body):
+        is_docstring = (
+            index == 0
+            and isinstance(node, ast.Expr)
+            and isinstance(node.value, ast.Constant)
+            and isinstance(node.value.value, str)
+        )
+        is_future = isinstance(node, ast.ImportFrom) and node.module == "__future__"
+        if not (is_docstring or is_future):
+            break
+        insert_after = int(getattr(node, "end_lineno", node.lineno))
+    lines = source.splitlines(keepends=True)
+    lines.insert(insert_after, prelude + "\n")
+    return "".join(lines)
 
 
 def _called_import_symbols(source: str) -> tuple[str, ...]:
@@ -697,14 +782,14 @@ def recover_executable_targets(
     related = _related_repository_tests(issue, repository_index, visible)
     checks: list[ExecutableCheck] = []
     checks.extend(project_runner.compile_visible_checks(visible))
-    checks.extend(project_runner.compile_visible_checks(
-        related, authority="PUBLIC_REPOSITORY_TEST",
-    ))
     explicit_commands = tuple(
         tuple(map(str, command))
         for command in getattr(project_runner, "explicit_commands", ())
     )
     checks.extend(project_runner.compile_command_checks(explicit_commands))
+    checks.extend(project_runner.compile_visible_checks(
+        related, authority="PUBLIC_REPOSITORY_TEST",
+    ))
     checks.extend(_code_block_checks(issue, root, project_runner))
     directed_requests = 0
     behavior = _behavior_reproduction(issue, root, project_runner)
@@ -989,7 +1074,9 @@ def recover_executable_targets(
             oracle=oracle,
             target_requirement_ids=check.target_requirement_ids,
             source_evidence_ids=check.source_evidence_ids,
-            executed_symbol_ids=check.executed_symbol_ids,
+            executed_symbol_ids=(
+                execution.executed_symbol_ids if execution is not None else ()
+            ),
             stability_runs=min(max_stability_runs, 2),
             status=("MECHANICALLY_VERIFIED" if trusted else "EXPLORATION_ONLY"),
             confidence=(0.95 if trusted else 0.35),

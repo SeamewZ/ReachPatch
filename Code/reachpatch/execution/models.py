@@ -10,6 +10,9 @@ from reachpatch.oracle.models import PairClassification, RunObservation
 from reachpatch.program_graph.tracing import DynamicTraceEvent
 
 
+EXECUTED_SYMBOLS_MARKER = "__REACHPATCH_EXECUTED_SYMBOLS__="
+
+
 class CheckRole(StrEnum):
     TARGET = "TARGET"
     PRESERVATION = "PRESERVATION"
@@ -88,6 +91,7 @@ class CheckExecution(SerializableRecord):
     stable: bool
     failure_signature: str | None
     first_project_frame: dict[str, Any] | None
+    executed_symbol_ids: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)

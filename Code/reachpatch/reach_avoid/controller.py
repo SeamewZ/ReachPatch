@@ -303,6 +303,7 @@ def _execution(raw: dict | None) -> Any:
     from reachpatch.execution.models import CheckExecution, CheckStatus
     values = dict(raw)
     values["status"] = CheckStatus(values["status"])
+    values["executed_symbol_ids"] = tuple(values.get("executed_symbol_ids", ()))
     return CheckExecution(**values)
 
 

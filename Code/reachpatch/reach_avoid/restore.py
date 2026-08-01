@@ -380,6 +380,7 @@ def executable_check_from_dict(raw: dict[str, Any]) -> ExecutableCheck:
 def check_execution_from_dict(raw: dict[str, Any]) -> CheckExecution:
     values = dict(raw)
     values["status"] = CheckStatus(values["status"])
+    values["executed_symbol_ids"] = tuple(values.get("executed_symbol_ids", ()))
     frame = values.get("first_project_frame")
     values["first_project_frame"] = dict(frame) if frame is not None else None
     return CheckExecution(**values)

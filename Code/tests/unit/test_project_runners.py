@@ -9,6 +9,7 @@ import pytest
 
 from reachpatch.execution.models import (
     CheckStatus,
+    EXECUTED_SYMBOLS_MARKER,
     EnvironmentHealthStatus,
 )
 from reachpatch.execution.public_docker import (
@@ -297,6 +298,106 @@ def test_baseline_health_cache_reuses_base_commit_environment_and_check(tmp_path
     assert first.status == second.status == EnvironmentHealthStatus.HEALTHY
     assert first.execution.execution_id == second.execution.execution_id
     assert second.execution.status == CheckStatus.PASS
+
+
+def test_stable_execution_keeps_only_symbols_seen_in_every_run(
+    tmp_path, monkeypatch,
+) -> None:
+    repository = tmp_path / "repo"
+    repository.mkdir()
+    runner = _runner(PytestProjectRunner, repository, tmp_path / "artifacts")
+    check = runner.compile_command_checks(((sys.executable, "-c", "pass"),))[0]
+    observations = iter((
+        (
+            CheckStatus.FAIL, 1, "", "failure", 0.01, "same", None,
+            ("pkg.api.always", "pkg.api.first_only"),
+        ),
+        (
+            CheckStatus.FAIL, 1, "", "failure", 0.01, "same", None,
+            ("pkg.api.always", "pkg.api.second_only"),
+        ),
+    ))
+    monkeypatch.setattr(runner, "_execute_once", lambda *_: next(observations))
+
+    execution = runner.run_check(check, repeats=2)
+
+    assert execution.stable
+    assert execution.executed_symbol_ids == ("pkg.api.always",)
+
+
+def test_runner_traces_project_symbols_for_explicit_python_checks(tmp_path) -> None:
+    repository = tmp_path / "repo"
+    (repository / "pkg").mkdir(parents=True)
+    (repository / "pkg" / "__init__.py").write_text("", encoding="utf-8")
+    (repository / "pkg" / "api.py").write_text(
+        "def public(value):\n    return value + 1\n", encoding="utf-8",
+    )
+    runner = _runner(PytestProjectRunner, repository, tmp_path / "artifacts")
+    check = runner.compile_command_checks(((
+        sys.executable,
+        "-c",
+        "from pkg.api import public; raise SystemExit(public(1) != 2)",
+    ),))[0]
+
+    execution = runner.run_check(check, repeats=2)
+
+    assert execution.status == CheckStatus.PASS
+    assert execution.executed_symbol_ids == ("pkg.api.public",)
+
+
+def test_baseline_cache_restores_executed_symbols_as_tuple_and_strips_marker(
+    tmp_path,
+) -> None:
+    repository = tmp_path / "repo"
+    repository.mkdir()
+    artifacts = tmp_path / "artifacts"
+    runner = _runner(PytestProjectRunner, repository, artifacts)
+    marker = EXECUTED_SYMBOLS_MARKER + '["pkg.api.public"]'
+    check = runner.compile_command_checks(((
+        sys.executable,
+        "-c",
+        f"import sys; print({marker!r}, file=sys.stderr); raise SystemExit(1)",
+    ),))[0]
+
+    first = runner.run_baseline_check(check)
+    restored = _runner(
+        PytestProjectRunner, repository, artifacts,
+    ).run_baseline_check(check)
+
+    assert first.executed_symbol_ids == ("pkg.api.public",)
+    assert restored.executed_symbol_ids == ("pkg.api.public",)
+    assert isinstance(restored.executed_symbol_ids, tuple)
+    assert EXECUTED_SYMBOLS_MARKER not in restored.stderr
+    assert first.failure_signature == restored.failure_signature
+
+
+def test_trial_execution_rebases_repository_owned_pythonpath_entries(tmp_path):
+    baseline = tmp_path / "baseline"
+    trial = tmp_path / "trial"
+    for repository, value in ((baseline, "baseline"), (trial, "trial")):
+        (repository / "tests").mkdir(parents=True)
+        (repository / "tests" / "public_settings.py").write_text(
+            f"VALUE = {value!r}\n", encoding="utf-8",
+        )
+    runner = _runner(PytestProjectRunner, baseline, tmp_path / "artifacts")
+    check = runner.compile_command_checks(((
+        sys.executable,
+        "-c",
+        "import public_settings; print(public_settings.VALUE)",
+    ),))[0]
+    check = __import__("dataclasses").replace(
+        check,
+        environment={
+            "PYTHONPATH": os.pathsep.join((
+                str(baseline), str(baseline / "tests"),
+            )),
+        },
+    )
+
+    execution = runner.run_check(check, repository=trial, repeats=1)
+
+    assert execution.status == CheckStatus.PASS
+    assert execution.stdout.strip() == "trial"
 
 
 def test_public_image_name_uses_only_public_instance_id() -> None:

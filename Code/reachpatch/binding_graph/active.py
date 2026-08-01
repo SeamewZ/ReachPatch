@@ -598,7 +598,7 @@ def _check_projection(
         check_id = str(getattr(check, "check_id", check))
         candidate = candidate_by_id.get(check_id)
         projected_check = check
-        if candidate is not None and not getattr(check, "executed_symbol_ids", ()):
+        if candidate is not None:
             projected_check = type("CheckProjection", (), {
                 "target_requirement_ids": getattr(check, "target_requirement_ids", ()),
                 "source_evidence_ids": getattr(check, "source_evidence_ids", ()),
@@ -929,10 +929,14 @@ def build_active_binding_graph(
             edges.append(BindingEdge(binding_id, check_id, "UNIT_EXECUTABLE_CHECK", (check_id,)))
             check = checks_by_id.get(check_id)
             candidate = candidates_by_id.get(check_id)
-            executed_names = set(map(str, (
-                getattr(candidate, "executed_symbol_ids", ())
-                if candidate is not None else ()
-            ))) | set(map(str, getattr(check, "executed_symbol_ids", ())))
+            executed_names = set(map(
+                str,
+                (
+                    getattr(candidate, "executed_symbol_ids", ())
+                    if candidate is not None
+                    else getattr(check, "executed_symbol_ids", ())
+                ),
+            ))
             for symbol_id in symbols:
                 node = getattr(program_slice, "nodes", {}).get(symbol_id)
                 if node is None:

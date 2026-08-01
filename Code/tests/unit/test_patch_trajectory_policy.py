@@ -1,3 +1,4 @@
+from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -12,7 +13,7 @@ from reachpatch.models.graph import GraphEdge, GraphNode
 from reachpatch.program_graph.models import ProgramGraph
 from reachpatch.binding_graph.active import (
     ActiveBindingGraph, ActiveBindingUnit, BindingEdge, _causal_cuts,
-    _check_projection, recover_direct_callers,
+    _check_projection, build_active_binding_graph, recover_direct_callers,
 )
 from reachpatch.execution.target_recovery import TargetCandidate, certify_target
 from reachpatch.models.enums import Authority, ChallengeTerminalStatus
@@ -265,6 +266,92 @@ def test_check_projection_resolves_executed_symbol_to_qualified_definition():
                         candidates=()),
         (), symbol_ids=(definition.node_id,), program=graph,
     ) == ((), ("public-test",), ())
+
+
+def test_target_candidate_dynamic_symbols_override_static_check_inference():
+    graph = ProgramGraph(repository_root=".", source_hash="source")
+    definition = graph.index_node(GraphNode.create(
+        "function", "public",
+        attributes={"file": "pkg/api.py", "line": 4, "end_line": 5,
+                    "qualified_name": "pkg.api.public"},
+    ))
+    leaf = SimpleNamespace(
+        leaf_id="req", formula="public behavior must be fixed",
+        supporting_evidence=(), entrypoint_hypotheses=("pkg.api.public",),
+    )
+    target = ExecutableCheck(
+        check_id="target", role=CheckRole.TARGET, authority="PUBLIC",
+        command=("python", "check.py"), cwd=".", environment={},
+        timeout_seconds=5.0, source_evidence_ids=(),
+        target_requirement_ids=(), temporary_artifact_paths=(),
+        executed_symbol_ids=("pkg.api.public",),
+    )
+    dynamic_candidate = replace(
+        _candidate(), executed_symbol_ids=("pkg.other.unrelated",),
+    )
+
+    projected = _check_projection(
+        leaf,
+        SimpleNamespace(
+            targets=(target,), preservation_checks=(),
+            candidates=(dynamic_candidate,),
+        ),
+        (), symbol_ids=(definition.node_id,), program=graph,
+    )
+
+    assert projected == ((), (), ())
+
+
+def test_no_dynamic_target_symbol_creates_no_execution_edge_or_certification():
+    graph = ProgramGraph(repository_root=".", source_hash="source")
+    definition = graph.index_node(GraphNode.create(
+        "function", "public",
+        attributes={"file": "pkg/api.py", "line": 1, "end_line": 2,
+                    "qualified_name": "pkg.api.public"},
+    ))
+    leaf = SimpleNamespace(
+        leaf_id="req", formula="public behavior must be fixed", authority="B",
+        supporting_evidence=(), entrypoint_hypotheses=("pkg.api.public",),
+    )
+    requirement_graph = SimpleNamespace(
+        leaves=(leaf,), semantic_layer_hash=lambda: "requirements",
+    )
+    target = ExecutableCheck(
+        check_id="target", role=CheckRole.TARGET, authority="PUBLIC",
+        command=("python", "check.py"), cwd=".", environment={},
+        timeout_seconds=5.0, source_evidence_ids=(),
+        target_requirement_ids=("req",), temporary_artifact_paths=(),
+        # This is pre-execution localization and must not certify reachability.
+        executed_symbol_ids=("pkg.api.public",),
+    )
+    candidate = replace(_candidate(), executed_symbol_ids=())
+    diff = SimpleNamespace(
+        canonical_diff_hash="diff", changed_files=("pkg/api.py",),
+        changed_relations=(),
+        hunks=(SimpleNamespace(hunk_id="hunk", file="pkg/api.py"),),
+    )
+    active = build_active_binding_graph(
+        requirement_graph,
+        graph,
+        diff,
+        SimpleNamespace(
+            targets=(target,), preservation_checks=(), candidates=(candidate,),
+        ),
+        (),
+        instance_id="case",
+    )
+
+    assert active.target_check_ids == ("target",)
+    assert not any(
+        edge.edge_type == "CHECK_EXECUTED_SYMBOL" for edge in active.edges
+    )
+    certification = certify_target(
+        candidate,
+        (_execution("target", "FAIL", stable=True, signature="bug", tree="base"),),
+        active,
+    )
+    assert not certification.certified
+    assert not certification.reaches_related_code
 
 
 def test_edit_scope_rejects_unexplained_public_utility_change():

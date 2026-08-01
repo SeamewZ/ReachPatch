@@ -855,7 +855,8 @@ def test_untrusted_frontier_does_not_revise_single_working_patch(
     state, certificate = controller.run(
         Instance(
             "continuous", str(repository), "base",
-            "For every x, pkg.api.public(x) must return [].",
+            "pkg.api.public(x) has incorrect behavior, but the expected public "
+            "observation is not specified.",
         ),
         run_root=tmp_path / "run",
     )
