@@ -104,6 +104,20 @@ def accept_edit_scope(action: Any, trial_diff: Any, state: ReachAvoidState) -> E
             same_symbol(scope, symbol)
             for scope in relation_scopes for symbol in allowed_symbols
         )
+    mechanical_localization = str(
+        action_data.get("selection_witness", {}).get("failure_origin", "")
+    ) == "PATCH_MECHANICAL"
+    if (
+        not touched
+        and mechanical_localization
+        and allowed_files
+        and changed_files
+        and changed_files.issubset(allowed_files)
+    ):
+        # Mechanical hunk IDs necessarily change when the malformed source is
+        # corrected.  The stable causal boundary is the checked file set from
+        # the executable mechanical packet, not equality of old/new hunk IDs.
+        touched = True
     public_api = tuple(sorted(
         str(getattr(item, "relation_id", "")) for item in changed_relations
         if "public" in str(getattr(item, "kind", "")).lower()
@@ -281,6 +295,17 @@ def next_untried_repair_intent(
                 and (
                     legacy_fixture
                     or item.public_trigger_id == confirmed_failure.check_id
+                    or (
+                        confirmed_failure.kind == "CONFIRMED_MECHANICAL_FAILURE"
+                        and any(
+                            str(failed.get("check_id", ""))
+                            == confirmed_failure.check_id
+                            for failed in (
+                                item.actual_observation.get("failed_checks", ())
+                                if isinstance(item.actual_observation, dict) else ()
+                            )
+                        )
+                    )
                 )
             ), None)
             if packet is None:

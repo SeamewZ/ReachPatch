@@ -124,6 +124,17 @@ def baseline_exposes_issue_failure(
         return False
     if candidate.oracle.relation != "baseline_failure_must_become_pass":
         return False
+    infrastructure_markers = (
+        "modulenotfounderror", "no module named", "command not found",
+        "collected 0 items", "no tests ran", "ran 0 tests",
+        "settings are not configured", "requested setting ",
+        "settings.databases is improperly configured",
+        "database settings are improperly configured",
+        "please supply the name value", "appregistrynotready",
+        "apps aren't loaded yet", "could not connect", "connection refused",
+        "temporary failure in name resolution", "database backend is required",
+        "permission denied", "read-only file system", "no space left on device",
+    )
     return bool(
         executions
         and all(
@@ -131,6 +142,10 @@ def baseline_exposes_issue_failure(
             and item.status == CheckStatus.FAIL
             and item.stable
             and item.return_code not in {None, 0}
+            and not any(
+                marker in f"{item.stdout}\n{item.stderr}".lower()
+                for marker in infrastructure_markers
+            )
             for item in executions
         )
     )
@@ -835,9 +850,15 @@ def recover_executable_targets(
         # BaseProjectRunner performs two stability runs.  Freeze a per-run
         # timeout from the shared phase deadline so one slow public check
         # cannot outlive target recovery and later overwrite its audit.
+        # The phase deadline is a soft admission deadline: it limits how many
+        # strategies start. Once an Authority A/B/C check has started, let its
+        # two stability runs finish within the 45-second hard recovery budget.
+        # Discarding a completed execution merely because it crossed the
+        # 10-second admission boundary loses the strongest available evidence.
+        hard_available = remaining()
         per_run_timeout = max(
             0.25,
-            (available - min(0.25, available / 10.0))
+            (hard_available - min(0.25, hard_available / 10.0))
             / max(2, max_stability_runs),
         )
         bounded_check = replace(
@@ -845,9 +866,7 @@ def recover_executable_targets(
             timeout_seconds=min(check.timeout_seconds, per_run_timeout),
         )
         health = project_runner.health_check(bounded_check)
-        if expired() or (
-            phase_deadline is not None and time.monotonic() >= phase_deadline
-        ):
+        if expired():
             return
         health_checks.append(health)
         execution = health.execution

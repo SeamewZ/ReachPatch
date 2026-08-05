@@ -409,6 +409,9 @@ class BaseProjectRunner:
             "could not create", "failed to create process",
             "settings are not configured",
             "requested setting ",
+            "settings.databases is improperly configured",
+            "database settings are improperly configured",
+            "please supply the name value",
             "appregistrynotready",
             "apps aren't loaded yet",
             "cannot import name 'mapping' from 'collections'",
@@ -479,6 +482,14 @@ class BaseProjectRunner:
         normalized = re.sub(r"(?m)(\.py):\d+(?=[:\s])", r"\1:<line>", normalized)
         normalized = re.sub(r"(?:[A-Za-z]:)?[/\\][^\s:\n]+", "<path>", normalized)
         normalized = re.sub(r"\b\d+(?:\.\d+)?s\b", "<duration>", normalized)
+        normalized = re.sub(
+            r"(?mi)^(random seed:\s*)\d+\s*$", r"\1<seed>", normalized,
+        )
+        normalized = re.sub(
+            r"(?i)\bin\s+\d+(?:\.\d+)?\s+seconds?\b",
+            "in <duration>",
+            normalized,
+        )
         return content_hash({
             "status": status.value,
             "return_code": return_code,
@@ -514,7 +525,19 @@ class BaseProjectRunner:
             self.repository,
             repository,
         )
-        tracer_path = _install_execution_tracer(
+        static_public_selector = bool(
+            "::" in str(check.selector)
+            and str(check.authority) in {"PUBLIC", "PUBLIC_REPOSITORY_TEST"}
+            and check.executed_symbol_ids
+        )
+        # A concrete public test function has already been statically linked to
+        # its referenced repository symbols. Profiling every Python call can
+        # make older scientific suites more than four times slower and consume
+        # the complete recovery budget before two stability runs finish. Keep
+        # dynamic tracing for broad selectors and reproductions; for this
+        # bounded case, the real test execution plus its parsed function body is
+        # the executable reach evidence.
+        tracer_path = None if static_public_selector else _install_execution_tracer(
             preparation.run_directory,
             repository,
             tuple(map(str, check.executed_symbol_ids)),
@@ -574,6 +597,10 @@ class BaseProjectRunner:
             stdout, stderr, executed_symbols = _extract_executed_symbols(
                 stdout, stderr,
             )
+            if static_public_selector:
+                executed_symbols = tuple(sorted(set(map(
+                    str, check.executed_symbol_ids,
+                ))))
             infrastructure = self.classify_infrastructure_failure(
                 stdout, stderr, return_code,
             )

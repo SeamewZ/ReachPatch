@@ -106,9 +106,15 @@ class PublicDockerExecutionBroker(AbstractContextManager["PublicDockerExecutionB
                         "stderr": str(exc),
                         "timed_out": False,
                     }
-                self.wfile.write(
-                    json.dumps(response, sort_keys=True).encode("utf-8") + b"\n"
-                )
+                try:
+                    self.wfile.write(
+                        json.dumps(response, sort_keys=True).encode("utf-8") + b"\n"
+                    )
+                except (BrokenPipeError, ConnectionResetError):
+                    # A bounded recovery client may time out and close the Unix
+                    # socket while the broker is still cleaning up execution.
+                    # This is an expected probe terminal, not repair evidence.
+                    return
 
         self._server = _ThreadingUnixServer(str(self.socket_path), Handler)
         os.chmod(self.socket_path, 0o600)
@@ -150,6 +156,163 @@ class PublicDockerExecutionBroker(AbstractContextManager["PublicDockerExecutionB
             raise ValueError("public check repository is outside this case")
         return repository
 
+    @staticmethod
+    def _safe_relative_path(raw: str) -> str | None:
+        """Return a normalized repository path or reject an unsafe Git result."""
+
+        value = str(raw).replace("\\", "/")
+        path = Path(value)
+        if (
+            not value
+            or path.is_absolute()
+            or any(part in {"", ".", ".."} for part in path.parts)
+            or path.parts[0] == ".git"
+        ):
+            return None
+        return "/".join(path.parts)
+
+    def _repository_delta(
+        self,
+        repository: Path,
+    ) -> tuple[str, tuple[str, ...], tuple[str, ...]] | None:
+        """Compute a checkpoint delta using the public case tree's Git index.
+
+        Checkpoint trees intentionally omit ``.git``.  The case tree still owns a
+        worktree index for the exact SWE-bench base commit, so it can compare any
+        checkpoint beneath the run root without scanning or copying the complete
+        repository into Docker.  ``None`` requests the conservative full-copy path.
+        """
+
+        environment = {**os.environ, "GIT_OPTIONAL_LOCKS": "0"}
+        try:
+            git_dir_result = subprocess.run(
+                ("git", "-C", str(self.case_tree), "rev-parse", "--absolute-git-dir"),
+                capture_output=True,
+                text=True,
+                check=False,
+                timeout=15,
+                env=environment,
+            )
+            commit_result = subprocess.run(
+                ("git", "-C", str(self.case_tree), "rev-parse", "HEAD"),
+                capture_output=True,
+                text=True,
+                check=False,
+                timeout=15,
+                env=environment,
+            )
+            if git_dir_result.returncode != 0 or commit_result.returncode != 0:
+                return None
+            git_dir = git_dir_result.stdout.strip()
+            base_commit = commit_result.stdout.strip()
+            if not git_dir or not base_commit:
+                return None
+
+            common = (
+                "git", f"--git-dir={git_dir}", f"--work-tree={repository}"
+            )
+            diff_result = subprocess.run(
+                (*common, "diff", "--name-status", "-z", "--no-renames", "HEAD", "--"),
+                capture_output=True,
+                check=False,
+                timeout=30,
+                env=environment,
+            )
+            untracked_result = subprocess.run(
+                (*common, "ls-files", "--others", "--exclude-standard", "-z"),
+                capture_output=True,
+                check=False,
+                timeout=30,
+                env=environment,
+            )
+            if diff_result.returncode != 0 or untracked_result.returncode != 0:
+                return None
+
+            fields = diff_result.stdout.decode("utf-8", "surrogateescape").split("\0")
+            fields = fields[:-1] if fields and fields[-1] == "" else fields
+            if len(fields) % 2:
+                return None
+            copied: set[str] = set()
+            deleted: set[str] = set()
+            for index in range(0, len(fields), 2):
+                status = fields[index]
+                relative = self._safe_relative_path(fields[index + 1])
+                if relative is None:
+                    return None
+                if status.startswith("D"):
+                    deleted.add(relative)
+                else:
+                    copied.add(relative)
+
+            untracked = untracked_result.stdout.decode(
+                "utf-8", "surrogateescape"
+            ).split("\0")
+            for raw in untracked:
+                if not raw:
+                    continue
+                relative = self._safe_relative_path(raw)
+                if relative is None:
+                    return None
+                copied.add(relative)
+            copied.difference_update(deleted)
+            if any(not (repository / path).exists() for path in copied):
+                return None
+            return base_commit, tuple(sorted(copied)), tuple(sorted(deleted))
+        except (OSError, subprocess.SubprocessError, UnicodeError):
+            return None
+
+    def _sync_repository_source(self, container_id: str, repository: Path) -> None:
+        delta = self._repository_delta(repository)
+        if delta is not None:
+            base_commit, copied, deleted = delta
+            container_commit = subprocess.run(
+                ("docker", "exec", container_id, "git", "-C", "/testbed", "rev-parse", "HEAD"),
+                capture_output=True,
+                text=True,
+                check=False,
+                timeout=30,
+            )
+            if (
+                container_commit.returncode == 0
+                and container_commit.stdout.strip() == base_commit
+            ):
+                commands: list[str] = []
+                if copied:
+                    quoted = " ".join(shlex.quote(path) for path in copied)
+                    commands.append(
+                        "tar -C /reachpatch-source -cf - -- "
+                        f"{quoted} | tar -C /testbed -xf -"
+                    )
+                if deleted:
+                    quoted = " ".join(
+                        shlex.quote(f"/testbed/{path}") for path in deleted
+                    )
+                    commands.append(f"rm -f -- {quoted}")
+                if not commands:
+                    return
+                synchronized = subprocess.run(
+                    ("docker", "exec", container_id, "bash", "-lc", " && ".join(commands)),
+                    capture_output=True,
+                    text=True,
+                    check=False,
+                    timeout=60,
+                )
+                if synchronized.returncode == 0:
+                    return
+
+        synchronized = subprocess.run(
+            (
+                "docker", "exec", container_id, "bash", "-lc",
+                "tar -C /reachpatch-source --exclude=.git --exclude=./.git "
+                "-cf - . | tar -C /testbed -xf -",
+            ),
+            capture_output=True, text=True, check=False, timeout=180,
+        )
+        if synchronized.returncode != 0:
+            raise RuntimeError(
+                synchronized.stderr.strip() or "failed to synchronize public source tree"
+            )
+
     def _start_container(self, repository: Path) -> str:
         command = [
             "docker", "run", "--detach", "--rm", "--network", "none",
@@ -166,19 +329,11 @@ class PublicDockerExecutionBroker(AbstractContextManager["PublicDockerExecutionB
         if started.returncode != 0:
             raise RuntimeError(started.stderr.strip() or "failed to start public check container")
         container_id = started.stdout.strip()
-        synchronized = subprocess.run(
-            (
-                "docker", "exec", container_id, "bash", "-lc",
-                "tar -C /reachpatch-source --exclude=.git --exclude=./.git "
-                "-cf - . | tar -C /testbed -xf -",
-            ),
-            capture_output=True, text=True, check=False, timeout=180,
-        )
-        if synchronized.returncode != 0:
+        try:
+            self._sync_repository_source(container_id, repository)
+        except Exception:
             self._stop_container(container_id)
-            raise RuntimeError(
-                synchronized.stderr.strip() or "failed to synchronize public source tree"
-            )
+            raise
         return container_id
 
     @staticmethod

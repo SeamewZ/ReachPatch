@@ -29,16 +29,14 @@ def test_archive_path_preserves_each_attempt(tmp_path: Path) -> None:
     assert archived.read_text(encoding="utf-8") == '{"status":"ERROR"}\n'
 
 
-def test_generation_worker_count_preserves_memory_headroom() -> None:
+def test_generation_worker_count_uses_fixed_requested_concurrency() -> None:
     assert runner._safe_generation_worker_count(4, {
-        "memavailable_mib": 64 * 1024,
-    }) == 3
+        "memavailable_mib": 1,
+    }) == 4
     assert runner._safe_generation_worker_count(10, {
-        "memavailable_mib": 40 * 1024,
-    }) == 1
-    assert runner._safe_generation_worker_count(4, {
-        "memavailable_mib": 20 * 1024,
-    }) == 0
+        "memavailable_mib": 0,
+    }) == 10
+    assert runner._safe_generation_worker_count(20, {}) == 10
 
 
 def test_method_config_hash_changes_with_dirty_production_source(

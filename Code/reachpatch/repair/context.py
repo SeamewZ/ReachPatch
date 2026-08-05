@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import re
 from dataclasses import dataclass
 from pathlib import Path
@@ -61,6 +62,8 @@ class InitialRepairPacket(SerializableRecord):
     likely_definitions: tuple[dict[str, Any], ...]
     direct_callers: tuple[dict[str, Any], ...]
     related_public_tests: tuple[dict[str, Any], ...]
+    discussion_evidence: tuple[str, ...]
+    candidate_symbols: tuple[str, ...]
     relevant_protocols: tuple[str, ...]
     expected_behavior: tuple[str, ...]
     preservation_behavior: tuple[str, ...]
@@ -80,8 +83,14 @@ class FirstPatchReadiness(SerializableRecord):
 
     @property
     def ready(self) -> bool:
+        inspection_statuses = {
+            "FOUND_AND_READ", "NOT_FOUND_AFTER_BOUNDED_SEARCH",
+            "NOT_APPLICABLE",
+        }
         return all((
             self.target_definition_read,
+            self.caller_inspection_status in inspection_statuses,
+            self.test_or_contract_inspection_status in inspection_statuses,
             self.root_cause_identified,
             self.requirements_accounted_for,
             self.preservation_risks_identified,
@@ -109,6 +118,12 @@ class RevisionPacket(SerializableRecord):
 def _requirement_checklist(state) -> RequirementChecklist:
     leaves = getattr(getattr(state, "requirement_graph", None), "leaves", {})
     values = tuple(leaves.values()) if isinstance(leaves, dict) else tuple(leaves or ())
+    issue = str(getattr(state, "runtime_config", {}).get(
+        "primary_issue", "",
+    )).strip()
+    fallback_used = bool(getattr(
+        getattr(state, "requirement_graph", None), "build_stats", {},
+    ).get("fallback_used", 0))
     changes: list[str] = []
     boundaries: list[str] = []
     exceptions: list[str] = []
@@ -117,6 +132,15 @@ def _requirement_checklist(state) -> RequirementChecklist:
     uncertainties: list[str] = []
     for leaf in values:
         formula = str(getattr(leaf, "formula", leaf)).strip()
+        fallback_leaf = (
+            fallback_used
+            and getattr(leaf, "coverage_status", "")
+            == "NEEDS_GENERATOR_INTERPRETATION"
+        )
+        if fallback_leaf:
+            uncertainties.append(formula)
+            witnesses.extend(map(str, getattr(leaf, "witnesses", ())))
+            continue
         lowered = formula.lower()
         if any(token in lowered for token in ("raise", "exception", "error")):
             exceptions.append(formula)
@@ -131,11 +155,18 @@ def _requirement_checklist(state) -> RequirementChecklist:
             "NEEDS_GENERATOR_INTERPRETATION", "UNKNOWN",
         }:
             uncertainties.append(formula)
-    issue = str(getattr(state, "runtime_config", {}).get(
-        "primary_issue", "",
-    )).strip()
     behavior_markers = re.compile(
-        r"\b(?:should|must|expected|when|instead|needs?\s+to|has\s+to)\b",
+        r"\b(?:should|must|expected|when|instead|needs?\s+to|has\s+to|"
+        r"ought\s+to|required\s+to|would\s+be\s+good|would\s+entail|"
+        r"allow|accept|support|handle|honou?r|respect|return|raise|avoid|"
+        r"prevent|fix|fails?|does(?:n['’]t|\s+not)|cannot|can['’]t|"
+        r"ignores?|unexpected|incorrect|wrong|too\s+strict|missing|clear)\b",
+        re.IGNORECASE,
+    )
+    primary_defect_markers = re.compile(
+        r"\b(?:issue|bug|regression|fails?|failure|does(?:n['’]t|\s+not)|"
+        r"cannot|can['’]t|raises?|ignores?|unexpected|incorrect|wrong|"
+        r"too\s+strict|missing|allow|accept|support)\b",
         re.IGNORECASE,
     )
     preservation_markers = re.compile(
@@ -143,7 +174,7 @@ def _requirement_checklist(state) -> RequirementChecklist:
         re.IGNORECASE,
     )
     exception_markers = re.compile(
-        r"\b(?:raise|exception|error|invalid|reject)\w*\b",
+        r"\b(?:rais|exception|error|invalid|reject)\w*\b",
         re.IGNORECASE,
     )
     boundary_markers = re.compile(
@@ -156,9 +187,25 @@ def _requirement_checklist(state) -> RequirementChecklist:
         for part in re.split(r"(?:\r?\n)+|(?<=[.!?])\s+", issue)
         if part.strip(" \t-*#")
     ))
+    title = next((
+        sentence for sentence in issue_sentences
+        if sentence.lower() not in {"description", "issue", "bug"}
+        and not re.match(r"^(?:traceback|in \[\d+\]|out\[\d+\])", sentence, re.I)
+    ), "")
     covered = "\n".join((*changes, *boundaries, *exceptions, *preservation)).lower()
+    # The issue title is the highest-density normative statement in SWE-style
+    # reports.  It often uses an imperative ("Allow ...") or a defect phrase
+    # ("... fails", "... ignores ...") rather than should/must.  Always retain
+    # it as the first change requirement so background examples cannot displace
+    # the actual task merely because they contain stronger modal words.
+    if title and title.lower() not in covered:
+        changes.insert(0, title)
+        covered = f"{title.lower()}\n{covered}"
     for sentence in issue_sentences:
-        if not behavior_markers.search(sentence):
+        if not (
+            behavior_markers.search(sentence)
+            or primary_defect_markers.search(sentence)
+        ):
             continue
         if sentence.lower() in covered:
             continue
@@ -193,10 +240,175 @@ def _requirement_checklist(state) -> RequirementChecklist:
     )
 
 
+_DISCUSSION_RELEVANCE = re.compile(
+    r"\b(?:patch|diff|fix|solution|correct|problem|cause|return|remove|delete|"
+    r"preserv|migration|formatter|setdefault|defer|only|basis|gens|caller|"
+    r"exception|protocol|instead|should|must|enough|first\s+thing|evaluat|"
+    r"instantiate|type\s*check)\w*\b",
+    re.IGNORECASE,
+)
+_DISCUSSION_DECISION = re.compile(
+    r"\b(?:the\s+problem\s+is|the\s+correct|was\s+correct|should\s+be|"
+    r"should\s+only|only\s+change|can\s+be\s+avoided|it\s+can\s+be|"
+    r"it\s+should\s+be\s+enough|instead|first\s+thing|resolved)\b",
+    re.IGNORECASE,
+)
+_DISCUSSION_SOURCE_ANCHOR = re.compile(
+    r"(?:[A-Za-z_][\w.-]*/)+[A-Za-z_][\w.-]*\.py\b|"
+    r"\b[A-Za-z_]\w*(?:\.[A-Za-z_]\w*)+(?:\(\))?|"
+    r"\b(?:__init__|__call__|__iter__|__getitem__|__r[a-z_]+__)\b"
+)
+
+
+def _ranked_discussion_evidence(
+    discussion: str,
+    *,
+    max_characters: int = 6_000,
+    max_segments: int = 8,
+) -> tuple[str, ...]:
+    """Select bounded, late-correction-aware public discussion evidence."""
+
+    raw = str(discussion or "").strip()
+    if not raw:
+        return ()
+    paragraphs = re.split(r"(?:\r?\n){2,}", raw)
+    segments: list[str] = []
+    for paragraph in paragraphs:
+        sentences = re.split(r"(?<=[.!?])\s+(?=[A-Z`'\"\u200b])", paragraph)
+        current = ""
+        for sentence in sentences:
+            cleaned = " ".join(sentence.split())
+            if not cleaned:
+                continue
+            if current and len(current) + len(cleaned) + 1 > 1_200:
+                segments.append(current)
+                current = ""
+            if len(cleaned) > 1_200:
+                if current:
+                    segments.append(current)
+                    current = ""
+                for start in range(0, len(cleaned), 1_200):
+                    segments.append(cleaned[start:start + 1_200])
+            else:
+                current = f"{current} {cleaned}".strip()
+        if current:
+            segments.append(current)
+    if not segments:
+        segments = [raw[:1_200]]
+
+    ranked: list[tuple[int, int, str]] = []
+    denominator = max(1, len(segments) - 1)
+    for index, segment in enumerate(segments):
+        relevance = len(_DISCUSSION_RELEVANCE.findall(segment))
+        decision = len(_DISCUSSION_DECISION.findall(segment))
+        source_anchors = len(_DISCUSSION_SOURCE_ANCHOR.findall(segment))
+        if not (relevance or decision or source_anchors):
+            continue
+        recency = round(3 * index / denominator)
+        speculative_penalty = int(
+            "?" in segment
+            and not decision
+            and not source_anchors
+        )
+        score = (
+            2 * relevance + 5 * decision + 6 * source_anchors
+            + recency - 2 * speculative_penalty
+        )
+        ranked.append((score, index, segment))
+    if not ranked:
+        ranked = [(0, len(segments) - 1, segments[-1])]
+
+    selected: list[tuple[int, str]] = []
+    remaining = max_characters
+    seen: set[str] = set()
+    for _score, index, segment in sorted(
+        ranked, key=lambda item: (-item[0], -item[1]),
+    ):
+        normalized = re.sub(r"\W+", " ", segment).strip().lower()
+        if not normalized or normalized in seen or remaining <= 0:
+            continue
+        clipped = segment[:remaining]
+        selected.append((index, clipped))
+        seen.add(normalized)
+        remaining -= len(clipped)
+        if len(selected) >= max_segments:
+            break
+    # Keep evidence in relevance order.  The generator and mandatory staged
+    # review consume only a bounded prefix, so re-sorting chronologically would
+    # reintroduce superseded early speculation ahead of later corrections.
+    return tuple(segment for _index, segment in selected)
+
+
 def build_initial_repair_packet(state, context=None) -> InitialRepairPacket:
     context = context or build_repair_context(state, mode="INITIAL")
     checklist = _requirement_checklist(state)
-    snippets = tuple(context.relevant_source_snippets[:8])
+    all_snippets = tuple(context.relevant_source_snippets)
+    discussion = str(getattr(context, "public_discussion", "") or "")
+    discussion_evidence = _ranked_discussion_evidence(discussion)
+
+    decision_source_anchors: tuple[str, ...] = tuple(dict.fromkeys(
+        match.replace("\\", "/").lstrip("./")
+        for segment in discussion_evidence[:5]
+        if _DISCUSSION_DECISION.search(segment)
+        for match in _DISCUSSION_SOURCE_ANCHOR.findall(segment)
+        if str(match).lower().endswith(".py")
+    ))
+
+    def discussion_anchor_score(item: dict[str, Any]) -> int:
+        relative = str(item.get(
+            "relative_path", item.get("path", ""),
+        )).replace("\\", "/")
+        symbol = str(item.get("symbol", item.get("qualified_name", "")))
+        score = 0
+        for anchor in decision_source_anchors:
+            if relative == anchor or relative.endswith("/" + anchor) or relative.endswith(anchor):
+                score += 12
+        for segment in discussion_evidence[:5]:
+            if relative and relative in segment:
+                score += 6
+            leaf = symbol.rsplit(".", 1)[-1]
+            if leaf and re.search(rf"\b{re.escape(leaf)}\b", segment):
+                score += 1
+        return score
+
+    # A later public correction which names the causal source file outranks a
+    # same-named definition found first by lexical search.  Stable sorting keeps
+    # the repository projection order when no such evidence exists.
+    all_snippets = tuple(
+        item for _index, item in sorted(
+            enumerate(all_snippets),
+            key=lambda pair: (-discussion_anchor_score(pair[1]), pair[0]),
+        )
+    )
+
+    def bounded_snippet(
+        item: dict[str, Any], *, max_lines: int, max_characters: int,
+    ) -> dict[str, Any]:
+        """Keep an exact, line-addressable prefix within the prompt budget."""
+
+        copied = dict(item)
+        content = str(copied.get("content", ""))
+        lines = content.splitlines()[:max_lines]
+        while lines and len("\n".join(lines)) > max_characters:
+            lines.pop()
+        clipped = "\n".join(lines)
+        start = int(copied.get(
+            "snippet_start_line", copied.get("start_line", 1),
+        ))
+        copied["content"] = clipped
+        copied["start_line"] = start
+        copied["snippet_start_line"] = start
+        copied["end_line"] = start + max(0, len(lines) - 1)
+        copied["snippet_end_line"] = copied["end_line"]
+        if clipped != content:
+            copied["truncated_for_initial_packet"] = True
+        return copied
+
+    snippets = tuple(
+        bounded_snippet(item, max_lines=100, max_characters=7_000)
+        for item in all_snippets
+        if "test" not in str(item.get("relative_path", item.get("path", ""))).lower()
+    )[:5]
     program = getattr(state, "program_graph", None)
     checkpoint = getattr(state, "checkpoint", None)
     repository_index = getattr(state, "repository_index", None)
@@ -210,15 +422,41 @@ def build_initial_repair_packet(state, context=None) -> InitialRepairPacket:
     leaf_values = tuple(leaves.values()) if isinstance(leaves, dict) else tuple(
         leaves or ()
     )
+    seed_terms: list[str] = []
+
+    def add_seed(value: Any) -> None:
+        leaf = str(value or "").rsplit(".", 1)[-1]
+        if (
+            len(leaf) >= 3
+            and re.fullmatch(r"[A-Za-z_]\w*", leaf)
+            and leaf not in seed_terms
+        ):
+            seed_terms.append(leaf)
+
     for leaf in leaf_values:
         for symbol in getattr(leaf, "entrypoint_hypotheses", ()):
+            add_seed(symbol)
             resolver = getattr(program, "resolve_symbol", None)
             if callable(resolver):
                 seed_ids.update(map(str, resolver(str(symbol))))
     for snippet in snippets:
+        add_seed(snippet.get("symbol", snippet.get("qualified_name", "")))
         relative = str(snippet.get("relative_path", snippet.get("path", "")))
+        add_seed(Path(relative).stem)
         for node_id in getattr(program, "file_index", {}).get(relative, ()):
             seed_ids.add(str(node_id))
+    for match in re.finditer(
+        r"\b[A-Za-z_]\w*(?:\.[A-Za-z_]\w*)*\b", context.issue,
+    ):
+        value = match.group(0)
+        if (
+            "." in value
+            or value[:1].isupper()
+            or context.issue[match.end():].lstrip().startswith("(")
+        ):
+            add_seed(value)
+        if len(seed_terms) >= 24:
+            break
     caller_ids: tuple[str, ...] = ()
     if seed_ids and hasattr(program, "incoming"):
         from reachpatch.binding_graph.active import recover_direct_callers
@@ -238,20 +476,79 @@ def build_initial_repair_packet(state, context=None) -> InitialRepairPacket:
         end = max(line, int(node.attributes.get("end_line", line)))
         start = max(1, line - 3)
         stop = min(len(lines), end + 5)
-        caller_snippets.append({
+        caller_snippets.append(bounded_snippet({
             "relative_path": relative,
             "start_line": start,
             "end_line": stop,
             "symbol": str(node.attributes.get("qualified_name", node.label)),
             "reason": "direct caller or value consumer",
             "content": "\n".join(lines[start - 1:stop]),
-        })
-        if len(caller_snippets) >= 4:
+        }, max_lines=80, max_characters=5_000))
+        if len(caller_snippets) >= 3:
             break
+    # A bounded lexical consumer fallback covers dynamic calls and protocol
+    # dispatches that the lightweight graph cannot represent precisely. The
+    # repository token index makes this an inverted lookup, not a repository
+    # scan.
+    definition_paths = {
+        str(item.get("relative_path", item.get("path", "")))
+        for item in snippets
+    }
+    modules_by_path = {
+        item.relative_path: item
+        for item in getattr(repository_index, "modules", {}).values()
+    }
+    caller_candidates: dict[str, int] = {}
+    for seed in seed_terms:
+        for relative in getattr(repository_index, "token_index", {}).get(
+            seed.lower(), (),
+        ):
+            module = modules_by_path.get(relative)
+            if (
+                relative in definition_paths
+                or getattr(module, "is_test", False)
+            ):
+                continue
+            caller_candidates[relative] = caller_candidates.get(relative, 0) + 1
+    existing_caller_paths = {
+        str(item.get("relative_path", item.get("path", "")))
+        for item in caller_snippets
+    }
+    for relative, _score in sorted(
+        caller_candidates.items(), key=lambda item: (-item[1], item[0]),
+    ):
+        if len(caller_snippets) >= 3 or relative in existing_caller_paths:
+            continue
+        path = repository / relative
+        if not path.is_file():
+            continue
+        lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
+        match_line = next((
+            index for index, line in enumerate(lines, 1)
+            if any(
+                re.search(rf"\b{re.escape(seed)}\b", line)
+                and not re.match(r"\s*(?:def|class)\s+", line)
+                for seed in seed_terms
+            )
+        ), None)
+        if match_line is None:
+            continue
+        start = max(1, match_line - 15)
+        stop = min(len(lines), match_line + 20)
+        caller_snippets.append(bounded_snippet({
+            "relative_path": relative,
+            "start_line": start,
+            "end_line": stop,
+            "symbol": "<lexical-consumer>",
+            "reason": "bounded lexical caller or value consumer",
+            "content": "\n".join(lines[start - 1:stop]),
+        }, max_lines=80, max_characters=5_000))
+        existing_caller_paths.add(relative)
     tests: list[dict[str, Any]] = [
-        item for item in snippets
+        bounded_snippet(item, max_lines=80, max_characters=5_000)
+        for item in all_snippets
         if "test" in str(item.get("relative_path", item.get("path", ""))).lower()
-    ]
+    ][:3]
     for relative in getattr(state, "runtime_config", {}).get(
         "visible_test_paths", (),
     ):
@@ -261,16 +558,71 @@ def build_initial_repair_packet(state, context=None) -> InitialRepairPacket:
             for item in tests
         ):
             continue
-        lines = path.read_text(encoding="utf-8", errors="replace").splitlines()[:200]
-        tests.append({
+        lines = path.read_text(encoding="utf-8", errors="replace").splitlines()[:80]
+        tests.append(bounded_snippet({
             "relative_path": str(relative),
             "start_line": 1,
             "end_line": len(lines),
             "symbol": "<public-test>",
             "reason": "public test supplied by the instance",
             "content": "\n".join(lines),
-        })
-        if len(tests) >= 4:
+        }, max_lines=80, max_characters=5_000))
+        if len(tests) >= 3:
+            break
+    existing_test_paths = {
+        str(item.get("relative_path", item.get("path", "")))
+        for item in tests
+    }
+    test_candidates: dict[str, int] = {}
+    test_references = getattr(repository_index, "test_references", {})
+    for relative, references in test_references.items():
+        lowered_references = {str(item).lower() for item in references}
+        score = sum(seed.lower() in lowered_references for seed in seed_terms)
+        path_lower = relative.lower()
+        score += sum(seed.lower() in path_lower for seed in seed_terms)
+        if score:
+            test_candidates[relative] = score
+    for relative, _score in sorted(
+        test_candidates.items(), key=lambda item: (-item[1], item[0]),
+    ):
+        if len(tests) >= 3 or relative in existing_test_paths:
+            continue
+        path = repository / relative
+        if not path.is_file():
+            continue
+        lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
+        match_line = next((
+            index for index, line in enumerate(lines, 1)
+            if any(re.search(rf"\b{re.escape(seed)}\b", line) for seed in seed_terms)
+        ), 1)
+        start = max(1, match_line - 20)
+        stop = min(len(lines), match_line + 40)
+        tests.append(bounded_snippet({
+            "relative_path": relative,
+            "start_line": start,
+            "end_line": stop,
+            "symbol": "<related-public-test>",
+            "reason": "repository test references a target symbol",
+            "content": "\n".join(lines[start - 1:stop]),
+        }, max_lines=80, max_characters=5_000))
+        existing_test_paths.add(relative)
+    # Keep only bounded, implementation-relevant discussion evidence.  Issue
+    # comments often contain a proposed patch or a corrected edge condition,
+    # but they are hypotheses: the generator must verify them against source
+    # and the complete requirement checklist.
+    candidate_symbols: list[str] = []
+    symbol_text = "\n".join((context.issue, *discussion_evidence))
+    for match in re.finditer(r"\b[A-Za-z_]\w*(?:\.[A-Za-z_]\w*)*\b", symbol_text):
+        value = match.group(0)
+        if (
+            "." in value
+            or value[:1].isupper()
+            or value.startswith("id_")
+            or value.endswith("_label")
+            or symbol_text[match.end():].lstrip().startswith("(")
+        ) and value not in candidate_symbols:
+            candidate_symbols.append(value)
+        if len(candidate_symbols) >= 32:
             break
     return InitialRepairPacket(
         issue_text=context.issue,
@@ -278,6 +630,8 @@ def build_initial_repair_packet(state, context=None) -> InitialRepairPacket:
         likely_definitions=snippets,
         direct_callers=tuple(caller_snippets),
         related_public_tests=tuple(tests),
+        discussion_evidence=discussion_evidence,
+        candidate_symbols=tuple(candidate_symbols),
         relevant_protocols=tuple(
             sorted({
                 protocol_id
@@ -296,60 +650,155 @@ def build_initial_repair_packet(state, context=None) -> InitialRepairPacket:
 
 
 def assess_first_patch_readiness(state, conversation, revision=None) -> FirstPatchReadiness:
-    names = []
-    for message in getattr(conversation, "messages", ()):
-        if message.get("role") == "tool":
-            names.append(str(message.get("name", message.get("tool", "tool"))))
-    inspected = bool(
-        getattr(conversation, "inspected_files", ())
-        or getattr(conversation, "inspected_symbols", ())
+    messages = tuple(getattr(conversation, "messages", ()))
+    tool_events: list[tuple[int, str, dict[str, Any]]] = []
+    system_preview_indices: list[int] = []
+    for index, message in enumerate(messages):
+        if message.get("role") == "system" and "SYSTEM_STAGED_DIFF_PREVIEW" in str(
+            message.get("content", "")
+        ):
+            system_preview_indices.append(index)
+        if message.get("role") != "tool":
+            continue
+        name = str(message.get("name", message.get("tool", "tool")))
+        try:
+            payload = json.loads(str(message.get("content", "{}")))
+        except (json.JSONDecodeError, TypeError, ValueError):
+            payload = {}
+        if not isinstance(payload, dict):
+            payload = {}
+        tool_events.append((index, name, payload))
+
+    packet_evidence = dict(getattr(state, "runtime_metrics", {}).get(
+        "initial_packet_evidence", {},
+    ))
+    definition_paths = set(map(str, packet_evidence.get(
+        "definition_paths", (),
+    )))
+    caller_paths = set(map(str, packet_evidence.get("caller_paths", ())))
+    test_paths = set(map(str, packet_evidence.get("test_paths", ())))
+    successful_reads = {
+        str(payload.get("path", ""))
+        for _index, name, payload in tool_events
+        if name == "read_file" and payload.get("content") is not None
+    }
+    successful_symbol_reads = any(
+        name == "inspect_symbol" and payload.get("locations")
+        for _index, name, payload in tool_events
     )
-    apply_seen = "apply_edits" in names and bool(getattr(revision, "edits", ()))
-    finish_seen = "finish_revision" in names
-    localization_seen = inspected or apply_seen or any(
-        name in {"search_code", "find_callers", "find_references", "inspect_symbol"}
-        for name in names
+    def is_test_source(path: str) -> bool:
+        parts = tuple(part.lower() for part in Path(path).parts)
+        name = Path(path).name.lower()
+        return bool(
+            {"test", "tests", "testing"} & set(parts)
+            or name.startswith("test_")
+            or name.endswith("_test.py")
+        )
+
+    source_reads = {
+        path for path in successful_reads if path and not is_test_source(path)
+    }
+    target_definition_read = bool(
+        definition_paths or successful_symbol_reads
+        or source_reads
     )
-    check_seen = bool(
+
+    caller_tool_events = [
+        payload for _index, name, payload in tool_events
+        if name == "find_callers" and "error" not in payload
+    ]
+    caller_matches = {
+        str(item.get("path", ""))
+        for payload in caller_tool_events
+        for item in payload.get("matches", ())
+        if isinstance(item, dict)
+    }
+    if caller_paths or caller_matches & successful_reads:
+        caller_status = "FOUND_AND_READ"
+    elif caller_matches:
+        caller_status = "FOUND_NOT_READ"
+    elif packet_evidence.get("caller_search_completed") or caller_tool_events:
+        caller_status = "NOT_FOUND_AFTER_BOUNDED_SEARCH"
+    else:
+        caller_status = "NOT_SEARCHED"
+
+    public_check_seen = bool(
         getattr(revision, "requested_public_checks", ())
-        or any("check" in name for name in names)
+        or any(
+            name == "run_public_check" and "error" not in payload
+            for _index, name, payload in tool_events
+        )
     )
-    # apply_edits mechanically verifies exact source and records the complete
-    # staged edit set. finish_revision, when present, is additional review
-    # evidence but is not required because a final-turn edit is valid.
-    final_review = apply_seen
+    if test_paths or test_paths & successful_reads or public_check_seen:
+        test_status = "FOUND_AND_READ"
+    elif packet_evidence.get("test_search_completed"):
+        test_status = "NOT_FOUND_AFTER_BOUNDED_SEARCH"
+    else:
+        test_status = "NOT_SEARCHED"
+
+    edit_indices = [
+        index for index, name, payload in tool_events
+        if name in {
+            "apply_edits", "replace_staged_edits", "apply_statement_change",
+        } and payload.get("accepted", True) and "error" not in payload
+    ]
+    preview_indices = [
+        index for index, name, payload in tool_events
+        if name == "show_current_diff"
+        and payload.get("review_is_current", True)
+        and "error" not in payload
+    ] + system_preview_indices
+    finish_indices = [
+        index for index, name, payload in tool_events
+        if name == "finish_revision" and payload.get("finished") is True
+    ]
+    last_edit = max(edit_indices, default=-1)
+    last_preview = max(preview_indices, default=-1)
+    last_finish = max(finish_indices, default=-1)
+    final_review = bool(
+        getattr(revision, "edits", ())
+        and last_edit >= 0
+        and last_preview > last_edit
+        and last_finish > last_preview
+    )
     checklist = _requirement_checklist(state)
-    preservation_available = bool(
-        checklist.preservation_requirements
-        or getattr(getattr(state, "target_recovery", None), "preservation_checks", ())
-        or not getattr(getattr(state, "target_recovery", None), "targets", ())
+    summary = str(getattr(revision, "summary", "") or "").strip()
+    structured_summary = bool(summary)
+    supporting_ids = list(map(str, packet_evidence.get("evidence_ids", ())))
+    supporting_ids.extend(
+        stable_id("generator-tool-event", index, name, payload)
+        for index, name, payload in tool_events
+        if "error" not in payload
+    )
+    supporting_ids.extend(
+        stable_id("generator-system-preview", index)
+        for index in system_preview_indices
     )
     return FirstPatchReadiness(
-        target_definition_read=inspected or apply_seen,
-        caller_inspection_status=(
-            "FOUND_AND_READ" if inspected else "NOT_FOUND_AFTER_BOUNDED_SEARCH"
+        target_definition_read=target_definition_read,
+        caller_inspection_status=caller_status,
+        test_or_contract_inspection_status=test_status,
+        root_cause_identified=bool(
+            target_definition_read and structured_summary and final_review
         ),
-        test_or_contract_inspection_status=(
-            "FOUND_AND_READ" if check_seen else "NOT_FOUND_AFTER_BOUNDED_SEARCH"
-        ),
-        root_cause_identified=apply_seen and (
-            localization_seen
-            or (finish_seen and bool(getattr(revision, "summary", "").strip()))
-        ),
-        requirements_accounted_for=apply_seen and bool(
+        requirements_accounted_for=final_review and bool(
             checklist.change_requirements
             or checklist.boundary_requirements
             or checklist.exception_requirements
             or checklist.uncertainties
         ),
-        preservation_risks_identified=apply_seen and (
-            preservation_available or localization_seen or finish_seen
+        preservation_risks_identified=final_review and (
+            caller_status in {
+                "FOUND_AND_READ", "NOT_FOUND_AFTER_BOUNDED_SEARCH",
+                "NOT_APPLICABLE",
+            }
+            and test_status in {
+                "FOUND_AND_READ", "NOT_FOUND_AFTER_BOUNDED_SEARCH",
+                "NOT_APPLICABLE",
+            }
         ),
         final_diff_reviewed=final_review,
-        supporting_tool_event_ids=tuple(
-            stable_id("generator-tool-event", index, name)
-            for index, name in enumerate(names)
-        ),
+        supporting_tool_event_ids=tuple(dict.fromkeys(supporting_ids)),
     )
 
 
@@ -501,6 +950,29 @@ def _issue_context_snippets(state, issue: str, active_files: list[str]) -> list[
     if index is None or not repository.is_dir():
         return []
     raw_tokens = re.findall(r"[A-Za-z_][A-Za-z0-9_]{2,}", issue)
+    explicit_path_scores: dict[str, int] = {}
+    for match in re.finditer(
+        r"(?:[A-Za-z_][\w.-]*/)+[A-Za-z_][\w.-]*\.py\b", issue,
+    ):
+        anchor = match.group(0).lstrip("/")
+        window = issue[max(0, match.start() - 240):match.end() + 240]
+        score = 18 + 10 * int(bool(_DISCUSSION_DECISION.search(window)))
+        for relative in index.source_hashes:
+            normalized = relative.replace("\\", "/")
+            if normalized.endswith(anchor) or anchor.endswith(normalized):
+                explicit_path_scores[normalized] = max(
+                    explicit_path_scores.get(normalized, 0), score,
+                )
+    original_tokens: dict[str, set[str]] = {}
+    for token in raw_tokens:
+        original_tokens.setdefault(token.lower(), set()).add(token)
+    # CamelCase identifiers in an issue usually name the owning class.  They
+    # must outrank a widely repeated method name in a sibling class or wrapper
+    # in the same file.
+    named_owner_tokens = {
+        token.lower() for token in raw_tokens
+        if any(character.isupper() for character in token[1:])
+    }
     syntax_tokens = {
         token.lower()
         for match in re.findall(
@@ -543,7 +1015,10 @@ def _issue_context_snippets(state, issue: str, active_files: list[str]) -> list[
         )
         structural_bonus = (
             8 if "_" in token.strip("_")
-            else 4 if any(character.isupper() for character in token[1:])
+            else 4 if any(
+                any(character.isupper() for character in original[1:])
+                for original in original_tokens.get(token, ())
+            )
             else 0
         )
         token_scores[token] = (
@@ -563,6 +1038,7 @@ def _issue_context_snippets(state, issue: str, active_files: list[str]) -> list[
         path_parts = {part.lower() for part in Path(relative).parts}
         if path_parts & {"examples", "example", "benchmarks", "docs", "doc", "tests", "test"}:
             score -= 4
+        score += explicit_path_scores.get(relative, 0)
         implementation_components = {
             component for token in lowered
             for component in token.split("_") if len(component) >= 5
@@ -581,7 +1057,11 @@ def _issue_context_snippets(state, issue: str, active_files: list[str]) -> list[
         score = 0
         for token in lowered:
             if token == name_lower or token == suffix:
-                score = max(score, 12 + token_scores[token])
+                score = max(
+                    score,
+                    12 + token_scores[token]
+                    + (20 if token in named_owner_tokens else 0),
+                )
             elif len(token) >= 5 and token in name_lower:
                 score = max(score, 7 + token_scores[token])
         if score:
@@ -821,7 +1301,15 @@ def build_repair_context(
     )[:20]
     source_snippets = []
     source_root = __import__("pathlib").Path(state.checkpoint.snapshot_tree)
-    source_snippets.extend(_issue_context_snippets(state, _issue_text(state), slice_files))
+    localization_text = "\n".join((
+        _issue_text(state),
+        *_ranked_discussion_evidence(
+            _public_discussion(state), max_characters=3_000, max_segments=4,
+        ),
+    ))
+    source_snippets.extend(_issue_context_snippets(
+        state, localization_text, slice_files,
+    ))
     candidate_nodes = tuple(dict.fromkeys(
         node_id for causal in getattr(state, "causal_slices", ())
         for node_id in causal.candidate_cut_node_ids

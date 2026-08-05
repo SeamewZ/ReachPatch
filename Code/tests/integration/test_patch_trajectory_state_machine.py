@@ -3,6 +3,8 @@ import shutil
 import sys
 from pathlib import Path
 
+import pytest
+
 from reachpatch.models.core import Instance
 from reachpatch.program_graph.slice import ContextRequest
 from reachpatch.reach_avoid.controller import ReachPatchConfig, ReachPatchController
@@ -100,7 +102,7 @@ def test_no_trusted_target_outputs_first_patch_without_revision(tmp_path):
     transport = _Edits((
         _edit(
             "    return normalize(value)",
-            "    return normalize(value)  # issue behavior remains unverified",
+            "    return [] if isinstance(value, Box) else normalize(value)",
         ),
     ))
     state, certificate = _run(
@@ -111,16 +113,249 @@ def test_no_trusted_target_outputs_first_patch_without_revision(tmp_path):
     assert state.patch_trajectory.first_patch.patch_hash == (
         state.patch_trajectory.best_evidence_patch.patch_hash
     )
-    assert "issue behavior remains unverified" in (
+    assert "return [] if isinstance(value, Box)" in (
         state.checkpoint.patch.canonical_diff
     )
+
+
+def test_incomplete_readiness_keeps_accepted_first_patch_after_recovery_error(
+    tmp_path,
+):
+    """A later stale-source recovery attempt must not erase staged first edits."""
+
+    class IncompleteReadinessAgent:
+        max_tool_turns = 0
+        max_wall_time_seconds = 0.0
+        max_completion_tokens = 0
+
+        def generate_initial_patch(self, state, conversation, tools):
+            edit = ProposedEdit(
+                relative_path="pkg/api.py", start_line=40, end_line=40,
+                expected_source="    return normalize(value)",
+                replacement="    return [] if isinstance(value, Box) else normalize(value)",
+            )
+            tools.apply_edits((edit,))
+            # Simulate a failed structural recovery after the edit was accepted.
+            # RepairToolExecutor is transactional, so the original edit remains
+            # staged when the stale replacement is rejected.
+            with pytest.raises(ValueError, match="source"):
+                tools.replace_staged_edits((ProposedEdit(
+                    relative_path="pkg/api.py", start_line=40, end_line=40,
+                    expected_source="    stale source anchor",
+                    replacement="    return []",
+                ),))
+            return GeneratorRevision(
+                revision_id="incomplete-readiness-first-patch",
+                mechanism="initial_issue_repair", edits=(edit,),
+                summary="staged reachable repair before recovery failed",
+                context_requests=(), requested_public_checks=(), tool_turns=1,
+                status="PROPOSED",
+            )
+
+        def generate_target_reproduction(self, **kwargs):
+            return None
+
+    repository = tmp_path / "repo"
+    shutil.copytree(FIXTURE, repository)
+    agent = IncompleteReadinessAgent()
+    controller = ReachPatchController(
+        config=ReachPatchConfig(
+            max_submitted_revisions=2,
+            max_total_revisions=2,
+            target_recovery_wall_time_s=1,
+        ),
+        generator_agent=agent,
+        implementation_root=tmp_path,
+    )
+    state, certificate = controller.run(
+        Instance(
+            "incomplete-readiness-fixture", str(repository), "base",
+            "For every Box value, pkg.api.public(value) must return an empty list.",
+        ),
+        run_root=tmp_path / "run-incomplete-readiness",
+    )
+
+    assert state.runtime_metrics["first_patch_readiness_blocked"] is True
+    assert state.runtime_metrics["first_patch_readiness_preserved"] is True
+    assert state.patch_trajectory is not None
+    assert state.patch_trajectory.first_patch.patch.canonical_diff
+    assert state.checkpoint.patch.canonical_diff
+    assert certificate.status == "EVIDENCE_LIMITED_COMPLETE"
+
+
+def test_review_rejected_stage_is_replaced_before_first_checkpoint(tmp_path):
+    """Quality-rejected edits stay transactional until a reviewed replacement."""
+
+    class ReviewRejectedThenReplacementAgent:
+        max_tool_turns = 0
+        max_wall_time_seconds = 0.0
+        max_completion_tokens = 0
+
+        def __init__(self):
+            self.first_tools = None
+            self.recovery_calls = 0
+
+        def generate_initial_patch(self, state, conversation, tools):
+            self.first_tools = tools
+            bad = ProposedEdit(
+                relative_path="pkg/api.py", start_line=40, end_line=40,
+                expected_source="    return normalize(value)",
+                replacement="    return [1]",
+            )
+            tools.apply_edits((bad,))
+            tools.show_current_diff()
+            return GeneratorRevision(
+                revision_id="quality-rejected-stage",
+                mechanism="surface_constant", edits=(bad,),
+                summary="the staged patch does not cover the issue",
+                context_requests=(), requested_public_checks=(), tool_turns=1,
+                status="STAGED_PATCH_REVIEW_REJECTED",
+            )
+
+        def recover_initial_patch(self, state, conversation, tools):
+            self.recovery_calls += 1
+            assert tools is self.first_tools
+            assert tools.staged_edits == []
+            assert "return [1]" in tools.last_rejected_staged_diff
+            corrected = ProposedEdit(
+                relative_path="pkg/api.py", start_line=40, end_line=40,
+                expected_source="    return normalize(value)",
+                replacement=(
+                    "    return [] if isinstance(value, Box) else normalize(value)"
+                ),
+            )
+            tools.replace_staged_edits((corrected,))
+            tools.show_current_diff()
+            tools.finish_revision("reviewed complete causal replacement")
+            state.runtime_metrics["first_patch_readiness"] = {
+                "target_definition_read": True,
+                "root_cause_identified": True,
+                "requirements_accounted_for": True,
+                "preservation_risks_identified": True,
+                "final_diff_reviewed": True,
+            }
+            return GeneratorRevision(
+                revision_id="reviewed-replacement",
+                mechanism="initial_issue_repair", edits=(corrected,),
+                summary="reviewed complete causal replacement",
+                context_requests=(), requested_public_checks=(), tool_turns=1,
+                status="PROPOSED",
+            )
+
+        def generate_target_reproduction(self, **kwargs):
+            return None
+
+    repository = tmp_path / "repo"
+    shutil.copytree(FIXTURE, repository)
+    agent = ReviewRejectedThenReplacementAgent()
+    controller = ReachPatchController(
+        config=ReachPatchConfig(
+            max_submitted_revisions=1,
+            max_total_revisions=1,
+            target_recovery_wall_time_s=1,
+        ),
+        generator_agent=agent,
+        implementation_root=tmp_path,
+    )
+    state, certificate = controller.run(
+        Instance(
+            "review-replacement-fixture", str(repository), "base",
+            "For every Box value, pkg.api.public(value) must return an empty list.",
+        ),
+        run_root=tmp_path / "run-review-replacement",
+    )
+
+    assert agent.recovery_calls == 1
+    assert state.runtime_metrics[
+        "initial_staged_patch_review_rejection_count"
+    ] == 1
+    assert state.runtime_metrics[
+        "initial_review_replacement_continuation_count"
+    ] == 1
+    assert state.runtime_metrics[
+        "discarded_quality_rejected_stage_count"
+    ] == 1
+    assert state.patch_trajectory is not None
+    first_diff = state.patch_trajectory.first_patch.patch.canonical_diff
+    assert "return [] if isinstance(value, Box)" in first_diff
+    assert "return [1]" not in first_diff
+    assert certificate.status == "EVIDENCE_LIMITED_COMPLETE"
+
+
+def test_review_rejected_stage_never_becomes_first_checkpoint(tmp_path):
+    class AlwaysRejectingAgent:
+        max_tool_turns = 0
+        max_wall_time_seconds = 0.0
+        max_completion_tokens = 0
+
+        def __init__(self):
+            self.tools = None
+            self.calls = 0
+
+        def generate_initial_patch(self, state, conversation, tools):
+            self.tools = tools
+            bad = ProposedEdit(
+                relative_path="pkg/api.py", start_line=40, end_line=40,
+                expected_source="    return normalize(value)",
+                replacement="    return [1]",
+            )
+            tools.apply_edits((bad,))
+            tools.show_current_diff()
+            self.calls += 1
+            return GeneratorRevision(
+                revision_id="rejected-1", mechanism="surface_constant",
+                edits=(bad,), summary="incomplete patch", context_requests=(),
+                requested_public_checks=(), tool_turns=1,
+                status="STAGED_PATCH_REVIEW_REJECTED",
+            )
+
+        def recover_initial_patch(self, state, conversation, tools):
+            assert tools is self.tools
+            self.calls += 1
+            return GeneratorRevision(
+                revision_id=f"rejected-{self.calls}",
+                mechanism="surface_constant", edits=tuple(tools.staged_edits),
+                summary="still incomplete", context_requests=(),
+                requested_public_checks=(), tool_turns=1,
+                status="STAGED_PATCH_REVIEW_REJECTED",
+            )
+
+        def generate_target_reproduction(self, **kwargs):
+            return None
+
+    repository = tmp_path / "repo"
+    shutil.copytree(FIXTURE, repository)
+    agent = AlwaysRejectingAgent()
+    controller = ReachPatchController(
+        config=ReachPatchConfig(
+            max_submitted_revisions=1,
+            max_total_revisions=1,
+            target_recovery_wall_time_s=1,
+        ),
+        generator_agent=agent,
+        implementation_root=tmp_path,
+    )
+    state, certificate = controller.run(
+        Instance(
+            "review-exhausted-fixture", str(repository), "base",
+            "For every Box value, pkg.api.public(value) must return an empty list.",
+        ),
+        run_root=tmp_path / "run-review-exhausted",
+    )
+
+    assert agent.calls == 5
+    assert state.runtime_metrics["initial_staged_patch_review_exhausted"] is True
+    assert state.patch_trajectory is None
+    assert state.checkpoint.patch.canonical_diff == ""
+    assert state.transition_index == 0
+    assert certificate.status == "GENERATOR_NONPROGRESS"
 
 
 def test_initial_mechanical_rejection_preserves_first_patch(tmp_path):
     transport = _Edits((
         _edit(
             "REGISTRY = {}",
-            "from pkg.api import public\n\nREGISTRY = {}",
+            "from pkg.api import public\n\nREGISTRY = {'loaded': True}",
             start=1,
             end=1,
         ),
@@ -139,8 +374,37 @@ def test_initial_mechanical_rejection_preserves_first_patch(tmp_path):
     assert certificate.status == "EVIDENCE_LIMITED_COMPLETE"
 
 
+def test_structural_failure_is_corrected_before_first_checkpoint(tmp_path):
+    transport = _Edits((
+        _edit(
+            "REGISTRY = {}",
+            "class Box:\n    pass\n\nREGISTRY = {}",
+            start=1,
+            end=1,
+        ),
+            _edit(
+                "REGISTRY = {}",
+                "REGISTRY: dict = {}",
+                start=1,
+                end=1,
+        ),
+    ))
+    state, certificate = _run(
+        tmp_path, transport, revisions=2, target=False,
+    )
+
+    assert state.runtime_metrics["confirmed_revision_count"] == 0
+    assert "REGISTRY: dict = {}" in state.checkpoint.patch.canonical_diff
+    assert "class Box:\n+    pass" not in state.checkpoint.patch.canonical_diff
+    assert state.patch_trajectory.best_evidence_patch.patch_hash == (
+        state.patch_trajectory.first_patch.patch_hash
+    )
+    assert certificate.status == "EVIDENCE_LIMITED_COMPLETE"
+
+
+@pytest.mark.parametrize("context_expanded", (True, False))
 def test_initial_context_request_continues_same_first_patch_process(
-    tmp_path, monkeypatch,
+    tmp_path, monkeypatch, context_expanded,
 ):
     class ContextThenEditAgent:
         def __init__(self):
@@ -201,21 +465,188 @@ def test_initial_context_request_continues_same_first_patch_process(
         generator_agent=agent,
         implementation_root=tmp_path,
     )
-    monkeypatch.setattr(controller, "_expand_generator_context", lambda *_: True)
+    monkeypatch.setattr(
+        controller, "_expand_generator_context", lambda *_: context_expanded,
+    )
 
     state, certificate = controller.run(
         Instance(
             "initial-context-fixture", str(repository), "base",
             "pkg.api.public(value) must return an empty list for every Box value.",
         ),
-        run_root=tmp_path / "run-context",
+        run_root=tmp_path / f"run-context-{context_expanded}",
     )
 
     assert agent.calls == 2
     assert agent.max_revisions == 3
-    assert state.runtime_metrics["initial_context_continuation_count"] == 1
+    if context_expanded:
+        assert state.runtime_metrics["initial_context_continuation_count"] == 1
+    else:
+        assert state.runtime_metrics["initial_context_expansion_redundant"] is True
     assert state.runtime_metrics["confirmed_revision_count"] == 0
     assert state.transition_index == 1
+    assert state.patch_trajectory.first_patch.patch.canonical_diff
+    assert certificate.status == "EVIDENCE_LIMITED_COMPLETE"
+
+
+def test_initial_nonprogress_uses_bounded_root_recovery_before_checkpoint(
+    tmp_path,
+):
+    class NonprogressThenEditAgent:
+        def __init__(self):
+            self.calls = 0
+            self.recovery_calls = 0
+            self.turn_budgets = []
+            self.max_revisions = 0
+            self.max_tool_turns = 0
+            self.max_wall_time_seconds = 0.0
+            self.max_completion_tokens = 0
+
+        def generate_initial_patch(self, state, conversation, tools):
+            self.calls += 1
+            self.turn_budgets.append(self.max_tool_turns)
+            if self.calls == 1:
+                return GeneratorRevision(
+                    revision_id="nonprogress", mechanism="initial_issue_repair",
+                    edits=(), summary="no reachable behavior change",
+                    context_requests=(), requested_public_checks=(), tool_turns=14,
+                    status="GENERATOR_BROWSE_LOOP",
+                )
+            edit = ProposedEdit(
+                relative_path="pkg/api.py", start_line=40, end_line=40,
+                expected_source="    return normalize(value)",
+                replacement=(
+                    "    return [] if isinstance(value, Box) else normalize(value)"
+                ),
+            )
+            tools.apply_edits((edit,))
+            state.runtime_metrics["first_patch_readiness"] = {
+                "target_definition_read": True,
+                "root_cause_identified": True,
+                "requirements_accounted_for": True,
+                "preservation_risks_identified": True,
+                "final_diff_reviewed": True,
+            }
+            return GeneratorRevision(
+                revision_id="recovered-first-patch",
+                mechanism="initial_issue_repair", edits=(edit,),
+                summary="reviewed recovered complete first patch",
+                context_requests=(), requested_public_checks=(), tool_turns=4,
+                status="PROPOSED",
+            )
+
+        def recover_initial_patch(self, state, conversation, tools):
+            self.recovery_calls += 1
+            return self.generate_initial_patch(state, conversation, tools)
+
+        def generate_target_reproduction(self, **kwargs):
+            return None
+
+    repository = tmp_path / "repo"
+    shutil.copytree(FIXTURE, repository)
+    agent = NonprogressThenEditAgent()
+    controller = ReachPatchController(
+        config=ReachPatchConfig(
+            max_submitted_revisions=1,
+            max_total_revisions=1,
+            target_recovery_wall_time_s=1,
+        ),
+        generator_agent=agent,
+        implementation_root=tmp_path,
+    )
+
+    state, certificate = controller.run(
+        Instance(
+            "initial-nonprogress-fixture", str(repository), "base",
+            "pkg.api.public(value) must return an empty list for every Box value.",
+        ),
+        run_root=tmp_path / "run-nonprogress",
+    )
+
+    assert agent.calls == 2
+    assert agent.recovery_calls == 1
+    assert agent.turn_budgets == [14, 8]
+    assert state.runtime_metrics["initial_nonprogress_recovery_count"] == 1
+    assert state.runtime_metrics["confirmed_revision_count"] == 0
+    assert state.patch_trajectory.first_patch.patch.canonical_diff
+    assert certificate.status == "EVIDENCE_LIMITED_COMPLETE"
+
+
+def test_two_context_expansions_still_reach_one_first_patch(tmp_path, monkeypatch):
+    class TwoContextThenEditAgent:
+        def __init__(self):
+            self.calls = 0
+            self.max_revisions = 0
+            self.max_tool_turns = 0
+            self.max_wall_time_seconds = 0.0
+            self.max_completion_tokens = 0
+
+        def generate_initial_patch(self, state, conversation, tools):
+            self.calls += 1
+            if self.calls < 3:
+                return GeneratorRevision(
+                    revision_id=f"context-{self.calls}",
+                    mechanism="initial_issue_repair", edits=(),
+                    summary="need one more bounded caller slice",
+                    context_requests=(ContextRequest(
+                        symbols=(f"pkg.api.context_{self.calls}",),
+                        relation_kinds=("calls",),
+                    ),),
+                    requested_public_checks=(), tool_turns=2,
+                    status="CONTEXT_ONLY",
+                )
+            edit = ProposedEdit(
+                relative_path="pkg/api.py", start_line=40, end_line=40,
+                expected_source="    return normalize(value)",
+                replacement="    return [] if isinstance(value, Box) else normalize(value)",
+            )
+            tools.apply_edits((edit,))
+            state.runtime_metrics["first_patch_readiness"] = {
+                "target_definition_read": True,
+                "root_cause_identified": True,
+                "requirements_accounted_for": True,
+                "preservation_risks_identified": True,
+                "final_diff_reviewed": True,
+            }
+            return GeneratorRevision(
+                revision_id="first-after-two-expansions",
+                mechanism="initial_issue_repair", edits=(edit,),
+                summary="reviewed complete first patch",
+                context_requests=(), requested_public_checks=(), tool_turns=2,
+                status="PROPOSED",
+            )
+
+        def recover_initial_patch(self, state, conversation, tools):
+            return self.generate_initial_patch(state, conversation, tools)
+
+        def generate_target_reproduction(self, **kwargs):
+            return None
+
+    repository = tmp_path / "repo"
+    shutil.copytree(FIXTURE, repository)
+    agent = TwoContextThenEditAgent()
+    controller = ReachPatchController(
+        config=ReachPatchConfig(
+            max_submitted_revisions=1,
+            max_total_revisions=1,
+            target_recovery_wall_time_s=1,
+        ),
+        generator_agent=agent,
+        implementation_root=tmp_path,
+    )
+    monkeypatch.setattr(controller, "_expand_generator_context", lambda *_: True)
+
+    state, certificate = controller.run(
+        Instance(
+            "two-context-fixture", str(repository), "base",
+            "pkg.api.public(value) must return an empty list for every Box value.",
+        ),
+        run_root=tmp_path / "run-two-context",
+    )
+
+    assert agent.calls == 3
+    assert state.runtime_metrics["initial_context_continuation_count"] == 2
+    assert state.runtime_metrics["confirmed_revision_count"] == 0
     assert state.patch_trajectory.first_patch.patch.canonical_diff
     assert certificate.status == "EVIDENCE_LIMITED_COMPLETE"
 

@@ -156,6 +156,83 @@ def refresh_confirmed_failures(state: ReachAvoidState) -> tuple[ConfirmedFailure
         for item in getattr(recovery, "certifications", ())
     }
     failures: list[ConfirmedFailure] = []
+    # Only intrinsic, patch-local checks may use the empty-diff baseline as a
+    # mechanical PASS. Import probes and configured commands require a real
+    # paired baseline execution elsewhere; dependency/environment failures must
+    # never become a revision trigger through a fabricated baseline result.
+    observations = getattr(state, "observations", None)
+    for mechanical in getattr(observations, "mechanical_checks", ()):
+        status = str(getattr(getattr(mechanical, "status", None), "value", getattr(mechanical, "status", "")))
+        if status not in {"FAIL", "FAILURE"}:
+            continue
+        kind = str(getattr(mechanical, "kind", "")).upper()
+        if kind not in {
+            "SYNTAX", "APPLY", "SCOPE_AND_ORACLE_INTEGRITY",
+        }:
+            continue
+        check_id = str(getattr(mechanical, "check_id", ""))
+        if not check_id:
+            continue
+        baseline = CheckExecution(
+            execution_id=stable_id("mechanical-baseline", check_id),
+            check_id=check_id,
+            tree_hash=str(getattr(state.checkpoint.patch, "base_tree_hash", "")),
+            status=CheckStatus.PASS,
+            return_code=0,
+            stdout="",
+            stderr="",
+            duration_seconds=0.0,
+            stable=True,
+            failure_signature=None,
+            first_project_frame=None,
+        )
+        current = CheckExecution(
+            execution_id=stable_id("mechanical-current", check_id, getattr(mechanical, "source_hash", "")),
+            check_id=check_id,
+            tree_hash=str(getattr(state.checkpoint.patch, "working_tree_hash", "")),
+            status=CheckStatus.FAIL,
+            return_code=getattr(mechanical, "return_code", 1),
+            stdout=str(getattr(mechanical, "stdout", "")),
+            stderr=str(getattr(mechanical, "stderr", "")),
+            duration_seconds=float(getattr(mechanical, "duration_seconds", 0.0)),
+            stable=True,
+            failure_signature=stable_id(
+                "mechanical-failure", check_id,
+                str(getattr(mechanical, "stderr", ""))[-4000:],
+            ),
+            first_project_frame=None,
+        )
+        mechanical_packet_cuts = tuple(
+            str(item)
+            for packet in getattr(state, "counterexamples", ())
+            if any(
+                str(failed.get("check_id", "")) == check_id
+                for failed in getattr(packet, "actual_observation", {}).get("failed_checks", ())
+            )
+            for item in getattr(packet, "causal_cut_ids", ())
+        )
+        failures.append(ConfirmedFailure(
+            failure_id=stable_id("confirmed-mechanical-failure", check_id, current.failure_signature),
+            kind="CONFIRMED_MECHANICAL_FAILURE",
+            check_id=check_id,
+            oracle_authority="A",
+            requirement_id=None,
+            binding_unit_id=None,
+            baseline_observation=baseline,
+            before_patch_observation=current,
+            expected_relation=ExecutableOracle(
+                oracle_id=stable_id("mechanical-oracle", check_id),
+                authority="A",
+                relation="mechanical_check_must_pass",
+                requirement_id=None,
+                is_executable=True,
+            ),
+            stable_runs=2,
+            failure_signature=current.failure_signature or check_id,
+            failure_location=str(getattr(mechanical, "kind", "mechanical check")),
+            causal_cut_ids=mechanical_packet_cuts,
+            impact_risk_ids=(),
+        ))
     for comparison in state.check_comparisons:
         check = checks.get(comparison.check_id)
         if check is None:
@@ -450,8 +527,33 @@ def build_locked_check_set(
                 executable_scenario=scenario,
                 baseline_repository=state.base_repository,
             ),)
+    mechanical_checks: tuple[LockedCheck, ...] = ()
+    if failure.kind == "CONFIRMED_MECHANICAL_FAILURE":
+        mechanical_checks = (LockedCheck(
+            check_id=failure.check_id,
+            role="MECHANICAL",
+            command=tuple(map(str, next(
+                (
+                    getattr(item, "command", ())
+                    for item in getattr(getattr(state, "observations", None), "mechanical_checks", ())
+                    if str(getattr(item, "check_id", "")) == failure.check_id
+                ),
+                (),
+            ))),
+            observation_contract=ObservationContract(
+                contract_id=stable_id("mechanical-observation-contract", failure.check_id),
+                channels=("process_status", "stdout", "stderr", "exception"),
+            ),
+            oracle=failure.expected_relation,
+            authority=failure.oracle_authority,
+            requirement_ids=(),
+            cwd=state.checkpoint.snapshot_tree,
+            source_evidence_ids=(f"mechanical-kind:{failure.failure_location or ''}",),
+            baseline_observation=failure.baseline_observation,
+            baseline_repository=state.base_repository,
+        ),)
     if failure.check_id not in {
-        item.check_id for item in (*targets, *preservation, *counterexample_checks)
+        item.check_id for item in (*targets, *preservation, *counterexample_checks, *mechanical_checks)
     }:
         raise ValueError("confirmed failure is absent from its locked check set")
     lock_id = stable_id(
@@ -464,6 +566,7 @@ def build_locked_check_set(
         target_checks=targets,
         preservation_checks=preservation,
         counterexample_checks=counterexample_checks,
+        mechanical_checks=mechanical_checks,
     )
     state.current_locked_check_set = result
     if state.patch_trajectory is not None:
@@ -497,7 +600,55 @@ def execute_locked_checks(
 ) -> tuple[CheckExecution, ...]:
     results: list[CheckExecution] = []
     for check in locked_checks.all_checks():
-        if check.input_recipe is not None and check.executable_scenario is not None:
+        if check.role == "MECHANICAL":
+            from reachpatch.execution.mechanical import run_mechanical_checks
+            from reachpatch.execution.reconcile import reconcile_actual_diff
+            from reachpatch.models.enums import OutcomeStatus
+
+            base = Path(check.baseline_repository)
+            current = Path(repository)
+            actual = reconcile_actual_diff(base, current)
+            executed = run_mechanical_checks(
+                current, actual, baseline_root=base,
+            )
+            command_kind = check.command[0] if check.command else ""
+            kind_by_command = {
+                "internal:structural-check": "STRUCTURAL",
+                "internal:scope-check": "SCOPE_AND_ORACLE_INTEGRITY",
+                "ast.parse": "SYNTAX",
+            }
+            expected_kind = next((
+                item.split(":", 1)[1]
+                for item in check.source_evidence_ids
+                if item.startswith("mechanical-kind:")
+            ), kind_by_command.get(command_kind))
+            selected = next((
+                item for item in executed
+                if expected_kind is None or item.kind == expected_kind
+            ), None)
+            passed = selected is not None and selected.status == OutcomeStatus.PASS
+            results.append(CheckExecution(
+                execution_id=stable_id(
+                    "locked-mechanical-execution", check.check_id,
+                    tree_hash, getattr(selected, "source_hash", ""),
+                ),
+                check_id=check.check_id,
+                tree_hash=tree_hash,
+                status=CheckStatus.PASS if passed else CheckStatus.FAIL,
+                return_code=0 if passed else 1,
+                stdout=str(getattr(selected, "stdout", "")),
+                stderr=str(getattr(selected, "stderr", "mechanical check missing")),
+                duration_seconds=float(getattr(selected, "duration_seconds", 0.0)),
+                stable=True,
+                failure_signature=(
+                    None if passed else stable_id(
+                        "locked-mechanical-failure", check.check_id,
+                        str(getattr(selected, "stderr", ""))[-4000:],
+                    )
+                ),
+                first_project_frame=None,
+            ))
+        elif check.input_recipe is not None and check.executable_scenario is not None:
             from reachpatch.execution.executor import TraceExecutor
             from reachpatch.models.enums import OutcomeStatus
 
@@ -571,6 +722,9 @@ def compare_observations(
     preservation = {
         item.check_id: item for item in locked_checks.preservation_checks
     }
+    mechanical_ids = {
+        item.check_id for item in locked_checks.mechanical_checks
+    }
     target_pass_before = tuple(sorted(
         check_id for check_id in target_ids
         if check_id in before and before[check_id].status == CheckStatus.PASS
@@ -603,6 +757,14 @@ def compare_observations(
             and check_id in before and before[check_id].status == CheckStatus.FAIL
         )
     ))
+    mechanical_before = tuple(sorted(
+        check_id for check_id in mechanical_ids
+        if check_id in before and before[check_id].status == CheckStatus.FAIL
+    ))
+    mechanical_after = tuple(sorted(
+        check_id for check_id in mechanical_ids
+        if check_id in after and after[check_id].status == CheckStatus.FAIL
+    ))
     unknown = tuple(sorted(
         check_id for check_id in expected_ids
         if (
@@ -632,6 +794,8 @@ def compare_observations(
         confirmed_target_failure_after=target_fail_after,
         preservation_regressions_before=before_regressions,
         preservation_regressions_after=regressions,
+        mechanical_failures_before=mechanical_before,
+        mechanical_failures_after=mechanical_after,
         unknown_check_ids=unknown,
     )
 
@@ -674,17 +838,26 @@ def decide_transition(comparison: TrialComparison) -> tuple[str, str]:
         after_target == before_target
         and before_regressions > after_regressions
     )
+    mechanical_improvement = (
+        len(comparison.mechanical_failures_before)
+        > len(comparison.mechanical_failures_after)
+        and not comparison.mechanical_failures_after
+    )
     if target_improvement and after_regressions:
         return (
             "KEEP_TRIAL_FOR_REGRESSION_REPAIR",
             "TARGET_FIXED_WITH_CONFIRMED_PRESERVATION_REGRESSION",
         )
     if (
-        (target_improvement or regression_improvement)
+        (target_improvement or regression_improvement or mechanical_improvement)
         and after_regressions == 0
         and not comparison.mechanical_failures_after
     ):
-        return "PROMOTE", "CONFIRMED_EXECUTION_IMPROVEMENT"
+        return "PROMOTE", (
+            "CONFIRMED_MECHANICAL_HEALTH_IMPROVEMENT"
+            if mechanical_improvement and not (target_improvement or regression_improvement)
+            else "CONFIRMED_EXECUTION_IMPROVEMENT"
+        )
     return "ROLLBACK", "NO_CONFIRMED_IMPROVEMENT"
 
 

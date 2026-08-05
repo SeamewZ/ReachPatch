@@ -36,9 +36,13 @@ from reachpatch.program_graph import (
 )
 from reachpatch.program_graph.builder import PythonProgramGraphBuilder
 from reachpatch.program_graph.slice import ContextRequest, RepairSliceSeed
-from reachpatch.reach_avoid.controller import ReachPatchConfig, ReachPatchController
+from reachpatch.reach_avoid.controller import (
+    ReachPatchConfig,
+    ReachPatchController,
+    _inferred_public_test_paths,
+)
 from reachpatch.reach_avoid.transition import (
-    _mechanical_packet, evaluate_patch_revision,
+    _apply_revision_edits, _mechanical_packet, evaluate_patch_revision,
 )
 from reachpatch.repair.deepseek_agent import (
     ActionConversionStatus, GeneratorRevision, PersistentDeepSeekAgent,
@@ -55,6 +59,1191 @@ from reachpatch.requirement_graph import (
 
 
 FIXTURE = Path(__file__).parents[1] / "fixtures" / "simple_repo"
+
+
+def test_transactional_applier_clamps_virtual_eof_newline_range(tmp_path):
+    (tmp_path / "module.py").write_text(
+        "def value():\n    return 1\n", encoding="utf-8",
+    )
+    revision = GeneratorRevision(
+        revision_id="eof-range", mechanism="initial_issue_repair",
+        edits=(ProposedEdit(
+            relative_path="module.py", start_line=2, end_line=4,
+            expected_source="    return 1\n",
+            replacement="    return 2\n",
+        ),),
+        summary="reviewed EOF repair", context_requests=(),
+        requested_public_checks=(), tool_turns=1, status="PROPOSED",
+    )
+
+    _apply_revision_edits(tmp_path, revision)
+
+    assert (tmp_path / "module.py").read_text(encoding="utf-8") == (
+        "def value():\n    return 2\n"
+    )
+
+
+def test_public_test_inference_prioritizes_references_to_issue_symbols(tmp_path):
+    index = SimpleNamespace(
+        symbols={"uniq": (object(),), "unrelated": (object(),)},
+        test_references={
+            "bin/test_alpha.py": ("list", "argument"),
+            "pkg/tests/test_iterables.py": ("uniq", "list"),
+            "pkg/tests/test_other.py": ("unrelated",),
+        },
+    )
+
+    inferred = _inferred_public_test_paths(
+        "uniq modifies a list argument", index, tmp_path, limit=10,
+    )
+
+    assert inferred == (str(tmp_path / "pkg/tests/test_iterables.py"),)
+
+
+def test_public_test_inference_selects_symbol_referencing_test_function(tmp_path):
+    test_path = tmp_path / "pkg" / "tests" / "test_solver.py"
+    test_path.parent.mkdir(parents=True)
+    test_path.write_text(
+        "def test_unrelated():\n"
+        "    assert helper()\n\n"
+        "def test_existing_solver_contract():\n"
+        "    assert solve_system([1]) == [1]\n",
+        encoding="utf-8",
+    )
+    index = SimpleNamespace(
+        symbols={"solve_system": (object(),), "helper": (object(),)},
+        test_references={
+            "pkg/tests/test_solver.py": ("solve_system", "helper"),
+        },
+    )
+
+    inferred = _inferred_public_test_paths(
+        "solve_system should reject infinite input", index, tmp_path, limit=10,
+    )
+
+    assert inferred == (
+        f"{test_path}::test_existing_solver_contract",
+    )
+
+
+def test_mechanical_structural_check_rejects_shadowed_class_and_keyword_collision(tmp_path):
+    root = tmp_path / "repo"
+    root.mkdir()
+    (root / "module.py").write_text(
+        "class ExceptionInfo:\n    pass\n\n"
+        "class ExceptionInfo:\n    pass\n\n"
+        "def build(**kwargs):\n"
+        "    kwargs.setdefault('formatter_class', object)\n"
+        "    return dict(formatter_class=object, **kwargs)\n",
+        encoding="utf-8",
+    )
+    baseline = tmp_path / "baseline"
+    baseline.mkdir()
+    (baseline / "module.py").write_text("class ExceptionInfo:\n    pass\n", encoding="utf-8")
+    actual = reconcile_actual_diff(baseline, root)
+    checks = run_mechanical_checks(root, actual, baseline_root=baseline)
+    structural = next(item for item in checks if item.kind == "STRUCTURAL")
+    assert structural.status == OutcomeStatus.FAIL
+    assert "duplicate top-level definition" in structural.stderr
+    assert "setdefault" in structural.stderr
+
+
+def test_guard_narrowing_is_preservation_advisory_not_mechanical_failure(tmp_path):
+    baseline = tmp_path / "baseline"
+    baseline.mkdir()
+    (baseline / "module.py").write_text(
+        "def choose(values, dimensions):\n"
+        "    if len(values) == 1:\n"
+        "        return values[0]\n"
+        "    return None\n",
+        encoding="utf-8",
+    )
+    trial = tmp_path / "trial"
+    shutil.copytree(baseline, trial)
+    (trial / "module.py").write_text(
+        "def choose(values, dimensions):\n"
+        "    if len(values) == 1 and len(dimensions) == 1:\n"
+        "        return values[0]\n"
+        "    return None\n",
+        encoding="utf-8",
+    )
+    actual = reconcile_actual_diff(baseline, trial)
+
+    checks = run_mechanical_checks(trial, actual, baseline_root=baseline)
+    structural = next(item for item in checks if item.kind == "STRUCTURAL")
+
+    assert structural.status == OutcomeStatus.PASS
+    assert "guard narrowed by new conjunct" in structural.stdout
+    assert structural.stderr == ""
+
+
+def test_mechanical_structural_check_ignores_preexisting_keyword_conflict(tmp_path):
+    baseline = tmp_path / "baseline"
+    baseline.mkdir()
+    source = (
+        "def existing(**kwargs):\n"
+        "    kwargs.setdefault('strip', True)\n"
+        "    return dict(strip=False, **kwargs)\n\n"
+        "def public(path):\n"
+        "    return path\n"
+    )
+    (baseline / "module.py").write_text(source, encoding="utf-8")
+    trial = tmp_path / "trial"
+    trial.mkdir()
+    (trial / "module.py").write_text(
+        source.replace(
+            "def public(path):\n    return path\n",
+            "def public(path):\n"
+            "    if callable(path):\n"
+            "        path = path()\n"
+            "    return path\n",
+        ),
+        encoding="utf-8",
+    )
+
+    actual = reconcile_actual_diff(baseline, trial)
+    checks = run_mechanical_checks(trial, actual, baseline_root=baseline)
+    structural = next(item for item in checks if item.kind == "STRUCTURAL")
+
+    assert structural.status == OutcomeStatus.PASS
+    assert "setdefault" not in structural.stderr
+
+
+def test_repair_tool_rejects_duplicate_member_before_staging(tmp_path):
+    root = tmp_path / "repo"
+    root.mkdir()
+    (root / "module.py").write_text(
+        "class Query:\n"
+        "    def update(self):\n"
+        "        return 1\n",
+        encoding="utf-8",
+    )
+    tools = RepairToolExecutor(
+        repository_root=root,
+        repository_index=SimpleNamespace(source_hashes={"module.py": "hash"}),
+    )
+    with pytest.raises(ValueError, match="duplicate member Query.update"):
+        tools.apply_edits((ProposedEdit(
+            relative_path="module.py",
+            start_line=3,
+            end_line=3,
+            expected_source="        return 1",
+            replacement=(
+                "        return 1\n\n"
+                "    def update(self):\n"
+                "        return 2"
+            ),
+        ),))
+    assert tools.staged_edits == []
+
+
+def test_repair_tool_rejects_new_pass_only_method_before_staging(tmp_path):
+    root = tmp_path / "repo"
+    root.mkdir()
+    (root / "query.py").write_text(
+        "class Query:\n"
+        "    def execute(self):\n"
+        "        return 1\n",
+        encoding="utf-8",
+    )
+    tools = RepairToolExecutor(
+        repository_root=root,
+        repository_index=SimpleNamespace(source_hashes={"query.py": "hash"}),
+    )
+
+    with pytest.raises(ValueError, match="placeholder definition"):
+        tools.apply_edits((ProposedEdit(
+            relative_path="query.py", start_line=3, end_line=3,
+            expected_source="        return 1",
+            replacement=(
+                "        return 1\n\n"
+                "    def deferred_behavior(self):\n"
+                "        pass"
+            ),
+        ),))
+
+    assert tools.staged_edits == []
+
+
+def test_repair_tool_allows_existing_placeholder_to_shift_lines(tmp_path):
+    root = tmp_path / "repo"
+    root.mkdir()
+    (root / "fields.py").write_text(
+        "class Field:\n"
+        "    def normalize(self, value):\n"
+        "        return value\n"
+        "\n"
+        "    def protocol_hook(self):\n"
+        "        pass\n",
+        encoding="utf-8",
+    )
+    tools = RepairToolExecutor(
+        repository_root=root,
+        repository_index=SimpleNamespace(source_hashes={"fields.py": "hash"}),
+    )
+
+    result = tools.apply_edits((ProposedEdit(
+        relative_path="fields.py", start_line=3, end_line=3,
+        expected_source="        return value",
+        replacement="        value = str(value)\n        return value",
+    ),))
+
+    assert result["accepted"]
+    assert len(tools.staged_edits) == 1
+
+
+def test_existing_overload_family_is_not_shadowing_regression(tmp_path):
+    root = tmp_path / "repo"
+    root.mkdir()
+    source = (
+        "class Traceback:\n"
+        "    @overload\n"
+        "    def __getitem__(self, key: int): ...\n"
+        "    @overload\n"
+        "    def __getitem__(self, key: slice): ...\n"
+        "    def __getitem__(self, key):\n"
+        "        return self.items[key]\n"
+        "\n"
+        "    def render(self):\n"
+        "        return self.items\n"
+    )
+    (root / "code.py").write_text(source, encoding="utf-8")
+    tools = RepairToolExecutor(
+        repository_root=root,
+        repository_index=SimpleNamespace(source_hashes={"code.py": "hash"}),
+    )
+
+    result = tools.apply_edits((ProposedEdit(
+        relative_path="code.py", start_line=10, end_line=10,
+        expected_source="        return self.items",
+        replacement="        return list(self.items)",
+    ),))
+
+    assert result["accepted"]
+    assert len(tools.staged_edits) == 1
+
+
+def test_repair_tool_rejects_state_reintroduction_before_staging(tmp_path):
+    root = tmp_path / "repo"
+    root.mkdir()
+    before = (
+        "class Query:\n"
+        "    def defer(self, field_names):\n"
+        "        existing, mode = self.state\n"
+        "        self.state = existing.difference(field_names), False\n"
+    )
+    (root / "query.py").write_text(before, encoding="utf-8")
+    tools = RepairToolExecutor(
+        repository_root=root,
+        repository_index=SimpleNamespace(source_hashes={"query.py": "hash"}),
+    )
+    with pytest.raises(ValueError, match="invalid state transition"):
+        tools.apply_edits((ProposedEdit(
+            relative_path="query.py",
+            start_line=4,
+            end_line=4,
+            expected_source="        self.state = existing.difference(field_names), False",
+            replacement=(
+                "        remaining = existing.difference(field_names)\n"
+                "        if remaining:\n"
+                "            self.state = remaining, False\n"
+                "        else:\n"
+                "            self.state = frozenset(field_names), True"
+            ),
+        ),))
+    assert tools.staged_edits == []
+
+
+def test_repair_tool_accepts_normalized_incoming_only_mode_switch(tmp_path):
+    root = tmp_path / "repo"
+    root.mkdir()
+    before = (
+        "class Query:\n"
+        "    def defer(self, field_names):\n"
+        "        existing, mode = self.state\n"
+        "        self.state = existing.difference(field_names), False\n"
+    )
+    (root / "query.py").write_text(before, encoding="utf-8")
+    tools = RepairToolExecutor(
+        repository_root=root,
+        repository_index=SimpleNamespace(source_hashes={"query.py": "hash"}),
+    )
+
+    result = tools.apply_edits((ProposedEdit(
+        relative_path="query.py",
+        start_line=4,
+        end_line=4,
+        expected_source="        self.state = existing.difference(field_names), False",
+        replacement=(
+            "        remaining = existing.difference(field_names)\n"
+            "        if remaining:\n"
+            "            self.state = remaining, False\n"
+            "        else:\n"
+            "            self.state = frozenset(field_names).difference(existing), True"
+        ),
+    ),))
+
+    assert result["accepted"]
+    assert len(tools.staged_edits) == 1
+
+
+def test_repair_tool_rejects_set_method_on_unnormalized_input_parameter(tmp_path):
+    root = tmp_path / "repo"
+    root.mkdir()
+    before = (
+        "class Query:\n"
+        "    def defer(self, field_names):\n"
+        "        existing, mode = self.state\n"
+        "        self.state = existing.difference(field_names), False\n"
+    )
+    (root / "query.py").write_text(before, encoding="utf-8")
+    tools = RepairToolExecutor(
+        repository_root=root,
+        repository_index=SimpleNamespace(source_hashes={"query.py": "hash"}),
+    )
+
+    with pytest.raises(ValueError, match="unnormalized input parameter"):
+        tools.apply_edits((ProposedEdit(
+            relative_path="query.py", start_line=4, end_line=4,
+            expected_source="        self.state = existing.difference(field_names), False",
+            replacement=(
+                "        remaining = existing.difference(field_names)\n"
+                "        if remaining:\n"
+                "            self.state = remaining, False\n"
+                "        else:\n"
+                "            self.state = field_names.difference(existing), True"
+            ),
+        ),))
+
+    assert tools.staged_edits == []
+
+
+def test_state_rejection_locates_exact_companion_mode_consumer_guard(tmp_path):
+    root = tmp_path / "repo"
+    root.mkdir()
+    before = (
+        "class Query:\n"
+        "    def defer(self, field_names):\n"
+        "        existing, mode = self.state\n"
+        "        self.state = existing.difference(field_names), False\n"
+        "\n"
+        "    def materialize(self):\n"
+        "        field_names, defer = self.state\n"
+        "        if not field_names:\n"
+        "            return []\n"
+        "        if defer:\n"
+        "            return exclude(field_names)\n"
+        "        return include(field_names)\n"
+    )
+    (root / "query.py").write_text(before, encoding="utf-8")
+    tools = RepairToolExecutor(
+        repository_root=root,
+        repository_index=SimpleNamespace(source_hashes={"query.py": "hash"}),
+    )
+
+    with pytest.raises(ValueError, match="state-consumer guard anchor"):
+        tools.apply_edits((ProposedEdit(
+            relative_path="query.py",
+            start_line=4,
+            end_line=4,
+            expected_source="        self.state = existing.difference(field_names), False",
+            replacement=(
+                "        remaining = existing.difference(field_names)\n"
+                "        if remaining:\n"
+                "            self.state = remaining, False\n"
+                "        else:\n"
+                "            self.state = frozenset(field_names), True"
+            ),
+        ),))
+
+    assert tools.staged_edits == []
+    assert len(tools.mechanical_recovery_anchors) == 1
+    anchor = tools.mechanical_recovery_anchors[0]
+    assert anchor["kind"] == "STATE_CONSUMER_GUARD"
+    assert anchor["symbol"] == "materialize"
+    assert anchor["state_attribute"] == "self.state"
+    assert anchor["guard_start_line"] == 8
+    assert anchor["guard_source"] == "        if not field_names:\n            return []"
+    assert anchor["companion_names"] == ("defer",)
+
+
+def test_repair_tool_rejects_copied_statement_block_before_staging(tmp_path):
+    root = tmp_path / "repo"
+    root.mkdir()
+    before = (
+        "def consume(items):\n"
+        "    for item in items:\n"
+        "        visit(item)\n"
+        "    for item in items:\n"
+        "        emit(item)\n"
+        "    return items\n"
+    )
+    (root / "consumer.py").write_text(before, encoding="utf-8")
+    tools = RepairToolExecutor(
+        repository_root=root,
+        repository_index=SimpleNamespace(source_hashes={"consumer.py": "hash"}),
+    )
+    with pytest.raises(ValueError, match="duplicates an existing statement block"):
+        tools.apply_edits((ProposedEdit(
+            relative_path="consumer.py",
+            start_line=2,
+            end_line=5,
+            expected_source=(
+                "    for item in items:\n"
+                "        visit(item)\n"
+                "    for item in items:\n"
+                "        emit(item)"
+            ),
+            replacement=(
+                "    for item in items:\n"
+                "        visit(item)\n"
+                "    for item in items:\n"
+                "        emit(item)\n"
+                "    for item in items:\n"
+                "        visit(item)\n"
+                "    for item in items:\n"
+                "        emit(item)"
+            ),
+        ),))
+    assert tools.staged_edits == []
+
+
+def test_mechanical_structural_check_rejects_state_input_reintroduction(tmp_path):
+    baseline = tmp_path / "baseline"
+    trial = tmp_path / "trial"
+    baseline.mkdir()
+    trial.mkdir()
+    before = (
+        "class Query:\n"
+        "    def defer(self, field_names):\n"
+        "        existing, mode = self.state\n"
+        "        self.state = existing.difference(field_names), False\n"
+    )
+    after = before + (
+        "        if not self.state[0]:\n"
+        "            self.state = frozenset(field_names), True\n"
+    )
+    (baseline / "query.py").write_text(before, encoding="utf-8")
+    (trial / "query.py").write_text(after, encoding="utf-8")
+    actual = reconcile_actual_diff(baseline, trial)
+    checks = run_mechanical_checks(trial, actual, baseline_root=baseline)
+    structural = next(item for item in checks if item.kind == "STRUCTURAL")
+    assert structural.status == OutcomeStatus.FAIL
+    assert "reintroduces the raw input" in structural.stderr
+    assert "incoming-minus-existing" in structural.stderr
+
+
+def test_caller_owned_getattr_alias_must_be_cloned_before_state_write(tmp_path):
+    baseline = tmp_path / "baseline"
+    trial = tmp_path / "trial"
+    baseline.mkdir()
+    trial.mkdir()
+    before = (
+        "class Wrapper:\n"
+        "    def __init__(self, value):\n"
+        "        self.value = getattr(value, 'value', value)\n"
+    )
+    after = before + "        self.value.active = True\n"
+    (baseline / "wrapper.py").write_text(before, encoding="utf-8")
+    (trial / "wrapper.py").write_text(after, encoding="utf-8")
+
+    actual = reconcile_actual_diff(baseline, trial)
+    checks = run_mechanical_checks(trial, actual, baseline_root=baseline)
+    structural = next(item for item in checks if item.kind == "STRUCTURAL")
+
+    assert structural.status == OutcomeStatus.FAIL
+    assert "caller-owned alias" in structural.stderr
+    assert "self.value.active" in structural.stderr
+
+
+def test_caller_owned_alias_clone_terminates_alias_before_state_write(tmp_path):
+    baseline = tmp_path / "baseline"
+    trial = tmp_path / "trial"
+    baseline.mkdir()
+    trial.mkdir()
+    before = (
+        "class Wrapper:\n"
+        "    def __init__(self, value):\n"
+        "        self.value = getattr(value, 'value', value)\n"
+    )
+    after = before + (
+        "        self.value = self.value.clone()\n"
+        "        self.value.active = True\n"
+    )
+    (baseline / "wrapper.py").write_text(before, encoding="utf-8")
+    (trial / "wrapper.py").write_text(after, encoding="utf-8")
+
+    actual = reconcile_actual_diff(baseline, trial)
+    checks = run_mechanical_checks(trial, actual, baseline_root=baseline)
+    structural = next(item for item in checks if item.kind == "STRUCTURAL")
+
+    assert structural.status == OutcomeStatus.PASS
+
+
+def test_new_local_dict_and_kwargs_are_not_caller_owned_aliases(tmp_path):
+    baseline = tmp_path / "baseline"
+    trial = tmp_path / "trial"
+    baseline.mkdir()
+    trial.mkdir()
+    before = (
+        "def render(value, **extra):\n"
+        "    params = {**extra, 'value': value}\n"
+        "    return params\n"
+    )
+    after = (
+        "def render(value, **extra):\n"
+        "    params = {**extra, 'value': value}\n"
+        "    params['rendered'] = True\n"
+        "    extra['consumed'] = True\n"
+        "    return params\n"
+    )
+    (baseline / "render.py").write_text(before, encoding="utf-8")
+    (trial / "render.py").write_text(after, encoding="utf-8")
+
+    actual = reconcile_actual_diff(baseline, trial)
+    checks = run_mechanical_checks(trial, actual, baseline_root=baseline)
+    structural = next(item for item in checks if item.kind == "STRUCTURAL")
+
+    assert structural.status == OutcomeStatus.PASS
+
+
+def test_existing_alias_write_is_stable_when_earlier_lines_shift(tmp_path):
+    baseline = tmp_path / "baseline"
+    trial = tmp_path / "trial"
+    baseline.mkdir()
+    trial.mkdir()
+    before = (
+        "def cache(data, field_name):\n"
+        "    data[field_name] = 1\n"
+    )
+    after = (
+        "def cache(data, field_name):\n"
+        "    normalized = field_name.strip()\n"
+        "    data[field_name] = 1\n"
+    )
+    (baseline / "cache.py").write_text(before, encoding="utf-8")
+    (trial / "cache.py").write_text(after, encoding="utf-8")
+
+    actual = reconcile_actual_diff(baseline, trial)
+    checks = run_mechanical_checks(trial, actual, baseline_root=baseline)
+    structural = next(item for item in checks if item.kind == "STRUCTURAL")
+
+    assert structural.status == OutcomeStatus.PASS
+
+
+def test_repair_tool_rejects_caller_owned_alias_mutation_before_staging(tmp_path):
+    root = tmp_path / "repo"
+    root.mkdir()
+    source = (
+        "class Wrapper:\n"
+        "    def __init__(self, value):\n"
+        "        self.value = getattr(value, 'value', value)\n"
+    )
+    (root / "wrapper.py").write_text(source, encoding="utf-8")
+    tools = RepairToolExecutor(
+        repository_root=root,
+        repository_index=SimpleNamespace(source_hashes={"wrapper.py": "hash"}),
+    )
+
+    with pytest.raises(ValueError, match="mutates caller-owned state"):
+        tools.apply_edits((ProposedEdit(
+            relative_path="wrapper.py",
+            start_line=3,
+            end_line=3,
+            expected_source="        self.value = getattr(value, 'value', value)",
+            replacement=(
+                "        self.value = getattr(value, 'value', value)\n"
+                "        self.value.active = True"
+            ),
+        ),))
+
+    assert tools.staged_edits == []
+
+
+def test_repair_tool_rejects_copied_full_method_tail_as_noop(tmp_path):
+    root = tmp_path / "repo"
+    root.mkdir()
+    body = "\n".join(f"    value_{index} = {index}" for index in range(12))
+    source = f"def compute():\n{body}\n    return value_11\n"
+    (root / "module.py").write_text(source, encoding="utf-8")
+    tools = RepairToolExecutor(
+        repository_root=root,
+        repository_index=SimpleNamespace(source_hashes={"module.py": "hash"}),
+    )
+    lines = source.splitlines()
+    copied_tail = "\n".join(lines[1:])
+
+    with pytest.raises(ValueError, match="no-op edit"):
+        tools.apply_edits((ProposedEdit(
+            relative_path="module.py", start_line=2, end_line=2,
+            expected_source=lines[1], replacement=copied_tail,
+        ),))
+
+    assert tools.staged_edits == []
+
+
+def test_complete_replacement_rejects_import_only_edit_and_restores_prior_stage(
+    tmp_path,
+):
+    root = tmp_path / "repo"
+    root.mkdir()
+    (root / "module.py").write_text("VALUE = 1\n", encoding="utf-8")
+    tools = RepairToolExecutor(
+        repository_root=root,
+        repository_index=SimpleNamespace(source_hashes={"module.py": "hash"}),
+    )
+    original_stage = ProposedEdit(
+        relative_path="module.py", start_line=1, end_line=1,
+        expected_source="VALUE = 1", replacement="VALUE = 2",
+    )
+    tools.apply_edits((original_stage,))
+
+    with pytest.raises(ValueError, match="import-only replacement"):
+        tools.replace_staged_edits((ProposedEdit(
+            relative_path="module.py", start_line=1, end_line=1,
+            expected_source="VALUE = 1",
+            replacement="import os\n\nVALUE = 1",
+        ),))
+
+    assert tools.staged_edits == [original_stage]
+
+
+def test_apply_edits_rejects_import_only_stage_before_review(tmp_path):
+    root = tmp_path / "repo"
+    root.mkdir()
+    (root / "module.py").write_text("VALUE = 1\n", encoding="utf-8")
+    tools = RepairToolExecutor(
+        repository_root=root,
+        repository_index=SimpleNamespace(source_hashes={"module.py": "hash"}),
+    )
+
+    with pytest.raises(ValueError, match="import-only edit"):
+        tools.apply_edits((ProposedEdit(
+            relative_path="module.py", start_line=1, end_line=1,
+            expected_source="VALUE = 1", replacement="import os\n\nVALUE = 1",
+        ),))
+
+    assert tools.staged_edits == []
+
+
+def test_complete_replacement_drops_noop_member_but_keeps_real_edits(tmp_path):
+    root = tmp_path / "repo"
+    root.mkdir()
+    (root / "module.py").write_text(
+        "VALUE = 1\nOTHER = 2\n", encoding="utf-8",
+    )
+    tools = RepairToolExecutor(
+        repository_root=root,
+        repository_index=SimpleNamespace(source_hashes={"module.py": "hash"}),
+    )
+    tools.apply_edits((ProposedEdit(
+        relative_path="module.py", start_line=1, end_line=1,
+        expected_source="VALUE = 1", replacement="VALUE = 3",
+    ),))
+
+    result = tools.replace_staged_edits((
+        ProposedEdit(
+            relative_path="module.py", start_line=1, end_line=1,
+            expected_source="VALUE = 1", replacement="VALUE = 4",
+        ),
+        ProposedEdit(
+            relative_path="module.py", start_line=2, end_line=2,
+            expected_source="OTHER = 2", replacement="OTHER = 2",
+        ),
+    ))
+
+    assert result["dropped_noop_edit_count"] == 1
+    assert len(tools.staged_edits) == 1
+    assert tools.staged_edits[0].replacement == "VALUE = 4"
+
+
+def test_rejected_import_only_stage_is_discarded_for_root_recovery(tmp_path):
+    root = tmp_path / "repo"
+    root.mkdir()
+    (root / "module.py").write_text("VALUE = 1\n", encoding="utf-8")
+    tools = RepairToolExecutor(
+        repository_root=root,
+        repository_index=SimpleNamespace(source_hashes={"module.py": "hash"}),
+    )
+    # Compatibility cleanup can still encounter an import-only staged set
+    # persisted by an older generation run. Construct that legacy state
+    # directly; current apply_edits rejects it before review.
+    tools.staged_edits.append(ProposedEdit(
+        relative_path="module.py", start_line=1, end_line=1,
+        expected_source="VALUE = 1", replacement="import os\n\nVALUE = 1",
+    ))
+    tools.staged_quality_rejected = True
+    tools.staged_quality_error = "STAGED_PATCH_IMPORT_ONLY_WITHOUT_REACHABLE_BEHAVIOR"
+
+    assert tools.discard_rejected_import_only_stage()
+    assert tools.staged_edits == []
+    assert tools.staged_quality_rejected
+    assert tools.rejected_staged_paths == {"module.py"}
+
+
+def test_quality_review_prohibited_path_cannot_be_resubmitted(tmp_path):
+    root = tmp_path / "repo"
+    (root / "pkg" / "utils").mkdir(parents=True)
+    path = root / "pkg" / "utils" / "validation.py"
+    path.write_text("VALUE = 1\n", encoding="utf-8")
+    tools = RepairToolExecutor(
+        repository_root=root,
+        repository_index=SimpleNamespace(
+            source_hashes={"pkg/utils/validation.py": "hash"},
+        ),
+    )
+    original_stage = ProposedEdit(
+        relative_path="pkg/utils/validation.py", start_line=1, end_line=1,
+        expected_source="VALUE = 1", replacement="VALUE = 2",
+    )
+    tools.apply_edits((original_stage,))
+    tools.staged_quality_rejected = True
+    tools.prohibited_staged_paths.add("pkg/utils/validation.py")
+
+    with pytest.raises(ValueError, match="prohibited resubmitting"):
+        tools.replace_staged_edits((ProposedEdit(
+            relative_path="pkg/utils/validation.py", start_line=1, end_line=1,
+            expected_source="VALUE = 1", replacement="VALUE = 3",
+        ),))
+
+    assert tools.staged_edits == [original_stage]
+
+
+def test_repair_tool_requires_new_direct_name_import_in_same_edit_set(tmp_path):
+    root = tmp_path / "repo"
+    root.mkdir()
+    source = "def ensure():\n    return True\n"
+    (root / "module.py").write_text(source, encoding="utf-8")
+    tools = RepairToolExecutor(
+        repository_root=root,
+        repository_index=SimpleNamespace(source_hashes={"module.py": "hash"}),
+    )
+
+    with pytest.raises(ValueError, match="unresolved direct name.*router"):
+        tools.apply_edits((ProposedEdit(
+            relative_path="module.py", start_line=2, end_line=2,
+            expected_source="    return True",
+            replacement="    return router.allow()",
+        ),))
+
+    accepted = tools.apply_edits((ProposedEdit(
+        relative_path="module.py", start_line=1, end_line=2,
+        expected_source=source.rstrip("\n"),
+        replacement=(
+            "from framework import router\n\n"
+            "def ensure():\n"
+            "    return router.allow()"
+        ),
+    ),))
+
+    assert accepted["accepted"]
+
+
+def test_unresolved_name_recovery_preserves_behavior_edit_and_import_candidate(
+    tmp_path,
+):
+    root = tmp_path / "repo"
+    (root / "framework").mkdir(parents=True)
+    (root / "framework" / "db.py").write_text(
+        "router = object()\n", encoding="utf-8",
+    )
+    (root / "consumer.py").write_text(
+        "def ensure():\n    return True\n", encoding="utf-8",
+    )
+    (root / "existing.py").write_text(
+        "from framework.db import router\n\n"
+        "def route():\n    return router\n",
+        encoding="utf-8",
+    )
+    index = build_repository_index(
+        root, max_files=10, deadline=Deadline.after(10),
+    )
+    tools = RepairToolExecutor(
+        repository_root=root, repository_index=index,
+    )
+
+    with pytest.raises(ValueError, match="Import candidates"):
+        tools.apply_edits((ProposedEdit(
+            relative_path="consumer.py", start_line=2, end_line=2,
+            expected_source="    return True",
+            replacement="    return router.allow()",
+        ),))
+
+    assert len(tools.mechanical_recovery_anchors) == 1
+    anchor = tools.mechanical_recovery_anchors[0]
+    assert anchor["kind"] == "UNRESOLVED_DIRECT_NAME"
+    assert anchor["unresolved_names"] == ("router",)
+    assert anchor["rejected_behavior_edits"][0]["replacement"] == (
+        "    return router.allow()"
+    )
+    assert any(
+        item["statement"] == "from framework.db import router"
+        for item in anchor["import_candidates"]
+    )
+
+    completed = tools.complete_unresolved_name_edits()
+
+    assert completed["accepted"]
+    assert completed["mechanical_completion"] == "UNRESOLVED_DIRECT_NAME"
+    assert completed["resolved_names"] == ["router"]
+    assert completed["inserted_imports"] == ["from framework.db import router"]
+    staged_diff = tools.show_current_diff()["staged_diff"]
+    assert "from framework.db import router" in staged_diff
+    assert "return router.allow()" in staged_diff
+
+
+def test_repair_tool_rejects_import_named_by_issue_when_execution_never_uses_it(
+    tmp_path,
+):
+    root = tmp_path / "repo"
+    root.mkdir()
+    source = "def record():\n    return True\n"
+    (root / "module.py").write_text(source, encoding="utf-8")
+    index = build_repository_index(
+        root, max_files=10, deadline=Deadline.after(10),
+    )
+    tools = RepairToolExecutor(
+        repository_root=root, repository_index=index,
+    )
+
+    with pytest.raises(ValueError, match="unused direct import.*router"):
+        tools.apply_edits((
+            ProposedEdit(
+                relative_path="module.py", start_line=1, end_line=1,
+                expected_source="def record():",
+                replacement="from framework import router\n\ndef record():",
+            ),
+            ProposedEdit(
+                relative_path="module.py", start_line=2, end_line=2,
+                expected_source="    return True",
+                replacement="    return False",
+            ),
+        ))
+
+    assert not tools.staged_edits
+    assert tools.mechanical_recovery_anchors[0]["kind"] == "UNUSED_DIRECT_IMPORT"
+    assert tools.mechanical_recovery_anchors[0]["unused_names"] == ("router",)
+
+
+def test_repair_tool_rejects_copied_class_constant_with_identical_value(tmp_path):
+    root = tmp_path / "repo"
+    root.mkdir()
+    source = (
+        "class Storage:\n"
+        "    \"\"\"Public storage contract.\"\"\"\n"
+        "    FLAGS = 1\n\n"
+        "    def url(self):\n"
+        "        return '/static/'\n"
+    )
+    (root / "storage.py").write_text(source, encoding="utf-8")
+    tools = RepairToolExecutor(
+        repository_root=root,
+        repository_index=SimpleNamespace(source_hashes={"storage.py": "hash"}),
+    )
+
+    with pytest.raises(ValueError, match="duplicate assignment.*Storage.FLAGS"):
+        tools.apply_edits((ProposedEdit(
+            relative_path="storage.py", start_line=1, end_line=1,
+            expected_source="class Storage:",
+            replacement="class Storage:\n    FLAGS = 1",
+        ),))
+
+    assert not tools.staged_edits
+
+
+def test_quality_rejected_stage_is_discarded_but_retained_as_recovery_evidence(
+    tmp_path,
+):
+    root = tmp_path / "repo"
+    root.mkdir()
+    (root / "module.py").write_text(
+        "def normalize(value):\n    return value\n",
+        encoding="utf-8",
+    )
+    tools = RepairToolExecutor(
+        repository_root=root,
+        repository_index=SimpleNamespace(source_hashes={"module.py": "hash"}),
+    )
+    tools.apply_edits((ProposedEdit(
+        relative_path="module.py", start_line=2, end_line=2,
+        expected_source="    return value",
+        replacement="    return None",
+    ),))
+    tools.show_current_diff()
+    tools.staged_quality_rejected = True
+    tools.staged_quality_error = "STAGED_PATCH_SELF_REJECTED"
+    tools.staged_quality_rejected_version = tools.staged_edit_version
+
+    assert tools.discard_quality_rejected_stage() is True
+    assert tools.staged_edits == []
+    assert "-    return value" in tools.last_rejected_staged_diff
+    assert "+    return None" in tools.last_rejected_staged_diff
+    assert tools.rejected_staged_paths == {"module.py"}
+    assert tools.staged_quality_error == "STAGED_PATCH_SELF_REJECTED"
+
+
+def test_binary_protocol_operand_wrapper_is_rejected_before_staging(tmp_path):
+    root = tmp_path / "repo"
+    root.mkdir()
+    source = (
+        "class Predicate:\n"
+        "    def _combine(self, other, connector):\n"
+        "        if not getattr(other, 'conditional', False):\n"
+        "            return NotImplemented\n"
+        "        return connector(self, other)\n"
+    )
+    (root / "predicate.py").write_text(source, encoding="utf-8")
+    tools = RepairToolExecutor(
+        repository_root=root,
+        repository_index=SimpleNamespace(source_hashes={"predicate.py": "hash"}),
+    )
+
+    with pytest.raises(ValueError, match="bypasses binary protocol dispatch"):
+        tools.apply_edits((ProposedEdit(
+            relative_path="predicate.py",
+            start_line=2,
+            end_line=5,
+            expected_source=(
+                "    def _combine(self, other, connector):\n"
+                "        if not getattr(other, 'conditional', False):\n"
+                "            return NotImplemented\n"
+                "        return connector(self, other)"
+            ),
+            replacement=(
+                "    def _combine(self, other, connector):\n"
+                "        other = Predicate(other)\n"
+                "        if not getattr(other, 'conditional', False):\n"
+                "            return NotImplemented\n"
+                "        return connector(self, other)"
+            ),
+        ),))
+
+
+def test_binary_protocol_private_reverse_combine_is_rejected(tmp_path):
+    root = tmp_path / "repo"
+    root.mkdir()
+    source = (
+        "class Predicate:\n"
+        "    def _combine(self, other, connector):\n"
+        "        if not isinstance(other, Predicate):\n"
+        "            raise TypeError(other)\n"
+        "        return connector(self, other)\n"
+    )
+    (root / "predicate.py").write_text(source, encoding="utf-8")
+    tools = RepairToolExecutor(
+        repository_root=root,
+        repository_index=SimpleNamespace(source_hashes={"predicate.py": "hash"}),
+    )
+
+    with pytest.raises(ValueError, match="private _combine"):
+        tools.apply_edits((ProposedEdit(
+            relative_path="predicate.py",
+            start_line=3,
+            end_line=4,
+            expected_source=(
+                "        if not isinstance(other, Predicate):\n"
+                "            raise TypeError(other)"
+            ),
+            replacement=(
+                "        if not isinstance(other, Predicate):\n"
+                "            if getattr(other, 'conditional', False):\n"
+                "                return other._combine(self, connector)\n"
+                "            raise TypeError(other)"
+            ),
+        ),))
+
+
+def test_partial_rectangular_index_repair_requires_unsafe_sibling_fix(tmp_path):
+    root = tmp_path / "repo"
+    root.mkdir()
+    source = (
+        "class Matrix:\n"
+        "    def is_upper(self):\n"
+        "        return all(self[i, j] for i in range(1, self.rows) for j in range(i))\n"
+        "    def is_upper_band(self):\n"
+        "        return all(self[i, j] for i in range(2, self.rows) for j in range(i - 1))\n"
+    )
+    (root / "matrix.py").write_text(source, encoding="utf-8")
+    tools = RepairToolExecutor(
+        repository_root=root,
+        repository_index=SimpleNamespace(source_hashes={"matrix.py": "hash"}),
+    )
+
+    with pytest.raises(ValueError, match="repairs only one rectangular-index boundary"):
+        tools.apply_edits((ProposedEdit(
+            relative_path="matrix.py",
+            start_line=3,
+            end_line=3,
+            expected_source=(
+                "        return all(self[i, j] for i in range(1, self.rows) "
+                "for j in range(i))"
+            ),
+            replacement=(
+                "        return all(self[i, j] for i in range(1, self.rows) "
+                "for j in range(min(i, self.cols)))"
+            ),
+        ),))
+
+
+def test_complete_rectangular_index_sibling_repair_is_accepted(tmp_path):
+    root = tmp_path / "repo"
+    root.mkdir()
+    source = (
+        "class Matrix:\n"
+        "    def is_upper(self):\n"
+        "        return all(self[i, j] for i in range(1, self.rows) for j in range(i))\n"
+        "    def is_upper_band(self):\n"
+        "        return all(self[i, j] for i in range(2, self.rows) for j in range(i - 1))\n"
+    )
+    (root / "matrix.py").write_text(source, encoding="utf-8")
+    tools = RepairToolExecutor(
+        repository_root=root,
+        repository_index=SimpleNamespace(source_hashes={"matrix.py": "hash"}),
+    )
+
+    result = tools.apply_edits((
+        ProposedEdit(
+            relative_path="matrix.py", start_line=3, end_line=3,
+            expected_source=(
+                "        return all(self[i, j] for i in range(1, self.rows) "
+                "for j in range(i))"
+            ),
+            replacement=(
+                "        return all(self[i, j] for i in range(1, self.rows) "
+                "for j in range(min(i, self.cols)))"
+            ),
+        ),
+        ProposedEdit(
+            relative_path="matrix.py", start_line=5, end_line=5,
+            expected_source=(
+                "        return all(self[i, j] for i in range(2, self.rows) "
+                "for j in range(i - 1))"
+            ),
+            replacement=(
+                "        return all(self[i, j] for i in range(2, self.rows) "
+                "for j in range(min(i - 1, self.cols)))"
+            ),
+        ),
+    ))
+
+    assert result["accepted"] is True
+    assert result["edit_count"] == 2
+
+
+def test_mechanical_structural_check_tracks_difference_alias_across_branches(tmp_path):
+    baseline = tmp_path / "baseline"
+    trial = tmp_path / "trial"
+    baseline.mkdir()
+    trial.mkdir()
+    before = (
+        "class Query:\n"
+        "    def defer(self, field_names):\n"
+        "        existing, mode = self.state\n"
+        "        self.state = existing.difference(field_names), False\n"
+    )
+    after = (
+        "class Query:\n"
+        "    def defer(self, field_names):\n"
+        "        existing, mode = self.state\n"
+        "        remaining = existing.difference(field_names)\n"
+        "        if remaining:\n"
+        "            self.state = remaining, False\n"
+        "        else:\n"
+        "            self.state = frozenset(field_names), True\n"
+    )
+    (baseline / "query.py").write_text(before, encoding="utf-8")
+    (trial / "query.py").write_text(after, encoding="utf-8")
+    actual = reconcile_actual_diff(baseline, trial)
+    checks = run_mechanical_checks(trial, actual, baseline_root=baseline)
+    structural = next(item for item in checks if item.kind == "STRUCTURAL")
+    assert structural.status == OutcomeStatus.FAIL
+    assert "reintroduces the raw input" in structural.stderr
+
+
+def test_mechanical_structural_check_rejects_empty_difference_mode_only_flip(tmp_path):
+    baseline = tmp_path / "baseline"
+    trial = tmp_path / "trial"
+    baseline.mkdir()
+    trial.mkdir()
+    before = (
+        "class Query:\n"
+        "    def defer(self, field_names):\n"
+        "        existing, mode = self.state\n"
+        "        self.state = existing.difference(field_names), False\n"
+    )
+    after = before + (
+        "        if not self.state[0]:\n"
+        "            self.state = self.state[0], True\n"
+    )
+    (baseline / "query.py").write_text(before, encoding="utf-8")
+    (trial / "query.py").write_text(after, encoding="utf-8")
+    actual = reconcile_actual_diff(baseline, trial)
+    checks = run_mechanical_checks(trial, actual, baseline_root=baseline)
+    structural = next(item for item in checks if item.kind == "STRUCTURAL")
+    assert structural.status == OutcomeStatus.FAIL
+    assert "only flips its companion mode/tag" in structural.stderr
+    assert "incoming-only residual" in structural.stderr
+
+
+def test_mechanical_structural_check_rejects_undeclared_literal_command_flag(tmp_path):
+    baseline = tmp_path / "baseline"
+    trial = tmp_path / "trial"
+    for root in (baseline, trial):
+        (root / "commands").mkdir(parents=True)
+        (root / "commands" / "sync.py").write_text(
+            "def configure(parser):\n"
+            "    parser.add_argument('--database')\n"
+            "def handle(**options):\n"
+            "    return options['database']\n",
+            encoding="utf-8",
+        )
+    (baseline / "caller.py").write_text("def create():\n    return None\n", encoding="utf-8")
+    (trial / "caller.py").write_text(
+        "def create():\n"
+        "    return call_command('sync', database='default', sync=False)\n",
+        encoding="utf-8",
+    )
+    actual = reconcile_actual_diff(baseline, trial)
+    checks = run_mechanical_checks(trial, actual, baseline_root=baseline)
+    structural = next(item for item in checks if item.kind == "STRUCTURAL")
+    assert structural.status == OutcomeStatus.FAIL
+    assert "does not declare option 'sync'" in structural.stderr
+
+
+def test_repair_tool_rejects_any_undeclared_literal_command_option(tmp_path):
+    root = tmp_path / "repo"
+    (root / "commands").mkdir(parents=True)
+    (root / "commands" / "sync.py").write_text(
+        "def configure(parser):\n"
+        "    parser.add_argument('--database')\n"
+        "def handle(**options):\n"
+        "    return options['database']\n",
+        encoding="utf-8",
+    )
+    (root / "caller.py").write_text(
+        "def create():\n"
+        "    return None\n",
+        encoding="utf-8",
+    )
+    tools = RepairToolExecutor(
+        repository_root=root,
+        repository_index=SimpleNamespace(source_hashes={
+            "caller.py": "caller", "commands/sync.py": "sync",
+        }),
+    )
+
+    with pytest.raises(ValueError, match="does not declare option 'invented'"):
+        tools.apply_edits((ProposedEdit(
+            relative_path="caller.py", start_line=2, end_line=2,
+            expected_source="    return None",
+            replacement=(
+                "    return call_command(\n"
+                "        'sync', database='default', invented=False,\n"
+                "    )"
+            ),
+        ),))
+
+    assert tools.staged_edits == []
 
 
 def test_repair_context_keeps_primary_issue_separate_from_public_discussion() -> None:
@@ -445,6 +1634,39 @@ def test_repair_tool_relocates_unique_expected_source_anchor(tmp_path):
     assert executor.staged_edits[0].start_line == 40
 
 
+def test_staged_edit_set_must_be_previewed_and_can_be_replaced(tmp_path):
+    root = tmp_path / "repo"
+    root.mkdir()
+    (root / "module.py").write_text("VALUE = 1\n", encoding="utf-8")
+    index = build_repository_index(
+        root, max_files=10, deadline=Deadline.after(10),
+    )
+    executor = RepairToolExecutor(
+        repository_root=root, repository_index=index,
+    )
+    executor.apply_edits((ProposedEdit(
+        "module.py", 1, 1, "VALUE = 1", "VALUE = 2",
+    ),))
+
+    with pytest.raises(ValueError, match="has not been reviewed"):
+        executor.finish_revision("premature")
+
+    first_preview = executor.show_current_diff()
+    assert "-VALUE = 1" in first_preview["staged_diff"]
+    assert "+VALUE = 2" in first_preview["staged_diff"]
+    executor.replace_staged_edits((ProposedEdit(
+        "module.py", 1, 1, "VALUE = 1", "VALUE = 3",
+    ),))
+
+    with pytest.raises(ValueError, match="has not been reviewed"):
+        executor.finish_revision("stale review")
+
+    final_preview = executor.show_current_diff()
+    assert "+VALUE = 3" in final_preview["staged_diff"]
+    assert "+VALUE = 2" not in final_preview["staged_diff"]
+    assert executor.finish_revision("reviewed final edit set")["finished"]
+
+
 class _TwoRevisionTransport:
     def __init__(self) -> None:
         self.turn = 0
@@ -542,6 +1764,18 @@ class _BrowseUntilFinalTurnTransport:
     def __call__(self, messages, schemas):
         available = {item["function"]["name"] for item in schemas}
         self.available_tools.append(available)
+        if "finish_revision" in available and "apply_edits" not in available:
+            return {
+                "role": "assistant", "content": "", "tool_calls": [{
+                    "id": "final-review", "type": "function",
+                    "function": {
+                        "name": "finish_revision",
+                        "arguments": json.dumps({
+                            "summary": "reviewed the exact staged diff",
+                        }),
+                    },
+                }],
+            }
         if "search_code" in available:
             return {
                 "role": "assistant", "content": "", "tool_calls": [{
@@ -671,10 +1905,17 @@ def test_generator_final_turn_limits_browsing_without_forcing_an_edit(tmp_path):
 
     assert len(transport.available_tools) >= 3
     assert "search_code" in transport.available_tools[0]
-    assert "search_code" not in transport.available_tools[-1]
+    synthesis_tools = [
+        available for available in transport.available_tools
+        if "apply_edits" in available
+    ]
+    assert synthesis_tools
+    assert "search_code" not in synthesis_tools[-1]
     assert {
-        "apply_edits", "finish_revision", "declare_blocker",
-    } <= transport.available_tools[-1]
+        "apply_edits", "replace_staged_edits",
+        "finish_revision", "declare_blocker",
+    } <= synthesis_tools[-1]
+    assert "finish_revision" in transport.available_tools[-1]
     assert "search_code" not in transport.available_tools[-1]
     assert state.transition_index == 1
     assert state.checkpoint.patch.canonical_diff
@@ -699,7 +1940,8 @@ def test_production_final_turn_does_not_force_apply_edits(tmp_path):
         run_root=tmp_path / "run",
     )
 
-    assert transport.forced_choices == ["required"]
+    assert transport.forced_choices == ["required", "required", "required"]
+    assert state.runtime_metrics["initial_nonprogress_recovery_count"] == 2
     assert all(choice != {
         "type": "function", "function": {"name": "apply_edits"},
     } for choice in transport.forced_choices)

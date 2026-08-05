@@ -1,88 +1,32 @@
 {
-  "case_count": 51,
-  "completed_at": "2026-07-30T16:54:05.923151+00:00",
+  "case_count": 1,
+  "completed_at": "2026-08-05T15:44:27.379738+00:00",
   "disk": {
-    "disk_free_mib": 76149.1484375,
+    "disk_free_mib": 30839.13671875,
     "disk_total_mib": 7569600.41796875,
-    "disk_used_mib": 7111891.12109375
+    "disk_used_mib": 7157201.1328125
   },
-  "disk_reserve_mib": 40960,
+  "disk_reserve_mib": 8192,
   "experiment_label": "SWE51",
   "failures": [],
   "memory": {
-    "memavailable_mib": 114557.6171875,
+    "memavailable_mib": 104722.53125,
     "memtotal_mib": 128795.1171875,
-    "swapfree_mib": 20956.48828125,
+    "swapfree_mib": 20940.97265625,
     "swaptotal_mib": 22527.9921875
   },
   "project_smoke": [
     {
       "detail": "",
-      "image": "swebench/sweb.eval.x86_64.astropy_1776_astropy-14182:latest",
-      "instance_id": "astropy__astropy-14182",
-      "repo": "astropy/astropy",
-      "return_code": 0,
-      "status": "PASS"
-    },
-    {
-      "detail": "",
-      "image": "swebench/sweb.eval.x86_64.django_1776_django-10924:latest",
-      "instance_id": "django__django-10924",
+      "image": "swebench/sweb.eval.x86_64.django_1776_django-14730:latest",
+      "instance_id": "django__django-14730",
       "repo": "django/django",
-      "return_code": 0,
-      "status": "PASS"
-    },
-    {
-      "detail": "",
-      "image": "swebench/sweb.eval.x86_64.matplotlib_1776_matplotlib-18869:latest",
-      "instance_id": "matplotlib__matplotlib-18869",
-      "repo": "matplotlib/matplotlib",
-      "return_code": 0,
-      "status": "PASS"
-    },
-    {
-      "detail": "",
-      "image": "swebench/sweb.eval.x86_64.psf_1776_requests-2148:latest",
-      "instance_id": "psf__requests-2148",
-      "repo": "psf/requests",
-      "return_code": 0,
-      "status": "PASS"
-    },
-    {
-      "detail": "",
-      "image": "swebench/sweb.eval.x86_64.pytest-dev_1776_pytest-5413:latest",
-      "instance_id": "pytest-dev__pytest-5413",
-      "repo": "pytest-dev/pytest",
-      "return_code": 0,
-      "status": "PASS"
-    },
-    {
-      "detail": "",
-      "image": "swebench/sweb.eval.x86_64.scikit-learn_1776_scikit-learn-11040:latest",
-      "instance_id": "scikit-learn__scikit-learn-11040",
-      "repo": "scikit-learn/scikit-learn",
-      "return_code": 0,
-      "status": "PASS"
-    },
-    {
-      "detail": "",
-      "image": "swebench/sweb.eval.x86_64.sphinx-doc_1776_sphinx-8282:latest",
-      "instance_id": "sphinx-doc__sphinx-8282",
-      "repo": "sphinx-doc/sphinx",
-      "return_code": 0,
-      "status": "PASS"
-    },
-    {
-      "detail": "/testbed/sympy/core/basic.py:3: DeprecationWarning: Using or importing the ABCs from 'collections' instead of from 'collections.abc' is deprecated since Python 3.3, and in 3.10 it will stop working\n  from collections import Mapping, defaultdict\n/testbed/sympy/core/containers.py:271: DeprecationWarning: Using or importing the ABCs from 'collections' instead of from 'collections.abc' is deprecated since Python 3.3, and in 3.10 it will stop working\n  class OrderedSet(collections.MutableSet):\n/testbed/sympy/solvers/diophantine.py:3188: SyntaxWarning: \"is\" with a literal. Did you mean \"==\"?\n  if feasible is 1:  # it's prime and k == 2\n/testbed/sympy/plotting/plot.py:28: DeprecationWarning: Using or importing the ABCs from 'collections' instead of from 'collections.abc' is deprecated since Python 3.3, and in 3.10 it will stop working\n  from collections import Callable\n",
-      "image": "swebench/sweb.eval.x86_64.sympy_1776_sympy-11870:latest",
-      "instance_id": "sympy__sympy-11870",
-      "repo": "sympy/sympy",
       "return_code": 0,
       "status": "PASS"
     }
   ],
-  "project_smoke_fingerprint": "5411253d9d795fa6e1d975728a30672a266bb9a15e8e4a4f00ce488e9e4861f6",
-  "public_image_count": 51,
+  "project_smoke_fingerprint": "d4e68c929a98356565569d75ee4741c0eaa866d58b1f51bc0d677419c7f6a3e5",
+  "public_image_count": 1,
   "status": "PASS",
-  "unique_case_count": 51
+  "unique_case_count": 1
 }

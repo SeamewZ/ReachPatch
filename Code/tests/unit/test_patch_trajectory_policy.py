@@ -1,4 +1,4 @@
-from dataclasses import replace
+from dataclasses import asdict, replace
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -7,6 +7,7 @@ from reachpatch.execution.models import (
 )
 from reachpatch.models.controller import (
     ConfirmedFailure, ExecutableOracle, LockedCheck, LockedCheckSet,
+    MechanicalCheck,
 )
 from reachpatch.models.base import stable_id
 from reachpatch.models.graph import GraphEdge, GraphNode
@@ -15,8 +16,10 @@ from reachpatch.binding_graph.active import (
     ActiveBindingGraph, ActiveBindingUnit, BindingEdge, _causal_cuts,
     _check_projection, build_active_binding_graph, recover_direct_callers,
 )
-from reachpatch.execution.target_recovery import TargetCandidate, certify_target
-from reachpatch.models.enums import Authority, ChallengeTerminalStatus
+from reachpatch.execution.target_recovery import (
+    TargetCandidate, baseline_exposes_issue_failure, certify_target,
+)
+from reachpatch.models.enums import Authority, ChallengeTerminalStatus, OutcomeStatus
 from reachpatch.oracle.models import ObservationContract
 from reachpatch.repair.policy import accept_edit_scope
 from reachpatch.repair.counterexamples import challenge_is_confirmed
@@ -24,6 +27,7 @@ from reachpatch.reach_avoid.trajectory import (
     compare_observations, decide_transition, evaluate_trial_against_checkpoint,
     is_confirmed_failure, record_transition, refresh_confirmed_failures,
 )
+from reachpatch.reach_avoid.metrics import progress_vector_from_trial_comparison
 
 
 def _execution(check_id, status, *, stable=True, signature=None, tree="tree"):
@@ -99,6 +103,58 @@ def test_target_improvement_promotes_only_when_locked_checks_are_comparable():
     assert decide_transition(comparison) == (
         "PROMOTE", "CONFIRMED_EXECUTION_IMPROVEMENT",
     )
+
+
+def test_mechanical_failure_to_pass_promotes_on_same_locked_check():
+    mechanical = LockedCheck(
+        check_id="structural",
+        role="MECHANICAL",
+        command=("internal:structural-check",),
+        observation_contract=SimpleNamespace(),
+        oracle=ExecutableOracle(
+            oracle_id="mechanical-oracle", authority="A",
+            relation="mechanical_check_must_pass",
+        ),
+        authority="A",
+        requirement_ids=(),
+        baseline_observation=_execution("structural", "PASS", tree="base"),
+    )
+    locked = LockedCheckSet(lock_id="mechanical-lock", mechanical_checks=(mechanical,))
+    comparison = compare_observations(
+        before_results=(_execution("structural", "FAIL", tree="before"),),
+        after_results=(_execution("structural", "PASS", tree="after"),),
+        locked_checks=locked,
+        before_patch_hash="before",
+        after_patch_hash="after",
+    )
+    assert comparison.mechanical_failures_before == ("structural",)
+    assert comparison.mechanical_failures_after == ()
+    assert decide_transition(comparison) == (
+        "PROMOTE", "CONFIRMED_MECHANICAL_HEALTH_IMPROVEMENT",
+    )
+    progress = progress_vector_from_trial_comparison(comparison)
+    assert progress.mechanical_health_delta == 1
+    assert progress.confirmed_target_pass_delta == 0
+
+
+def test_uncomparable_locked_comparison_has_no_execution_progress():
+    locked = LockedCheckSet(lock_id="lock", target_checks=(_locked(),))
+    comparison = compare_observations(
+        before_results=(_execution("target", "FAIL", tree="before"),),
+        after_results=(_execution("target", "PASS", stable=False, tree="after"),),
+        locked_checks=locked,
+        before_patch_hash="before",
+        after_patch_hash="after",
+    )
+
+    assert asdict(progress_vector_from_trial_comparison(comparison)) == {
+        "confirmed_target_pass_delta": 0,
+        "confirmed_target_failure_delta": 0,
+        "confirmed_regression_delta": 0,
+        "confirmed_counterexample_delta": 0,
+        "mechanical_health_delta": 0,
+        "execution_confirmed_requirement_delta": 0,
+    }
 
 
 def test_target_fix_with_regression_is_kept_but_not_promoted():
@@ -206,6 +262,54 @@ def test_unknown_or_unbound_graph_does_not_make_confirmed_failure():
         confirmed_failures=[], patch_trajectory=None,
         checkpoint=SimpleNamespace(patch=SimpleNamespace(canonical_diff_hash="hash")),
     )
+    assert refresh_confirmed_failures(state) == ()
+
+
+def test_unpaired_import_failure_cannot_become_confirmed_mechanical_failure():
+    mechanical = MechanicalCheck(
+        check_id="import-check", kind="IMPORT",
+        command=("python", "-c", "import package"),
+        status=OutcomeStatus.FAIL, return_code=1, stdout="",
+        stderr="ModuleNotFoundError: optional_dependency",
+        duration_seconds=0.1, source_hash="patched",
+    )
+    state = SimpleNamespace(
+        target_recovery=SimpleNamespace(
+            targets=(), preservation_checks=(), candidates=(), certifications=(),
+        ),
+        observations=SimpleNamespace(mechanical_checks=(mechanical,)),
+        check_comparisons=(), active_binding_graph=SimpleNamespace(units={}),
+        confirmed_failures=[], patch_trajectory=None, counterexamples=(),
+        checkpoint=SimpleNamespace(patch=SimpleNamespace(
+            base_tree_hash="base", working_tree_hash="patched",
+            canonical_diff_hash="patch-hash",
+        )),
+    )
+
+    assert refresh_confirmed_failures(state) == ()
+
+
+def test_structural_quality_diagnostic_cannot_trigger_revision():
+    mechanical = MechanicalCheck(
+        check_id="structural-check", kind="STRUCTURAL",
+        command=("internal:structural-check",),
+        status=OutcomeStatus.FAIL, return_code=1, stdout="",
+        stderr="guard narrowed by a new conjunct",
+        duration_seconds=0.0, source_hash="patched",
+    )
+    state = SimpleNamespace(
+        target_recovery=SimpleNamespace(
+            targets=(), preservation_checks=(), candidates=(), certifications=(),
+        ),
+        observations=SimpleNamespace(mechanical_checks=(mechanical,)),
+        check_comparisons=(), active_binding_graph=SimpleNamespace(units={}),
+        confirmed_failures=[], patch_trajectory=None, counterexamples=(),
+        checkpoint=SimpleNamespace(patch=SimpleNamespace(
+            base_tree_hash="base", working_tree_hash="patched",
+            canonical_diff_hash="patch-hash",
+        )),
+    )
+
     assert refresh_confirmed_failures(state) == ()
 
 
@@ -464,6 +568,18 @@ def test_environment_failure_cannot_certify_as_target_failure():
     )
     assert not certification.certified
     assert not certification.exposes_issue
+
+
+def test_database_configuration_text_cannot_expose_issue_failure_even_if_cached_fail():
+    execution = replace(
+        _execution("target", "FAIL", signature="db-config", tree="base"),
+        stderr=(
+            "django.core.exceptions.ImproperlyConfigured: settings.DATABASES "
+            "is improperly configured. Please supply the NAME value."
+        ),
+    )
+
+    assert not baseline_exposes_issue_failure(_candidate(), (execution,))
 
 
 def test_dicc_confirmation_rejects_unstable_or_untrusted_execution():

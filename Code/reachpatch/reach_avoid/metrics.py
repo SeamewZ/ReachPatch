@@ -354,6 +354,33 @@ def progress_vector_from_comparisons(
     )
 
 
+def progress_vector_from_trial_comparison(comparison) -> ProgressVector:
+    """Measure one revision from its identical before/after locked checks."""
+
+    if not comparison.comparable or comparison.unknown_check_ids:
+        return ProgressVector(0, 0, 0, 0, 0, 0)
+    before_pass = set(comparison.confirmed_target_pass_before)
+    after_pass = set(comparison.confirmed_target_pass_after)
+    before_fail = set(comparison.confirmed_target_failure_before)
+    after_fail = set(comparison.confirmed_target_failure_after)
+    before_regressions = set(comparison.preservation_regressions_before)
+    after_regressions = set(comparison.preservation_regressions_after)
+    before_mechanical = set(comparison.mechanical_failures_before)
+    after_mechanical = set(comparison.mechanical_failures_after)
+    return ProgressVector(
+        confirmed_target_pass_delta=len(after_pass) - len(before_pass),
+        confirmed_target_failure_delta=len(after_fail) - len(before_fail),
+        confirmed_regression_delta=(
+            len(after_regressions) - len(before_regressions)
+        ),
+        confirmed_counterexample_delta=len(after_fail) - len(before_fail),
+        mechanical_health_delta=(
+            len(before_mechanical) - len(after_mechanical)
+        ),
+        execution_confirmed_requirement_delta=len(after_pass - before_pass),
+    )
+
+
 def should_commit(previous, trial) -> bool:
     del previous
     if getattr(trial, "real_execution_count", 0) <= 0:

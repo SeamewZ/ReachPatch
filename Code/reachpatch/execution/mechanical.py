@@ -127,6 +127,415 @@ def _scope_check(actual_diff: ActualDiff, source_hash: str) -> MechanicalCheck:
     )
 
 
+class _KeywordConflictVisitor(ast.NodeVisitor):
+    """Detect parseable keyword collisions introduced through ``kwargs``."""
+
+    def __init__(self) -> None:
+        self.function_stack: list[str] = []
+        self.defaults: dict[str, set[str]] = {}
+        self.conflicts: list[tuple[str, str, int]] = []
+
+    def visit_FunctionDef(self, node: ast.FunctionDef) -> None:  # noqa: N802
+        self.function_stack.append(node.name)
+        self.generic_visit(node)
+        self.function_stack.pop()
+
+    def visit_AsyncFunctionDef(self, node: ast.AsyncFunctionDef) -> None:  # noqa: N802
+        self.function_stack.append(node.name)
+        self.generic_visit(node)
+        self.function_stack.pop()
+
+    def visit_Call(self, node: ast.Call) -> None:  # noqa: N802
+        function = self.function_stack[-1] if self.function_stack else "<module>"
+        explicit_names = [item.arg for item in node.keywords if item.arg is not None]
+        if len(explicit_names) != len(set(explicit_names)):
+            self.conflicts.append((function, "<duplicate-keyword>", int(getattr(node, "lineno", 0))))
+        if isinstance(node.func, ast.Attribute) and node.func.attr == "setdefault":
+            owner = node.func.value
+            if isinstance(owner, ast.Name) and owner.id in {"kwargs", "options", "params"}:
+                if node.args and isinstance(node.args[0], ast.Constant):
+                    key = node.args[0].value
+                    if isinstance(key, str):
+                        self.defaults.setdefault(owner.id, set()).add(key)
+        expanded = {
+            item.value.id
+            for item in node.keywords
+            if item.arg is None and isinstance(item.value, ast.Name)
+        }
+        explicit = {item.arg for item in node.keywords if item.arg is not None}
+        for mapping in expanded:
+            for key in self.defaults.get(mapping, ()):
+                if key in explicit:
+                    self.conflicts.append((function, key, int(getattr(node, "lineno", 0))))
+        self.generic_visit(node)
+
+
+def _command_option_names(path: Path) -> set[str]:
+    """Recover mechanically declared options from a literal command module."""
+
+    try:
+        tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+    except (OSError, SyntaxError, UnicodeError):
+        return set()
+    options: set[str] = set()
+    option_mappings = {"options", "kwargs", "params"}
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute):
+            if node.func.attr == "add_argument":
+                for argument in node.args:
+                    if not isinstance(argument, ast.Constant) or not isinstance(argument.value, str):
+                        continue
+                    raw = argument.value
+                    if raw.startswith("-"):
+                        options.add(raw.lstrip("-").replace("-", "_"))
+                    elif raw.isidentifier():
+                        options.add(raw)
+                for keyword in node.keywords:
+                    if (
+                        keyword.arg == "dest"
+                        and isinstance(keyword.value, ast.Constant)
+                        and isinstance(keyword.value.value, str)
+                    ):
+                        options.add(keyword.value.value)
+            owner = node.func.value
+            if (
+                node.func.attr in {"get", "pop", "setdefault"}
+                and isinstance(owner, ast.Name)
+                and owner.id in option_mappings
+                and node.args
+                and isinstance(node.args[0], ast.Constant)
+                and isinstance(node.args[0].value, str)
+            ):
+                options.add(node.args[0].value)
+        if isinstance(node, ast.Subscript) and isinstance(node.value, ast.Name):
+            if node.value.id not in option_mappings:
+                continue
+            key = node.slice
+            if isinstance(key, ast.Constant) and isinstance(key.value, str):
+                options.add(key.value)
+    return options
+
+
+def _literal_command_modules(root: Path, command_name: str, *, limit: int = 8) -> tuple[Path, ...]:
+    """Find a bounded set of public command implementations by file name."""
+
+    target = f"{command_name}.py"
+    matches: list[Path] = []
+    for current, directories, files in os.walk(root):
+        directories[:] = sorted(
+            name for name in directories
+            if name not in {".git", ".venv", "venv", "__pycache__", ".reachpatch"}
+        )
+        if target in files:
+            matches.append(Path(current) / target)
+            if len(matches) >= limit:
+                break
+    return tuple(matches)
+
+
+def _unsupported_literal_command_options(
+    root: Path,
+    tree: ast.AST,
+    relative: str,
+    added_lines: set[int],
+) -> tuple[str, ...]:
+    """Reject invented flags on literal command dispatch calls.
+
+    Dispatch helpers commonly accept ``**options``, so Python signature checks
+    cannot reject a fabricated option. A newly supplied flag is accepted only
+    when the command's public parser/option accesses mechanically declare it,
+    apart from the dispatch framework's common execution controls.
+    """
+
+    errors: list[str] = []
+    option_cache: dict[str, set[str] | None] = {}
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call) or int(getattr(node, "lineno", 0)) not in added_lines:
+            continue
+        function_name = ""
+        if isinstance(node.func, ast.Name):
+            function_name = node.func.id
+        elif isinstance(node.func, ast.Attribute):
+            function_name = node.func.attr
+        if "command" not in function_name.lower() or not node.args:
+            continue
+        first = node.args[0]
+        if not isinstance(first, ast.Constant) or not isinstance(first.value, str):
+            continue
+        supplied = {keyword.arg for keyword in node.keywords if keyword.arg is not None}
+        command_name = first.value.replace("-", "_")
+        if command_name not in option_cache:
+            modules = _literal_command_modules(root, first.value)
+            if not modules:
+                option_cache[command_name] = None
+            else:
+                option_cache[command_name] = set().union(
+                    *(_command_option_names(path) for path in modules)
+                )
+        declared = option_cache[command_name]
+        framework_options = {
+            "stdout", "stderr", "no_color", "force_color", "skip_checks",
+            "traceback",
+        }
+        unsupported = sorted(
+            supplied - (declared or set()) - framework_options
+        ) if declared is not None else []
+        for option in unsupported:
+            errors.append(
+                f"{relative}:{getattr(node, 'lineno', 0)}: command {first.value!r} "
+                f"does not declare option {option!r}; remove the invented flag "
+                "or derive the call from an executable public command contract"
+            )
+    return tuple(errors)
+
+
+def _structural_check(
+    root: Path,
+    actual_diff: ActualDiff,
+    source_hash: str,
+    baseline_root: Path | None = None,
+) -> MechanicalCheck:
+    """Reject silent class/function shadowing and guaranteed keyword errors.
+
+    These failures pass ``ast.parse`` and often pass an import check, but make
+    the generated module observably different from the intended edit.  The
+    check is restricted to changed Python files and therefore remains a
+    bounded patch-quality gate rather than a repository-wide lint pass.
+    """
+    started = time.monotonic()
+    errors: list[str] = []
+    advisories: list[str] = []
+    checked: list[str] = []
+    added_lines_by_file = {
+        relative: {
+            line
+            for hunk in actual_diff.hunks if hunk.file == relative
+            for line in range(hunk.new_start, hunk.new_start + max(1, hunk.new_count))
+        }
+        for relative in actual_diff.changed_files
+    }
+    for relative in sorted(actual_diff.changed_files):
+        if not relative.endswith(".py") or relative in actual_diff.deleted_files:
+            continue
+        path = root / relative
+        try:
+            tree = ast.parse(path.read_text(encoding="utf-8"), filename=relative, type_comments=True)
+        except (OSError, SyntaxError, UnicodeError):
+            continue
+        checked.append(relative)
+        from reachpatch.repair.tools import (
+            _binary_protocol_coercion_errors,
+            _caller_owned_mutation_errors,
+            _partial_rectangular_index_fix_errors,
+            _placeholder_definition_errors,
+            _reversed_set_operation_errors,
+            _shadowing_definition_errors,
+        )
+        baseline_tree: ast.AST = ast.Module(body=[], type_ignores=[])
+        if baseline_root is not None:
+            baseline_path = baseline_root / relative
+            try:
+                baseline_tree = ast.parse(
+                    baseline_path.read_text(encoding="utf-8"),
+                    filename=relative,
+                    type_comments=True,
+                )
+            except (OSError, SyntaxError, UnicodeError):
+                pass
+        for placeholder in sorted(
+            _placeholder_definition_errors(tree)
+            - _placeholder_definition_errors(baseline_tree)
+        ):
+            errors.append(f"{relative}: {placeholder}")
+        for reversed_set in sorted(
+            _reversed_set_operation_errors(tree)
+            - _reversed_set_operation_errors(baseline_tree)
+        ):
+            errors.append(f"{relative}: {reversed_set}")
+        for alias_mutation in sorted(
+            _caller_owned_mutation_errors(tree)
+            - _caller_owned_mutation_errors(baseline_tree)
+        ):
+            errors.append(f"{relative}: {alias_mutation}")
+        for protocol_coercion in sorted(
+            _binary_protocol_coercion_errors(tree)
+            - _binary_protocol_coercion_errors(baseline_tree)
+        ):
+            errors.append(f"{relative}: {protocol_coercion}")
+        for partial_index_repair in sorted(
+            _partial_rectangular_index_fix_errors(baseline_tree, tree)
+        ):
+            errors.append(f"{relative}: {partial_index_repair}")
+        for shadowing in sorted(
+            _shadowing_definition_errors(tree)
+            - _shadowing_definition_errors(baseline_tree)
+        ):
+            errors.append(f"{relative}: {shadowing}")
+        visitor = _KeywordConflictVisitor()
+        visitor.visit(tree)
+        baseline_visitor = _KeywordConflictVisitor()
+        baseline_visitor.visit(baseline_tree)
+        for function, key, line in sorted(
+            set(visitor.conflicts) - set(baseline_visitor.conflicts)
+        ):
+            errors.append(
+                (
+                    f"{relative}:{line}: duplicate keyword arguments in {function}"
+                    if key == "<duplicate-keyword>" else
+                    f"{relative}:{line}: kwargs.setdefault({key!r}) conflicts with explicit keyword in {function}"
+                )
+            )
+        errors.extend(_unsupported_literal_command_options(
+            root, tree, relative, added_lines_by_file.get(relative, set()),
+        ))
+
+        def assignment(node: ast.AST) -> tuple[str, ast.AST] | None:
+            if not isinstance(node, (ast.Assign, ast.AnnAssign)):
+                return None
+            targets = node.targets if isinstance(node, ast.Assign) else (node.target,)
+            if len(targets) != 1 or node.value is None:
+                return None
+            return ast.unparse(targets[0]), node.value
+
+        def walk_statement_list(statements: list[ast.stmt]) -> None:
+            for index, statement in enumerate(statements):
+                if (
+                    isinstance(statement, ast.If)
+                    and int(getattr(statement, "lineno", 0))
+                    in added_lines_by_file.get(relative, set())
+                    and index > 0
+                ):
+                    previous = assignment(statements[index - 1])
+                    if previous is not None:
+                        state_target, previous_value = previous
+                        previous_text = ast.unparse(previous_value)
+                        if ".difference(" in previous_text and state_target in ast.unparse(statement.test):
+                            difference_calls = [
+                                child for child in ast.walk(previous_value)
+                                if isinstance(child, ast.Call)
+                                and isinstance(child.func, ast.Attribute)
+                                and child.func.attr == "difference"
+                            ]
+                            removed_inputs = {
+                                child.id
+                                for call in difference_calls
+                                for argument in call.args
+                                for child in ast.walk(argument)
+                                if isinstance(child, ast.Name)
+                            }
+                            branch_assignments = [
+                                current
+                                for branch in (statement.body, statement.orelse)
+                                for child in branch
+                                if (current := assignment(child)) is not None
+                            ]
+                            derived_state_targets = {
+                                target
+                                for target, value in branch_assignments
+                                if state_target in {
+                                    item.id for item in ast.walk(value)
+                                    if isinstance(item, ast.Name)
+                                }
+                            }
+                            candidate_targets = derived_state_targets or {state_target}
+                            for child in (*statement.body, *statement.orelse):
+                                current = assignment(child)
+                                if current is None or current[0] not in candidate_targets:
+                                    continue
+                                replacement_text = ast.unparse(current[1])
+                                replacement_names = {
+                                    item.id for item in ast.walk(current[1])
+                                    if isinstance(item, ast.Name)
+                                }
+                                if (
+                                    removed_inputs & replacement_names
+                                    and ".difference(" not in replacement_text
+                                ):
+                                    errors.append(
+                                        f"{relative}:{getattr(child, 'lineno', 0)}: state transition "
+                                        "reintroduces the raw input after a difference operation; "
+                                        "compute both existing-minus-incoming and "
+                                        "incoming-minus-existing residuals; a mode switch may carry "
+                                        "only the incoming-only residual; audit every empty-state "
+                                        "producer before changing a consumer guard and verify "
+                                        "empty/non-empty and chained/batched equivalence"
+                                    )
+                                previous_mode = (
+                                    previous_value.elts[-1].value
+                                    if isinstance(previous_value, ast.Tuple)
+                                    and previous_value.elts
+                                    and isinstance(previous_value.elts[-1], ast.Constant)
+                                    and isinstance(previous_value.elts[-1].value, bool)
+                                    else None
+                                )
+                                replacement_mode = (
+                                    current[1].elts[-1].value
+                                    if isinstance(current[1], ast.Tuple)
+                                    and current[1].elts
+                                    and isinstance(current[1].elts[-1], ast.Constant)
+                                    and isinstance(current[1].elts[-1].value, bool)
+                                    else None
+                                )
+                                if (
+                                    previous_mode is not None
+                                    and replacement_mode is not None
+                                    and previous_mode != replacement_mode
+                                    and state_target in replacement_text
+                                    and ".difference(" not in replacement_text
+                                ):
+                                    errors.append(
+                                        f"{relative}:{getattr(child, 'lineno', 0)}: empty difference "
+                                        "state only flips its companion mode/tag while retaining the "
+                                        "same empty value; compute the incoming-only residual before "
+                                        "switching modes and audit no-argument/reset producers before "
+                                        "changing a consumer emptiness guard"
+                                    )
+                nested_lists = [
+                    value for _field, value in ast.iter_fields(statement)
+                    if isinstance(value, list) and value
+                    and all(isinstance(item, ast.stmt) for item in value)
+                ]
+                for nested in nested_lists:
+                    walk_statement_list(nested)
+
+        walk_statement_list(tree.body)
+    # A newly added conjunct involving a collection/arity literal is a common
+    # preservation risk, but it is not a mechanical failure. Keep the risk in
+    # the check evidence so ActiveBindingGraph/DICC can inspect sibling
+    # partitions, while allowing real paired public checks to decide whether
+    # the narrowed guard is actually wrong.
+    for relation in getattr(actual_diff, "changed_relations", ()):
+        old = str(getattr(relation, "old_source", "") or "")
+        new = str(getattr(relation, "new_source", "") or "")
+        if not old or not new or " and " not in new or " and " in old:
+            continue
+        if not any(token in new for token in ("len(", "isinstance(", "type(")):
+            continue
+        old_terms = {part.strip() for part in old.split(" and ")}
+        new_terms = {part.strip() for part in new.split(" and ")}
+        added_terms = sorted(new_terms - old_terms)
+        if added_terms:
+            advisories.append(
+                f"{getattr(relation, 'file', '<changed-file>')}: guard narrowed by new conjunct(s) "
+                f"{added_terms}; inspect sibling input partitions and preservation behavior"
+            )
+    status = OutcomeStatus.PASS if not errors else OutcomeStatus.FAIL
+    return MechanicalCheck(
+        check_id=stable_id(
+            "mechanical", "structural", actual_diff.diff_id, source_hash,
+            errors, advisories,
+        ),
+        kind="STRUCTURAL",
+        command=("internal:structural-check", *checked),
+        status=status,
+        return_code=0 if status == OutcomeStatus.PASS else 1,
+        stdout="\n".join((*checked, *advisories)),
+        stderr="\n".join(errors),
+        duration_seconds=time.monotonic() - started,
+        source_hash=source_hash,
+    )
+
+
 def _import_check(
     root: Path,
     actual_diff: ActualDiff,
@@ -257,6 +666,12 @@ def run_mechanical_checks(
     checks = [
         _syntax_check(root, actual_diff, source_hash),
         _scope_check(actual_diff, source_hash),
+        _structural_check(
+            root,
+            actual_diff,
+            source_hash,
+            Path(baseline_root).resolve() if baseline_root is not None else None,
+        ),
         _import_check(
             root, actual_diff, source_hash, timeout_seconds,
             Path(baseline_root).resolve() if baseline_root is not None else None,

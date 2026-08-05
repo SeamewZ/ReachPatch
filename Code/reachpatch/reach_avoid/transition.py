@@ -75,7 +75,7 @@ from reachpatch.reach_avoid.trajectory import (
 )
 from reachpatch.reach_avoid.metrics import (
     RevisionEvidence, component_shadow_pass,
-    progress_metrics,
+    progress_metrics, progress_vector_from_trial_comparison,
     progress_vector_from_comparisons, should_commit,
 )
 from reachpatch.reach_avoid.state import outcomes_from_challenges
@@ -216,8 +216,46 @@ def build_transition_certificate(
         for item in getattr(observations, "challenge_results", ())
         if getattr(item, "challenge_id", None)
     )
+    locked_comparison = dict(
+        getattr(after_state, "runtime_metrics", {}).get(
+            "last_locked_trial_comparison", {},
+        )
+        or {}
+    )
+    locked_executed_ids = tuple(map(
+        str, locked_comparison.get("executed_check_ids", ()),
+    ))
+    locked_set = getattr(after_state, "current_locked_check_set", None)
+    locked_target_ids = {
+        str(item.check_id)
+        for item in (
+            *getattr(locked_set, "target_checks", ()),
+            *getattr(locked_set, "counterexample_checks", ()),
+        )
+    }
+    locked_preservation_ids = {
+        str(item.check_id)
+        for item in getattr(locked_set, "preservation_checks", ())
+    }
+    locked_counterexample_ids = {
+        str(item.check_id)
+        for item in getattr(locked_set, "counterexample_checks", ())
+    }
+    locked_mechanical_ids = {
+        str(item.check_id)
+        for item in getattr(locked_set, "mechanical_checks", ())
+    } | {
+        str(check_id)
+        for key in (
+            "mechanical_failures_before", "mechanical_failures_after",
+        )
+        for check_id in locked_comparison.get(key, ())
+    }
     executed_checks = tuple(dict.fromkeys(
-        str(item.check_id) for item in comparisons
+        (
+            *(str(item.check_id) for item in comparisons),
+            *locked_executed_ids,
+        )
     ))
     before_units = getattr(before_state.active_binding_graph, "units", {})
     after_units = getattr(active_binding_graph, "units", {})
@@ -309,7 +347,10 @@ def build_transition_certificate(
             if unit.binding_id in affected_units
         })),
         graph_delta=graph_delta,
-        mechanical_check_ids=tuple(str(getattr(item, "check_id", "")) for item in mechanical_checks),
+        mechanical_check_ids=tuple(dict.fromkeys((
+            *(str(getattr(item, "check_id", "")) for item in mechanical_checks),
+            *sorted(locked_mechanical_ids),
+        ))),
         outcome_ids=tuple(sorted(getattr(after_state, "outcomes", {}))),
         new_counterexample_ids=tuple(sorted(after_counterexamples - before_counterexamples)),
         eliminated_counterexample_ids=tuple(sorted(before_counterexamples - after_counterexamples)),
@@ -352,9 +393,18 @@ def build_transition_certificate(
         active_binding_graph_hash=active_binding_graph.graph_hash(),
         affected_binding_unit_ids=affected_units,
         executed_check_ids=executed_checks,
-        target_comparisons=tuple(str(item.check_id) for item in target_rows),
-        preservation_comparisons=tuple(str(item.check_id) for item in preservation_rows),
-        challenge_comparisons=challenge_ids,
+        target_comparisons=tuple(dict.fromkeys((
+            *(str(item.check_id) for item in target_rows),
+            *(check_id for check_id in locked_executed_ids if check_id in locked_target_ids),
+        ))),
+        preservation_comparisons=tuple(dict.fromkeys((
+            *(str(item.check_id) for item in preservation_rows),
+            *(check_id for check_id in locked_executed_ids if check_id in locked_preservation_ids),
+        ))),
+        challenge_comparisons=tuple(dict.fromkeys((
+            *challenge_ids,
+            *(check_id for check_id in locked_executed_ids if check_id in locked_counterexample_ids),
+        ))),
         requirements_improved=requirements_improved,
         requirements_regressed=requirements_regressed,
         counterexamples_closed=tuple(sorted(before_counterexamples - after_counterexamples)),
@@ -1105,12 +1155,23 @@ def _apply_revision_edits(tree: Path, revision: GeneratorRevision) -> None:
             edit.relative_path,
             path.read_text(encoding="utf-8", errors="strict").splitlines(),
         )
-        actual = "\n".join(lines[edit.start_line - 1:edit.end_line])
+        if edit.start_line == len(lines) + 1 and not edit.expected_source.strip():
+            effective_end = len(lines)
+        elif 1 <= edit.start_line <= len(lines):
+            effective_end = min(edit.end_line, len(lines))
+        else:
+            raise ValueError(
+                f"invalid revision range: {edit.relative_path}:"
+                f"{edit.start_line}-{edit.end_line}"
+            )
+        actual = "\n".join(lines[edit.start_line - 1:effective_end])
         if actual != edit.expected_source.rstrip("\n"):
             raise ValueError(
                 f"expected source mismatch: {edit.relative_path}:{edit.start_line}"
             )
-        by_file.setdefault(edit.relative_path, []).append(edit)
+        by_file.setdefault(edit.relative_path, []).append(
+            replace(edit, end_line=effective_end)
+        )
     for relative, edits in by_file.items():
         ordered = sorted(edits, key=lambda item: (item.start_line, item.end_line), reverse=True)
         previous_start = len(prepared[relative]) + 1
@@ -1336,6 +1397,20 @@ def evaluate_patch_revision(
         # best-effort incumbent.
         avoid_reasons.add("WORKING_PATCH_ERASURE")
     if not mechanical_ok:
+        # Keep the failed mechanical execution in the authoritative
+        # ObservationBundle.  The trajectory controller can then certify a
+        # deterministic syntax/structure/import failure and give the same
+        # working patch to the generator for one causal correction.  Without
+        # this record the packet was only diagnostic text and could never
+        # trigger the allowed mechanical-repair path.
+        state.observations = ObservationBundle.create(
+            revision=state.transition_index + 1,
+            check_comparisons=state.check_comparisons,
+            mechanical_checks=checks,
+            environment_frontier_ids=(
+                item.frontier_id for item in state.environment_frontiers
+            ),
+        )
         avoid_reasons.add("MECHANICAL_FAILURE")
     if incremental.forbidden_paths:
         avoid_reasons.add("FORBIDDEN_EDIT")
@@ -2155,6 +2230,10 @@ def evaluate_patch_revision(
     execution_progress = progress_vector_from_comparisons(
         state.check_comparisons, public_comparisons,
     )
+    if locked_comparison is not None:
+        execution_progress = progress_vector_from_trial_comparison(
+            locked_comparison,
+        )
     infrastructure_blocked = any(
         item.classification in {
             CheckClassification.SAME_INFRA_FAILURE,

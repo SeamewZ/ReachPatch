@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import os
 import stat
+import subprocess
 import sys
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
@@ -23,6 +25,15 @@ from reachpatch.execution.runners import (
 )
 
 
+def _git(repository: Path, *arguments: str) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(
+        ("git", "-C", str(repository), *arguments),
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+
+
 def _runner(cls, repository: Path, artifact_root: Path, **kwargs):
     return cls(
         repository,
@@ -30,6 +41,45 @@ def _runner(cls, repository: Path, artifact_root: Path, **kwargs):
         base_commit="base-commit",
         **kwargs,
     )
+
+
+def test_public_docker_repository_delta_uses_case_tree_git_index(tmp_path):
+    case_tree = tmp_path / "case"
+    case_tree.mkdir()
+    _git(case_tree, "init")
+    _git(case_tree, "config", "user.email", "reachpatch@example.invalid")
+    _git(case_tree, "config", "user.name", "ReachPatch Test")
+    (case_tree / "kept.py").write_text("value = 1\n", encoding="utf-8")
+    (case_tree / "deleted.py").write_text("old = True\n", encoding="utf-8")
+    _git(case_tree, "add", "kept.py", "deleted.py")
+    _git(case_tree, "commit", "-m", "base")
+
+    run_root = tmp_path / "run"
+    checkpoint = run_root / "checkpoint"
+    checkpoint.mkdir(parents=True)
+    (checkpoint / "kept.py").write_text("value = 2\n", encoding="utf-8")
+    (checkpoint / "added.py").write_text("new = True\n", encoding="utf-8")
+    broker = PublicDockerExecutionBroker(
+        socket_path=tmp_path / "broker.sock",
+        image="unused",
+        case_tree=case_tree,
+        case_run_root=run_root,
+    )
+
+    delta = broker._repository_delta(checkpoint)
+
+    assert delta is not None
+    base_commit, copied, deleted = delta
+    assert base_commit == _git(case_tree, "rev-parse", "HEAD").stdout.strip()
+    assert copied == ("added.py", "kept.py")
+    assert deleted == ("deleted.py",)
+
+
+def test_public_docker_rejects_unsafe_delta_paths() -> None:
+    assert PublicDockerExecutionBroker._safe_relative_path("pkg/api.py") == "pkg/api.py"
+    assert PublicDockerExecutionBroker._safe_relative_path("../outside.py") is None
+    assert PublicDockerExecutionBroker._safe_relative_path("/absolute.py") is None
+    assert PublicDockerExecutionBroker._safe_relative_path(".git/config") is None
 
 
 def test_django_runner_executes_project_runtests_label(tmp_path):
@@ -115,6 +165,27 @@ def test_pytest_runner_executes_selector_in_isolated_environment(tmp_path):
     assert execution.stable
 
 
+def test_specific_public_selector_uses_static_reach_evidence_without_profiler(
+    tmp_path,
+):
+    repository = tmp_path / "repo"
+    repository.mkdir()
+    (repository / "test_public.py").write_text(
+        "def test_public_contract():\n    assert True\n", encoding="utf-8",
+    )
+    runner = _runner(PytestProjectRunner, repository, tmp_path / "artifacts")
+    check = runner.compile_visible_checks((
+        "test_public.py::test_public_contract",
+    ))[0]
+    check = replace(check, executed_symbol_ids=("pkg.api.public",))
+
+    execution = runner.run_check(check, repeats=2)
+
+    assert execution.status == CheckStatus.PASS
+    assert execution.stable
+    assert execution.executed_symbol_ids == ("pkg.api.public",)
+
+
 def test_health_check_distinguishes_missing_dependency_and_invalid_selector(tmp_path):
     repository = tmp_path / "repo"
     repository.mkdir()
@@ -187,6 +258,30 @@ def test_failure_signature_ignores_traceback_line_number_only() -> None:
     assert first != changed_mechanism
 
 
+def test_failure_signature_ignores_runner_seed_and_elapsed_time() -> None:
+    first = PytestProjectRunner._failure_signature(
+        CheckStatus.FAIL,
+        1,
+        "random seed: 12345\n0 passed, 1 exceptions, in 0.20 seconds\n",
+        "NotImplementedError: finite systems only",
+    )
+    repeated = PytestProjectRunner._failure_signature(
+        CheckStatus.FAIL,
+        1,
+        "random seed: 98765\n0 passed, 1 exceptions, in 1.37 seconds\n",
+        "NotImplementedError: finite systems only",
+    )
+    changed = PytestProjectRunner._failure_signature(
+        CheckStatus.FAIL,
+        1,
+        "random seed: 98765\n0 passed, 1 exceptions, in 1.37 seconds\n",
+        "ValueError: finite systems only",
+    )
+
+    assert first == repeated
+    assert first != changed
+
+
 def test_container_traceback_maps_testbed_to_project_frame(tmp_path) -> None:
     repository = tmp_path / "repo"
     (repository / "pkg").mkdir(parents=True)
@@ -235,6 +330,23 @@ def test_unconfigured_django_settings_are_an_environment_failure(tmp_path):
         "import sys; sys.stderr.write("
         "'django.core.exceptions.ImproperlyConfigured: Requested setting '"
         "+ 'USE_I18N, but settings are not configured.'); sys.exit(1)",
+    ),))[0]
+
+    health = runner.health_check(check)
+
+    assert health.status == EnvironmentHealthStatus.UNSUPPORTED_RUNTIME
+    assert health.execution.status == CheckStatus.INVALID_ENVIRONMENT
+
+
+def test_misconfigured_database_name_is_an_environment_failure(tmp_path):
+    repository = tmp_path / "repo"
+    repository.mkdir()
+    runner = _runner(PytestProjectRunner, repository, tmp_path / "artifacts")
+    check = runner.compile_command_checks(((
+        sys.executable, "-c",
+        "import sys; sys.stderr.write("
+        "'django.core.exceptions.ImproperlyConfigured: settings.DATABASES is '"
+        "+ 'improperly configured. Please supply the NAME value.'); sys.exit(1)",
     ),))[0]
 
     health = runner.health_check(check)

@@ -84,9 +84,12 @@ HARNESS_HISTORY_ROOT = HARNESS_ROOT / "_history"
 PUBLIC_RUNTIME_DEPENDENCY_ROOT = CODE_ROOT / ".reachpatch_runtime_deps" / "python"
 GENERATION_ISOLATION_ENV = "REACHPATCH_GENERATION_ISOLATED"
 GENERATION_ISOLATION_ENGINE = "bubblewrap_public_only_v1"
-GENERATION_MEMORY_RESERVE_MIB = 16 * 1024
-GENERATION_MEMORY_PER_WORKER_MIB = 16 * 1024
-GENERATION_DISK_RESERVE_MIB = 40 * 1024
+GENERATION_MAX_WORKERS = 10
+# Existing prepared case trees and images make incremental single-case runs
+# substantially cheaper than a cold 51-case run.  Keep an 8 GiB emergency
+# reserve without rejecting otherwise safe incremental generation on a large,
+# nearly full experiment volume.
+GENERATION_DISK_RESERVE_MIB = 8 * 1024
 LINEAGE_ENV = "REACHPATCH_GENERATION_LINEAGE"
 
 
@@ -193,14 +196,11 @@ def _safe_generation_worker_count(
 ) -> int:
     if requested < 1:
         raise ValueError("generation workers must be positive")
-    observed = snapshot if snapshot is not None else _memory_snapshot()
-    available = observed.get("memavailable_mib")
-    if available is None:
-        return min(requested, 2)
-    headroom = available - GENERATION_MEMORY_RESERVE_MIB
-    if headroom < GENERATION_MEMORY_PER_WORKER_MIB:
-        return 0
-    return min(requested, 10, int(headroom // GENERATION_MEMORY_PER_WORKER_MIB))
+    # Memory telemetry remains in the run report, but it is observational.
+    # The caller-selected fixed concurrency must not be silently reduced by a
+    # host-wide MemAvailable heuristic that does not reflect worker cgroups.
+    del snapshot
+    return min(requested, GENERATION_MAX_WORKERS)
 
 
 def _disk_snapshot(path: Path = CODE_ROOT) -> dict[str, float]:
@@ -610,12 +610,6 @@ def validate_generation_preflight(
         })
     memory = _memory_snapshot()
     disk = _disk_snapshot()
-    if _safe_generation_worker_count(1, memory) == 0:
-        failures.append({
-            "instance_id": "*",
-            "check": "memory_headroom",
-            "detail": json.dumps(memory, sort_keys=True),
-        })
     if disk["disk_free_mib"] < GENERATION_DISK_RESERVE_MIB:
         failures.append({
             "instance_id": "*",
@@ -1619,10 +1613,6 @@ def generate(
     initial_memory = _memory_snapshot()
     effective_workers = _safe_generation_worker_count(max_workers, initial_memory)
     memory_observations.append({"event": "start", **initial_memory})
-    if public and effective_workers == 0:
-        raise RuntimeError(
-            "insufficient memory headroom for one isolated generation worker"
-        )
     pending = iter(public)
     exhausted = False
     with ThreadPoolExecutor(
@@ -1634,12 +1624,10 @@ def generate(
             nonlocal exhausted
             if exhausted:
                 return
-            current = _memory_snapshot()
-            current_limit = _safe_generation_worker_count(max_workers, current)
             disk = _disk_snapshot()
             if disk["disk_free_mib"] < GENERATION_DISK_RESERVE_MIB:
                 return
-            while len(active) < min(effective_workers, current_limit):
+            while len(active) < effective_workers:
                 try:
                     item = next(pending)
                 except StopIteration:
@@ -1680,7 +1668,7 @@ def generate(
             submit_available()
         if not exhausted:
             raise RuntimeError(
-                "generation stopped submitting cases because memory headroom "
+                "generation stopped submitting cases because disk headroom "
                 "remained below the configured safety threshold"
             )
     merged_results = sorted(prior_by_id.values(), key=lambda item: str(item.get("instance_id", "")))
@@ -1693,8 +1681,7 @@ def generate(
         "deepseek_model": model,
         "requested_concurrency": max_workers,
         "deepseek_concurrency": effective_workers,
-        "memory_reserve_mib": GENERATION_MEMORY_RESERVE_MIB,
-        "memory_per_worker_mib": GENERATION_MEMORY_PER_WORKER_MIB,
+        "memory_policy": "OBSERVATIONAL_ONLY",
         "memory_observations": memory_observations,
         "case_timeout_seconds": None if case_timeout is None or case_timeout <= 0 else case_timeout,
         "forced": force,

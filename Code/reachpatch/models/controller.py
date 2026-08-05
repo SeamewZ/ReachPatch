@@ -196,6 +196,7 @@ class TrialComparison(SerializableRecord):
     confirmed_target_failure_after: tuple[str, ...] = ()
     preservation_regressions_before: tuple[str, ...] = ()
     preservation_regressions_after: tuple[str, ...] = ()
+    mechanical_failures_before: tuple[str, ...] = ()
     mechanical_failures_after: tuple[str, ...] = ()
     unknown_check_ids: tuple[str, ...] = ()
 

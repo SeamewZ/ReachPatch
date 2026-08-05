@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import ast
 import copy
 import json
 import os
@@ -240,6 +241,105 @@ def _public_check_commands(
         seen.add(command)
         selected += 1
     return tuple(commands)
+
+
+def _inferred_public_test_paths(
+    issue: str,
+    repository_index: Any,
+    repository: Path,
+    *,
+    limit: int,
+) -> tuple[str, ...]:
+    """Rank public tests by real issue-symbol references before word overlap."""
+
+    issue_identifiers = {
+        token.lower()
+        for token in re.findall(r"[A-Za-z_]\w*", issue)
+        if len(token) >= 3
+    }
+    indexed_symbols = {
+        str(symbol).rsplit(".", 1)[-1].lower()
+        for symbol in getattr(repository_index, "symbols", {})
+    }
+    issue_symbols = issue_identifiers & indexed_symbols
+    ranked: list[tuple[int, int, int, str]] = []
+    for relative, references in getattr(
+        repository_index, "test_references", {},
+    ).items():
+        if not is_executable_test_path(relative) or is_official_only_path(relative):
+            continue
+        normalized_references = {
+            str(name).rsplit(".", 1)[-1].lower() for name in references
+        }
+        symbol_overlap = issue_symbols & normalized_references
+        compact_path = re.sub(r"[^a-z0-9]", "", str(relative).lower())
+        path_symbols = {
+            symbol for symbol in issue_symbols
+            if len(symbol) >= 4 and symbol in compact_path
+        }
+        if issue_symbols and not (symbol_overlap or path_symbols):
+            continue
+        lexical_overlap = {
+            token for token in issue_identifiers & normalized_references
+            if len(token) >= 5
+        }
+        if not issue_symbols and not lexical_overlap:
+            continue
+        ranked.append((
+            -sum(len(symbol) for symbol in symbol_overlap | path_symbols),
+            -len(symbol_overlap | path_symbols),
+            -sum(len(token) for token in lexical_overlap),
+            str(relative),
+        ))
+    selected: list[str] = []
+    for *_score, relative in sorted(ranked):
+        if len(selected) >= max(0, limit):
+            break
+        test_path = repository / relative
+        selectors: list[tuple[int, str]] = []
+        try:
+            source = test_path.read_text(encoding="utf-8", errors="replace")
+            tree = ast.parse(source, filename=str(relative))
+        except (OSError, SyntaxError, UnicodeError):
+            tree = None
+        if tree is not None and issue_symbols:
+            functions: list[tuple[str, ast.FunctionDef | ast.AsyncFunctionDef]] = []
+            for node in tree.body:
+                if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                    functions.append((node.name, node))
+                elif isinstance(node, ast.ClassDef):
+                    functions.extend(
+                        (f"{node.name}::{child.name}", child)
+                        for child in node.body
+                        if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef))
+                    )
+            for qualified_name, function in functions:
+                leaf_name = qualified_name.rsplit("::", 1)[-1]
+                if not leaf_name.startswith("test"):
+                    continue
+                referenced = {
+                    child.id.lower()
+                    for child in ast.walk(function)
+                    if isinstance(child, ast.Name)
+                }
+                referenced.update(
+                    child.attr.lower()
+                    for child in ast.walk(function)
+                    if isinstance(child, ast.Attribute)
+                )
+                overlap = referenced & issue_symbols
+                if overlap:
+                    selectors.append((
+                        -sum(len(symbol) for symbol in overlap), qualified_name,
+                    ))
+        if selectors:
+            for _function_score, qualified_name in sorted(selectors)[:2]:
+                selected.append(f"{test_path}::{qualified_name}")
+                if len(selected) >= max(0, limit):
+                    break
+        else:
+            selected.append(str(test_path))
+    return tuple(selected)
 
 
 def _named_public_checks(state: ReachAvoidState) -> dict[str, tuple[str, ...]]:
@@ -633,17 +733,12 @@ class ReachPatchController:
             deadline=Deadline.after(self.config.repository_index_deadline_seconds),
         )
         timings["repository_index_seconds"] = time.perf_counter() - index_started
-        issue_symbols = {
-            token.rsplit(".", 1)[-1].lower()
-            for token in re.findall(r"[A-Za-z_]\w*(?:\.[A-Za-z_]\w*)*", instance.issue)
-        }
-        inferred_public_tests = tuple(
-            str(repository / relative)
-            for relative, references in sorted(repository_index.test_references.items())
-            if issue_symbols & {name.rsplit(".", 1)[-1].lower() for name in references}
-            and is_executable_test_path(relative)
-            and not is_official_only_path(relative)
-        )[: min(20, self.config.max_precise_files)]
+        inferred_public_tests = _inferred_public_test_paths(
+            instance.issue,
+            repository_index,
+            repository,
+            limit=min(20, self.config.max_precise_files),
+        )
         selected_visible_tests = tuple(dict.fromkeys(
             (*visible_tests, *inferred_public_tests)
         ))
@@ -1005,8 +1100,15 @@ class ReachPatchController:
             initial_invocations = 0
             initial_tool_turns = 0
             context_continuations = 0
+            # Initial recovery remains one persistent patch trajectory. A
+            # fourth bounded invocation is reserved for an explicitly rejected
+            # staged patch whose validator names a concrete correction; this is
+            # not an evidence-free post-checkpoint revision.
+            max_initial_invocations = 5
+            max_context_continuations = 2
             tools = None
-            while initial_invocations < 2:
+            reuse_rejected_staged_tools = False
+            while initial_invocations < max_initial_invocations:
                 self.generator_agent.max_tool_turns = (
                     self.config.initial_generator_max_turns
                     if initial_invocations == 0
@@ -1018,11 +1120,22 @@ class ReachPatchController:
                 self.generator_agent.max_completion_tokens = (
                     self.config.initial_generator_token_budget
                 )
-                tools = self._repair_tools(state, initial=True)
+                if tools is None or not reuse_rejected_staged_tools:
+                    tools = self._repair_tools(state, initial=True)
+                reuse_rejected_staged_tools = False
                 for api_attempt in range(2):
                     try:
-                        revision = self.generator_agent.generate_initial_patch(
-                            state, conversation, tools
+                        recovery_method = getattr(
+                            self.generator_agent,
+                            "recover_initial_patch",
+                            self.generator_agent.generate_initial_patch,
+                        )
+                        revision = (
+                            self.generator_agent.generate_initial_patch(
+                                state, conversation, tools,
+                            )
+                            if initial_invocations == 0
+                            else recovery_method(state, conversation, tools)
                         )
                         initial_error = None
                         break
@@ -1034,21 +1147,94 @@ class ReachPatchController:
                 initial_invocations += 1
                 if revision is not None:
                     initial_tool_turns += revision.tool_turns
-                if initial_error is not None or revision is None or revision.edits:
+                if initial_error is not None or revision is None:
                     break
-                if not revision.context_requests or context_continuations >= 1:
+                if revision.status == "STAGED_PATCH_REVIEW_REJECTED":
+                    state.runtime_metrics[
+                        "initial_staged_patch_review_rejection_count"
+                    ] = int(state.runtime_metrics.get(
+                        "initial_staged_patch_review_rejection_count", 0,
+                    )) + 1
+                    state.runtime_metrics.setdefault(
+                        "root_cause_labels", [],
+                    ).append("STAGED_PATCH_REVIEW_REJECTED")
+                    if initial_invocations < max_initial_invocations:
+                        if tools.discard_rejected_import_only_stage():
+                            state.runtime_metrics[
+                                "discarded_rejected_import_only_stage_count"
+                            ] = int(state.runtime_metrics.get(
+                                "discarded_rejected_import_only_stage_count", 0,
+                            )) + 1
+                        elif tools.discard_quality_rejected_stage():
+                            state.runtime_metrics[
+                                "discarded_quality_rejected_stage_count"
+                            ] = int(state.runtime_metrics.get(
+                                "discarded_quality_rejected_stage_count", 0,
+                            )) + 1
+                        # The rejected edit set was never checkpointed. Reuse
+                        # the same transactional executor and its retained diff,
+                        # but reopen staging on repository source so recovery can
+                        # change a local executable statement instead of being
+                        # pinned to repeated whole-set replacements.
+                        reuse_rejected_staged_tools = True
+                        state.runtime_metrics[
+                            "initial_review_replacement_continuation_count"
+                        ] = int(state.runtime_metrics.get(
+                            "initial_review_replacement_continuation_count", 0,
+                        )) + 1
+                        continue
+                    state.runtime_metrics[
+                        "initial_staged_patch_review_exhausted"
+                    ] = True
                     break
-                expanded = self._expand_generator_context(
-                    state, tuple(revision.context_requests),
-                )
-                state.runtime_metrics["initial_context_expansion_requested"] = True
-                state.runtime_metrics["initial_context_expansion_succeeded"] = expanded
-                if not expanded:
+                if revision.edits:
                     break
-                context_continuations += 1
-                state.runtime_metrics["initial_context_continuation_count"] = (
-                    context_continuations
-                )
+                if (
+                    revision.context_requests
+                    and context_continuations < max_context_continuations
+                ):
+                    expanded = self._expand_generator_context(
+                        state, tuple(revision.context_requests),
+                    )
+                    state.runtime_metrics["initial_context_expansion_requested"] = True
+                    state.runtime_metrics["initial_context_expansion_succeeded"] = expanded
+                    if not expanded:
+                        # A request can name symbols that are already present in
+                        # the bounded graph (or cannot enlarge it under its cap).
+                        # That is generator nonprogress, not an external blocker.
+                        # Preserve the first task and inspected source and use the
+                        # single initial-recovery invocation to synthesize the edit.
+                        state.runtime_metrics[
+                            "initial_context_expansion_redundant"
+                        ] = True
+                        if initial_invocations < max_initial_invocations:
+                            continue
+                        break
+                    context_continuations += 1
+                    state.runtime_metrics["initial_context_continuation_count"] = (
+                        context_continuations
+                    )
+                    continue
+                recoverable_nonprogress = revision.status in {
+                    "CONTEXT_ONLY",
+                    "DECLARED_BLOCKER",
+                    "GENERATOR_BROWSE_LOOP",
+                }
+                if (
+                    # A contextless model has no new executable evidence to
+                    # consume. Keep the bounded recovery useful for a short
+                    # initial diagnosis, but do not spend the expanded
+                    # quality-recovery allowance on repeated browse loops.
+                    initial_invocations < min(max_initial_invocations, 3)
+                    and recoverable_nonprogress
+                ):
+                    state.runtime_metrics["initial_nonprogress_recovery_count"] = int(
+                        state.runtime_metrics.get(
+                            "initial_nonprogress_recovery_count", 0,
+                        )
+                    ) + 1
+                    continue
+                break
             if initial_error is not None:
                 self._record_generator_block(state, initial_error)
             timings["first_patch_generation_seconds"] = (
@@ -1086,11 +1272,24 @@ class ReachPatchController:
                     missing_readiness
                 )
                 if revision.edits and missing_readiness:
-                    state.termination_status = "FIRST_PATCH_READINESS_BLOCKED"
+                    # Readiness is a quality signal, not permission to erase a
+                    # real first edit.  The generator may have staged a
+                    # reachable patch before a later browse/review call failed
+                    # (for example because a replacement used a stale source
+                    # anchor).  Keep that edit set in the normal initial
+                    # transition so mechanical validation and the immutable
+                    # first checkpoint can preserve it.  It remains explicitly
+                    # uncertified and cannot support Reach or an evidence-free
+                    # revision.
+                    state.runtime_metrics[
+                        "first_patch_readiness_blocked"
+                    ] = True
                     state.runtime_metrics.setdefault("root_cause_labels", []).append(
                         "FIRST_PATCH_READINESS_INCOMPLETE"
                     )
-                    revision = None
+                    state.runtime_metrics[
+                        "first_patch_readiness_preserved"
+                    ] = True
             recovery_started = time.perf_counter()
             try:
                 target_recovery = recover_executable_targets_bounded(
@@ -1198,7 +1397,11 @@ class ReachPatchController:
                 confidence=Confidence.CONFIRMED,
                 status=target_recovery.status,
             )
-            if revision is not None and revision.edits:
+            if (
+                revision is not None
+                and revision.edits
+                and revision.status != "STAGED_PATCH_REVIEW_REJECTED"
+            ):
                 validation_started = time.perf_counter()
                 conversion = convert_revision_action(state, revision)
                 if conversion.status in {
@@ -1245,6 +1448,11 @@ class ReachPatchController:
                     self._record_action_rejection(state, revision, conversion)
             elif revision is not None and revision.context_requests:
                 state.runtime_metrics["initial_context_only"] = True
+            elif (
+                revision is not None
+                and revision.status == "STAGED_PATCH_REVIEW_REJECTED"
+            ):
+                state.runtime_metrics["initial_generator_nonprogress"] = True
             elif revision is not None and revision.status == "GENERATOR_BROWSE_LOOP":
                 state.runtime_metrics.setdefault("root_cause_labels", []).append(
                     "GENERATOR_BROWSE_LOOP"
@@ -2582,6 +2790,15 @@ class ReachPatchController:
                             failure.binding_unit_id is not None
                             and packet.binding_unit_id == failure.binding_unit_id
                         )
+                        or (
+                            failure.kind == "CONFIRMED_MECHANICAL_FAILURE"
+                            and any(
+                                str(item.get("check_id", "")) == failure.check_id
+                                for item in getattr(
+                                    packet, "actual_observation", {}
+                                ).get("failed_checks", ())
+                            )
+                        )
                     )
                 )
             )
@@ -2765,11 +2982,28 @@ class ReachPatchController:
         finalize_best_patch(state)
         refresh_confirmed_failures(state)
         if submitted >= revision_limit and not in_target_set(state):
-            state.termination_status = (
-                "REVISION_BUDGET_EXHAUSTED_WITH_UNCERTIFIED_PATCH"
-                if state.checkpoint.patch.canonical_diff
-                else "REVISION_BUDGET_EXHAUSTED_WITH_TARGET_FAILURE"
+            mechanical_only = bool(state.confirmed_failures) and all(
+                item.kind == "CONFIRMED_MECHANICAL_FAILURE"
+                for item in state.confirmed_failures
             )
+            # A malformed first submission is retained as the immutable
+            # best-effort artifact when the bounded structural retry itself
+            # cannot produce a comparable patch.  Do not relabel that
+            # preservation fallback as a target-budget exhaustion.
+            if (
+                mechanical_only
+                and state.patch_trajectory is not None
+                and state.patch_trajectory.best_evidence_patch.checkpoint_id
+                == state.patch_trajectory.first_patch.checkpoint_id
+            ):
+                state.termination_status = "EVIDENCE_LIMITED_COMPLETE"
+                state.reach_status = "EVIDENCE_LIMITED_COMPLETE"
+            else:
+                state.termination_status = (
+                    "REVISION_BUDGET_EXHAUSTED_WITH_UNCERTIFIED_PATCH"
+                    if state.checkpoint.patch.canonical_diff
+                    else "REVISION_BUDGET_EXHAUSTED_WITH_TARGET_FAILURE"
+                )
         elif not in_target_set(state) and state.termination_status is None:
             state.termination_status = "EVIDENCE_LIMITED_COMPLETE"
         return state, self.seal(state, session)

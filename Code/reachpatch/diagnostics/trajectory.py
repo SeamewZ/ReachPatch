@@ -97,8 +97,21 @@ def _target_catalog(
 def _locked_comparison(transition: dict[str, Any]) -> dict[str, Any]:
     graph_delta = dict(transition.get("graph_delta", {}) or {})
     locked = dict(graph_delta.get("locked_check_set", {}) or {})
+    trial = dict(graph_delta.get("locked_trial_comparison", {}) or {})
     before_ids = tuple(map(str, locked.get("before_check_ids", ())))
     after_ids = tuple(map(str, locked.get("after_check_ids", ())))
+    if not before_ids:
+        before_ids = tuple(
+            str(item.get("check_id", ""))
+            for item in trial.get("before_results", ())
+            if item.get("check_id")
+        )
+    if not after_ids:
+        after_ids = tuple(
+            str(item.get("check_id", ""))
+            for item in trial.get("after_results", ())
+            if item.get("check_id")
+        )
     if not before_ids:
         before_ids = tuple(map(str, transition.get("before_executed_check_ids", ())))
     if not after_ids:
@@ -114,6 +127,8 @@ def _locked_comparison(transition: dict[str, Any]) -> dict[str, Any]:
 def _transition_authority(
     transition: dict[str, Any], catalog: dict[str, dict[str, Any]]
 ) -> str:
+    if transition.get("mechanical_check_ids"):
+        return "MECHANICAL"
     authorities = {
         catalog[check_id]["authority"]
         for check_id in map(str, transition.get("target_comparisons", ()))
@@ -132,15 +147,29 @@ def _confirmed_transition(
 ) -> bool:
     lock = _locked_comparison(transition)
     authority = _transition_authority(transition, catalog)
+    graph_delta = dict(transition.get("graph_delta", {}) or {})
+    trial = dict(graph_delta.get("locked_trial_comparison", {}) or {})
+    before_results = tuple(trial.get("before_results", ()))
+    after_results = tuple(trial.get("after_results", ()))
+    mechanical_confirmed = (
+        bool(transition.get("mechanical_check_ids"))
+        and bool(before_results)
+        and bool(after_results)
+        and all(
+            bool(item.get("stable"))
+            and str(item.get("status", "")) in {"PASS", "FAIL"}
+            for item in (*before_results, *after_results)
+        )
+    )
     target_or_preservation = bool(
         transition.get("target_comparisons")
         or transition.get("preservation_comparisons")
         or transition.get("challenge_comparisons")
     )
     return (
-        authority in {"A", "B", "C"}
+        (authority in {"A", "B", "C"} or mechanical_confirmed)
         and lock["comparable"]
-        and target_or_preservation
+        and (target_or_preservation or mechanical_confirmed)
         and bool(transition.get("mechanical_pass", False))
     )
 
@@ -158,8 +187,13 @@ def replay_monotonic_policy(report: dict[str, Any]) -> dict[str, Any]:
         metrics = dict(revision.get("progress_after", {}) or {})
         target_delta = int(metrics.get("confirmed_target_pass_delta", 0))
         regression_delta = int(metrics.get("confirmed_regression_delta", 0))
+        mechanical_delta = int(metrics.get("mechanical_health_delta", 0))
         mechanical_failures = int(metrics.get("mechanical_failure_count", 0))
-        if (target_delta > 0 or regression_delta < 0) and mechanical_failures == 0:
+        if (
+            target_delta > 0
+            or regression_delta < 0
+            or mechanical_delta > 0
+        ) and mechanical_failures == 0:
             best_hash = str(revision.get("after_patch_hash") or best_hash)
             promoted.append(transition_id)
         else:
@@ -175,12 +209,44 @@ def replay_monotonic_policy(report: dict[str, Any]) -> dict[str, Any]:
 def build_revision_trajectory_report(run_root: str | Path) -> dict[str, Any]:
     root = Path(run_root).resolve()
     envelopes = _read_envelopes(root)
+    terminal_path = root / "terminal_certificate.json"
+    terminal = (
+        json.loads(terminal_path.read_text(encoding="utf-8"))
+        if terminal_path.is_file() else {}
+    )
     patches = [
         item for item in _artifacts(envelopes, "working_patch")
         if item.get("canonical_diff")
     ]
     if not patches:
-        raise ValueError(f"run has no nonempty working patch: {root}")
+        return {
+            "instance_id": str(terminal.get("instance_id") or root.name),
+            "run_root": str(root),
+            "diagnostic_status": "NO_NONEMPTY_CHECKPOINT",
+            "first_patch_hash": "",
+            "first_patch_checkpoint_id": None,
+            "patch_hashes": [],
+            "revisions": [],
+            "target_catalog": [],
+            "certified_target_ids": [],
+            "recorded_final_patch_hash": str(
+                terminal.get("final_diff_hash", "")
+            ),
+            "recorded_final_checkpoint": str(
+                terminal.get("final_checkpoint_id", "")
+            ),
+            "recorded_reach": bool(terminal.get("graph_reached", False)),
+            "certified_reach": False,
+            "first_patch_was_modified": False,
+            "known_patch_count": 0,
+            "policy_replay": {
+                "selected_patch_hash": "",
+                "used_first_patch": False,
+                "promoted_transition_ids": [],
+                "rejected_transition_ids": [],
+                "terminal_reason": "NO_NONEMPTY_CHECKPOINT",
+            },
+        }
     first = patches[0]
     patch_by_hash = {
         str(item["canonical_diff_hash"]): item for item in patches
@@ -211,6 +277,26 @@ def build_revision_trajectory_report(run_root: str | Path) -> dict[str, Any]:
         transition_id = str(transition.get("transition_id", ""))
         packets = counterexamples_by_transition.get(transition_id, ())
         confirmed = _confirmed_transition(transition, catalog)
+        graph_delta = dict(transition.get("graph_delta", {}) or {})
+        locked_trial = dict(
+            graph_delta.get("locked_trial_comparison", {}) or {}
+        )
+        progress_after = dict(
+            graph_delta.get("progress_metrics", {})
+            or transition.get("progress_after", {})
+            or {}
+        )
+        progress_after.setdefault(
+            "mechanical_failure_count",
+            len(locked_trial.get("mechanical_failures_after", ())),
+        )
+        if (
+            len(locked_trial.get("mechanical_failures_before", ()))
+            > len(locked_trial.get("mechanical_failures_after", ()))
+        ):
+            progress_after["mechanical_health_delta"] = max(
+                1, int(progress_after.get("mechanical_health_delta", 0)),
+            )
         revisions.append({
             "transition_id": transition_id,
             "revision": int(transition.get("to_revision", 0)),
@@ -235,13 +321,8 @@ def build_revision_trajectory_report(run_root: str | Path) -> dict[str, Any]:
             "recorded_decision": str(transition.get("decision", "")),
             "rollback_decision": str(transition.get("rollback_decision", "")),
             "reach_decision": str(transition.get("reach_decision", "")),
-            "progress_after": dict(transition.get("progress_after", {}) or {}),
+            "progress_after": progress_after,
         })
-    terminal_path = root / "terminal_certificate.json"
-    terminal = (
-        json.loads(terminal_path.read_text(encoding="utf-8"))
-        if terminal_path.is_file() else {}
-    )
     certified_targets = [
         item for item in catalog.values()
         if item["trusted"]
