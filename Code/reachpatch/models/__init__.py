@@ -1,37 +1,9 @@
-"""Shared immutable and serializable ReachPatch records."""
+"""Canonical records for the integrated Reach-Avoid architecture."""
 
-from .base import SCHEMA_VERSION, canonical_json, content_hash, stable_id
-from .controller import (
-    CounterexamplePacket,
-    IncumbentCheckpoint,
-    ReachAvoidState,
-    RepairAction,
-    RepairIntent,
-    TerminalCertificate,
-    TransitionCertificate,
-    WorkingPatch,
-)
-from .enums import Authority, OutcomeStatus
-from .isolation import (
-    GenerationInstance, HarnessEvaluationInstance, assert_generation_payload,
-)
+from .base import SerializableRecord, canonical_json, content_hash, stable_id, utc_now
+from .core import Instance
+from .evidence import *
+from .graphs import *
+from .reach_avoid import *
 
-__all__ = [
-    "Authority",
-    "CounterexamplePacket",
-    "IncumbentCheckpoint",
-    "GenerationInstance",
-    "HarnessEvaluationInstance",
-    "OutcomeStatus",
-    "ReachAvoidState",
-    "RepairAction",
-    "RepairIntent",
-    "SCHEMA_VERSION",
-    "TerminalCertificate",
-    "TransitionCertificate",
-    "WorkingPatch",
-    "canonical_json",
-    "assert_generation_payload",
-    "content_hash",
-    "stable_id",
-]
+__all__ = [name for name in globals() if not name.startswith("_")]

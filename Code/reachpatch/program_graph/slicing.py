@@ -1,233 +1,278 @@
 from __future__ import annotations
 
-from collections import defaultdict, deque
-from fnmatch import fnmatch
-from typing import Iterable
+from collections import deque
 
 from reachpatch.models.base import stable_id
-from reachpatch.program_graph.impact import impact_cone
-from reachpatch.program_graph.models import CausalRepairCut, ImpactCone, ProgramGraph
-
-FORWARD_SLICE_RELATIONS = {
-    "control_flow", "control_dependency", "calls", "may_call", "parameter_flow",
-    "return_flow", "exception_flow", "data_flow", "def_use", "field_flow",
-    "state_read", "state_write", "dispatch", "protocol_selected", "protocol_candidate",
-}
-BACKWARD_SLICE_RELATIONS = FORWARD_SLICE_RELATIONS | {
-    "alias", "exports", "registers", "inheritance", "override", "triggers",
-}
-MODIFIABLE_KINDS = {
-    "function", "method", "property", "statement", "expression", "branch", "loop",
-    "call_site", "return", "exception", "field", "local", "protocol_operation",
-}
+from reachpatch.models.evidence import DiffHunk, ExecutableCheck, TraceBundle
+from reachpatch.models.graphs import (
+    CausalRepairCut, ImpactCone, ProgramEdgeKind, ProgramGraph, ProgramNodeKind,
+)
 
 
-def _modifiable(
+def match_trace_nodes(
     graph: ProgramGraph,
-    node_id: str,
-    forbidden_patterns: Iterable[str],
-) -> bool:
-    node = graph.nodes[node_id]
-    file_name = str(node.attributes.get("file", ""))
-    if node.kind not in MODIFIABLE_KINDS:
-        return False
-    if node_id in graph.test_node_ids or node.kind in {"test", "assertion", "fixture"}:
-        return False
-    if file_name.startswith("<") or any(part in {"tests", "test", "generated", "vendor"} for part in file_name.split("/")):
-        return False
-    return not any(fnmatch(file_name, pattern) for pattern in forbidden_patterns)
+    trace: TraceBundle,
+) -> tuple[tuple[str, ...], frozenset[str]]:
+    """Map a trace to graph nodes without scanning the full graph per line."""
 
-
-def causal_repair_cut(
-    graph: ProgramGraph,
-    entrypoint_ids: Iterable[str],
-    observation_ids: Iterable[str],
-    *,
-    unit_slices: dict[str, set[str]] | None = None,
-    forbidden_patterns: Iterable[str] = (),
-    include_insertion_boundaries: bool = True,
-    impact_cache: dict[tuple[str, ...], ImpactCone] | None = None,
-    basis_cache: dict[tuple[tuple[str, ...], tuple[str, ...], tuple[str, ...]], dict[str, object]] | None = None,
-    node_metric_cache: dict[str, tuple[int, int]] | None = None,
-) -> CausalRepairCut:
-    entries = tuple(sorted(set(entrypoint_ids)))
-    observations = tuple(sorted(set(observation_ids)))
-    if not entries or not observations:
-        raise ValueError("causal repair cut requires entrypoints and observations")
-    forbidden = tuple(sorted(set(forbidden_patterns)))
-    basis_key = (entries, observations, forbidden)
-    basis = basis_cache.get(basis_key) if basis_cache is not None else None
-    if basis is None:
-        forward = graph.reachable(
-            entries,
-            edge_predicate=lambda edge: edge.kind in FORWARD_SLICE_RELATIONS,
-        )
-        backward = graph.reachable(
-            observations,
-            direction="backward",
-            edge_predicate=lambda edge: edge.kind in BACKWARD_SLICE_RELATIONS,
-        )
-        intersection = forward & backward
-        legal = {
-            node_id for node_id in intersection
-            if _modifiable(graph, node_id, forbidden)
-        }
-        excluded = intersection - legal
-
-        # One reverse BFS is exactly equivalent to taking the minimum of a
-        # separate forward shortest-path query from every legal node.
-        distance_by_node: dict[str, int] = {}
-        pending = set(legal)
-        queue = deque((node_id, 0) for node_id in observations)
-        visited: set[str] = set()
-        while queue and pending:
-            node_id, distance = queue.popleft()
-            if node_id in visited:
-                continue
-            visited.add(node_id)
-            if node_id in pending:
-                distance_by_node[node_id] = distance
-                pending.remove(node_id)
-            for edge in graph.incoming(node_id):
-                if edge.kind not in FORWARD_SLICE_RELATIONS:
-                    continue
-                for source_id in edge.source_ids:
-                    if source_id not in visited:
-                        queue.append((source_id, distance + 1))
-        basis = {
-            "forward": frozenset(forward),
-            "backward": frozenset(backward),
-            "intersection": frozenset(intersection),
-            "legal": frozenset(legal),
-            "excluded": frozenset(excluded),
-            "distance_by_node": distance_by_node,
-        }
-        if basis_cache is not None:
-            basis_cache[basis_key] = basis
-    forward = set(basis["forward"])
-    backward = set(basis["backward"])
-    intersection = set(basis["intersection"])
-    legal = set(basis["legal"])
-    excluded = set(basis["excluded"])
-    distance_by_node = dict(basis["distance_by_node"])
-    units = unit_slices or {"unit": intersection}
-    coverage = {
-        node_id: sorted(unit_id for unit_id, unit_slice in units.items() if node_id in unit_slice)
-        for node_id in legal
-    }
-    ranked = []
-    for node_id in legal:
-        node = graph.nodes[node_id]
-        metrics = node_metric_cache.get(node_id) if node_metric_cache is not None else None
-        if metrics is None:
-            blast = len(graph.reachable(
-                [node_id],
-                edge_predicate=lambda edge: edge.kind in FORWARD_SLICE_RELATIONS,
-                max_nodes=1000,
-            ))
-            preservation_conflict = len(
-                graph.reachable(
-                    [node_id],
-                    edge_predicate=lambda edge: edge.kind == "test_coverage",
-                    max_nodes=1000,
-                )
-                & graph.test_node_ids
+    nodes_by_path: dict[str, list] = {}
+    for node in graph.nodes.values():
+        nodes_by_path.setdefault(node.path, []).append(node)
+    line_cache: dict[tuple[str, int], tuple[str, ...]] = {}
+    ordered: list[str] = []
+    hit: set[str] = set()
+    for line_id in trace.executed_line_ids:
+        path, separator, raw_line = line_id.rpartition(":")
+        if not separator or not raw_line.isdigit():
+            continue
+        line = int(raw_line)
+        key = (path, line)
+        matches = line_cache.get(key)
+        if matches is None:
+            containing = sorted(
+                (
+                    node for node in nodes_by_path.get(path, ())
+                    if node.start_line <= line <= node.end_line
+                ),
+                key=lambda node: (
+                    node.end_line - node.start_line,
+                    node.start_line,
+                    node.node_id,
+                ),
             )
-            metrics = (blast, preservation_conflict)
-            if node_metric_cache is not None:
-                node_metric_cache[node_id] = metrics
-        blast, preservation_conflict = metrics
-        distance = distance_by_node.get(node_id, 1000)
-        score = len(coverage[node_id]) * 10.0 - distance - 0.05 * blast - 3.0 * preservation_conflict
-        ranked.append({
-            "node_id": node_id,
-            "score": score,
-            "covered_unit_ids": coverage[node_id],
-            "distance_to_observation": distance,
-            "blast": blast,
-            "preservation_conflict": preservation_conflict,
-            "kind": node.kind,
-        })
-    ranked.sort(key=lambda item: (-float(item["score"]), str(item["node_id"])))
-    score_by_node = {
-        str(item["node_id"]): float(item["score"])
-        for item in ranked
+            matches = tuple(node.node_id for node in containing)
+            line_cache[key] = matches
+        if matches:
+            hit.update(matches)
+            if not ordered or ordered[-1] != matches[0]:
+                ordered.append(matches[0])
+    names = set(trace.executed_symbol_ids)
+    for node in graph.nodes.values():
+        if (
+            node.node_id in names
+            or node.symbol in names
+            or node.symbol.split(".")[-1] in names
+        ):
+            hit.add(node.node_id)
+            if node.node_id not in ordered:
+                ordered.append(node.node_id)
+    return tuple(ordered), frozenset(hit)
+
+
+def _changed_nodes(graph: ProgramGraph, hunks: tuple[DiffHunk, ...]) -> set[str]:
+    return {
+        node.node_id
+        for node in graph.nodes.values()
+        for hunk in hunks
+        if node.path == hunk.path
+        for changed_line in (hunk.changed_new_lines or (hunk.new_start,))
+        if node.start_line <= changed_line <= node.end_line
     }
 
-    uncovered = set(units)
-    selected: list[str] = []
-    while uncovered:
-        best = max(
-            (node_id for node_id in legal if set(coverage[node_id]) & uncovered),
-            key=lambda node_id: (
-                len(set(coverage[node_id]) & uncovered),
-                score_by_node[node_id],
-                node_id,
-            ),
-            default=None,
-        )
-        if best is None:
-            break
-        selected.append(best)
-        uncovered -= set(coverage[best])
-    if not selected and ranked:
-        selected.append(str(ranked[0]["node_id"]))
-    boundaries = set()
-    if include_insertion_boundaries:
-        for node_id in selected:
-            boundaries.update(
-                source
-                for edge in graph.incoming(node_id, {"control_flow", "calls", "data_flow"})
-                for source in edge.source_ids
-                if _modifiable(graph, source, forbidden_patterns)
-            )
-    cone_sources = tuple(sorted(selected or legal))
-    cone = impact_cache.get(cone_sources) if impact_cache is not None else None
-    if cone is None:
-        cone = impact_cone(graph, cone_sources)
-        if impact_cache is not None:
-            impact_cache[cone_sources] = cone
-    return CausalRepairCut(
-        cut_id=stable_id("causal-cut", entries, observations, selected, graph.source_hash),
-        node_ids=tuple(selected),
-        ranked_nodes=tuple(ranked),
-        insertion_boundary_ids=tuple(sorted(boundaries)),
-        covered_unit_ids=tuple(sorted(set(units) - uncovered)),
-        excluded_node_ids=tuple(sorted(excluded)),
-        impact_cone_node_ids=cone.downstream_node_ids,
-        proof={
-            "forward_slice_size": len(forward),
-            "backward_slice_size": len(backward),
-            "intersection_size": len(intersection),
-            "uncovered_unit_ids": sorted(uncovered),
-        },
+
+def compute_impact_cone(
+    graph: ProgramGraph,
+    changed_hunks: tuple[DiffHunk, ...],
+    public_checks: tuple[ExecutableCheck, ...] = (),
+) -> ImpactCone:
+    changed = _changed_nodes(graph, changed_hunks)
+    direct: set[str] = set()
+    returns: set[str] = set()
+    exceptions: set[str] = set()
+    readers: set[str] = set()
+    reverse: set[str] = set()
+    rendering: set[str] = set()
+    changed_state_write_ids = {
+        edge.target_id for edge in graph.edges.values()
+        if edge.kind is ProgramEdgeKind.STATE_WRITE
+        and edge.source_id in changed
+        and edge.target_id in graph.nodes
+    }
+
+    def state_key(node_id: str) -> tuple[str, str, str] | None:
+        node = graph.nodes.get(node_id)
+        if node is None:
+            return None
+        attribute = node.metadata.get("attribute_name")
+        receiver = node.metadata.get("receiver")
+        owner = node.metadata.get("owner_scope")
+        if not all(isinstance(value, str) and value for value in (
+            attribute, receiver, owner,
+        )):
+            return None
+        return owner, receiver, attribute
+
+    changed_state_keys = {
+        key for node_id in changed_state_write_ids
+        for key in (state_key(node_id),)
+        if key is not None
+    }
+    for edge in graph.edges.values():
+        if edge.target_id in changed and edge.kind in {
+            ProgramEdgeKind.CALLS, ProgramEdgeKind.EXECUTED_CALL,
+        }:
+            direct.add(edge.source_id)
+        if (
+            edge.source_id in changed
+            and edge.target_id not in changed
+            and edge.kind in {
+            ProgramEdgeKind.RETURN_FLOW, ProgramEdgeKind.CONSUMER,
+            }
+        ):
+            returns.add(edge.target_id)
+        if (
+            edge.source_id in changed
+            and edge.target_id not in changed
+            and edge.kind is ProgramEdgeKind.EXCEPTION_FLOW
+        ):
+            exceptions.add(edge.target_id)
+        if edge.kind is ProgramEdgeKind.STATE_READ:
+            key = state_key(edge.target_id)
+            if (
+                key is not None
+                and key in changed_state_keys
+                and edge.source_id not in changed
+                and edge.target_id not in changed
+            ):
+                readers.add(edge.target_id)
+        if (
+            edge.source_id in changed
+            and edge.target_id not in changed
+            and edge.kind is ProgramEdgeKind.REFLECTED_DISPATCH
+        ):
+            reverse.add(edge.target_id)
+    for node in graph.nodes.values():
+        lowered = node.symbol.lower()
+        if node.node_id in changed and any(word in lowered for word in ("render", "serialize", "format", "repr")):
+            rendering.add(node.node_id)
+        if node.kind is ProgramNodeKind.METHOD and node.symbol.split(".")[-1].startswith("__r"):
+            if any(
+                graph.nodes[item].symbol.split(".")[-1].lstrip("__r") in node.symbol
+                for item in changed if item in graph.nodes
+            ):
+                reverse.add(node.node_id)
+    changed_symbols = {
+        graph.nodes[item].symbol.split(".")[-1] for item in changed if item in graph.nodes
+    }
+    checks = tuple(dict.fromkeys(
+        check.check_id for check in public_checks
+        if changed_symbols.intersection(check.symbol_references)
+    ))
+    graph_check_ids = tuple(dict.fromkeys(
+        check_id
+        for node in graph.nodes.values()
+        if node.node_id in direct | returns | exceptions | readers | reverse
+        for check_id in node.metadata.get("public_check_ids", ())
+    ))
+    return ImpactCone(
+        cone_id=stable_id("impact-cone", tuple(sorted(changed)), tuple(h.hunk_id for h in changed_hunks)),
+        changed_hunk_ids=tuple(hunk.hunk_id for hunk in changed_hunks),
+        direct_caller_ids=tuple(sorted(direct)),
+        return_consumer_ids=tuple(sorted(returns)),
+        exception_handler_ids=tuple(sorted(exceptions)),
+        state_reader_ids=tuple(sorted(readers)),
+        reverse_dispatch_ids=tuple(sorted(reverse)),
+        rendering_consumer_ids=tuple(sorted(rendering)),
+        public_check_ids=tuple(dict.fromkeys(checks + graph_check_ids)),
     )
 
 
-def component_repair_frontier(
-    cuts_by_unit: dict[str, CausalRepairCut],
-    *,
-    node_costs: dict[str, float] | None = None,
-) -> tuple[str, ...]:
-    costs = node_costs or {}
-    candidates: dict[str, set[str]] = defaultdict(set)
-    for unit_id, cut in cuts_by_unit.items():
-        for node_id in cut.node_ids:
-            candidates[node_id].add(unit_id)
-    uncovered = set(cuts_by_unit)
-    selected: list[str] = []
-    while uncovered:
-        best = max(
-            (node_id for node_id, units in candidates.items() if units & uncovered),
-            key=lambda node_id: (
-                len(candidates[node_id] & uncovered) / max(costs.get(node_id, 1.0), 0.001),
-                len(candidates[node_id] & uncovered),
-                node_id,
-            ),
-            default=None,
+def compute_causal_repair_cuts(
+    graph: ProgramGraph,
+    failure_trace: TraceBundle,
+    changed_hunks: tuple[DiffHunk, ...],
+) -> tuple[CausalRepairCut, ...]:
+    """Backward-slice an observed failure to the earliest editable project node."""
+
+    hunk_paths = {hunk.path for hunk in changed_hunks}
+    observed = next((
+        node_id for node_id in reversed(failure_trace.executed_path_ids)
+        if node_id in graph.nodes
+        and graph.nodes[node_id].path in hunk_paths
+        and graph.nodes[node_id].kind in {
+            ProgramNodeKind.RETURN, ProgramNodeKind.RAISE,
+            ProgramNodeKind.EXTERNAL_EFFECT, ProgramNodeKind.STATE_WRITE,
+            ProgramNodeKind.STATE_READ, ProgramNodeKind.BRANCH,
+            ProgramNodeKind.CALL_SITE, ProgramNodeKind.METHOD,
+            ProgramNodeKind.FUNCTION,
+        }
+    ), None)
+    if observed is None:
+        observed = next((
+            node_id for node_id in reversed(failure_trace.executed_path_ids)
+            if node_id in graph.nodes
+        ), None)
+    if observed is None:
+        return ()
+    trace_nodes = {
+        node_id for node_id in failure_trace.executed_path_ids
+        if node_id in graph.nodes
+    }
+    changed = _changed_nodes(graph, changed_hunks)
+    causal_scope = trace_nodes | changed
+    reverse: dict[str, list[str]] = {}
+    allowed = {
+        ProgramEdgeKind.RETURN_FLOW, ProgramEdgeKind.EXCEPTION_FLOW,
+        ProgramEdgeKind.STATE_WRITE, ProgramEdgeKind.DATA_FLOW,
+        ProgramEdgeKind.CONTROL_TRUE, ProgramEdgeKind.CONTROL_FALSE,
+        ProgramEdgeKind.EXECUTED_CALL, ProgramEdgeKind.CONSUMER,
+        ProgramEdgeKind.ALIAS, ProgramEdgeKind.STATE_READ,
+    }
+    for edge in graph.edges.values():
+        dynamic_call = (
+            edge.kind is ProgramEdgeKind.CALLS and edge.dynamic_confirmed
         )
-        if best is None:
-            raise ValueError(f"no repair locus covers units {sorted(uncovered)}")
-        selected.append(best)
-        uncovered -= candidates[best]
-    return tuple(selected)
+        if edge.kind not in allowed and not dynamic_call:
+            continue
+        if edge.source_id not in causal_scope or edge.target_id not in causal_scope:
+            continue
+        reverse.setdefault(edge.target_id, []).append(edge.source_id)
+    for parents in reverse.values():
+        parents.sort()
+    queue = deque([observed])
+    seen = {observed}
+    ordered: list[str] = []
+    while queue and len(seen) < 64:
+        current = queue.popleft()
+        ordered.append(current)
+        for parent in reverse.get(current, ()):
+            if parent not in seen:
+                seen.add(parent)
+                queue.append(parent)
+    editable = [
+        node_id for node_id in reversed(ordered)
+        if graph.nodes[node_id].editable
+        and not graph.nodes[node_id].path.startswith((
+            "tests/", "test/", "artifacts/", "generated/",
+        ))
+        and "/generated/" not in graph.nodes[node_id].path
+    ]
+    if not editable:
+        return ()
+    earliest = next((item for item in editable if item in changed), editable[0])
+    edge_consumers = {
+        edge.target_id for edge in graph.edges.values()
+        if edge.source_id in seen and edge.kind is ProgramEdgeKind.CONSUMER
+    }
+    impact_consumers = set(
+        graph.impact_cone.all_risk_ids()
+        if graph.impact_cone is not None else ()
+    )
+    consumers = tuple(sorted(
+        node_id for node_id in edge_consumers | impact_consumers
+        if node_id in graph.nodes
+        and graph.nodes[node_id].editable
+        and not graph.nodes[node_id].path.startswith((
+            "tests/", "test/", "artifacts/", "generated/",
+        ))
+        and "/generated/" not in graph.nodes[node_id].path
+    ))[:24]
+    cut = CausalRepairCut(
+        cut_id=stable_id("causal-cut", failure_trace.trace_bundle_id, earliest, changed_hunks),
+        observation_node_id=observed,
+        responsible_node_ids=tuple(ordered),
+        earliest_editable_node_id=earliest,
+        changed_hunk_ids=tuple(hunk.hunk_id for hunk in changed_hunks),
+        preservation_consumer_ids=consumers,
+    )
+    return (cut,)

@@ -1,110 +1,191 @@
 from __future__ import annotations
 
+import json
+from dataclasses import replace
 from pathlib import Path
-from typing import Any
 
-from reachpatch.artifacts import ArtifactStore
-from reachpatch.models.controller import ReachAvoidState
-from reachpatch.models.enums import Authority, Confidence
+from reachpatch.models.base import canonical_json
+from reachpatch.models.evidence import (
+    FailureHistory, OutcomeStatus, PairedTraceBundle, PairClassification,
+)
+from reachpatch.models.graphs import ChallengeStatus, GraphStack
+from reachpatch.models.reach_avoid import (
+    Decision, ReachAvoidState, TransitionCertificate, TrialTransition,
+)
+
+from .certificates import build_transition_certificate, verify_transition_certificate
+from .checkpoint import (
+    CheckpointStore, capture_checkpoint, capture_current_graph_checkpoint,
+)
 
 
-class RunArtifacts:
-    def __init__(self, run_root: str | Path, instance_id: str) -> None:
-        self.run_root = Path(run_root).resolve()
-        self.instance_id = instance_id
-        self.store = ArtifactStore(self.run_root / "artifacts")
-
-    def put(
-        self,
-        artifact_type: str,
-        payload: Any,
-        *,
-        state: ReachAvoidState | None = None,
-        producer: str,
-        parent_ids: tuple[str, ...] = (),
-        authority: Authority = Authority.PROVISIONAL,
-        confidence: Confidence = Confidence.UNKNOWN,
-        status: str = "ACTIVE",
-    ) -> str:
-        envelope = self.store.put(
-            artifact_type,
-            payload,
-            instance_id=self.instance_id,
-            producer=producer,
-            parent_ids=parent_ids,
-            authority=authority,
-            confidence=confidence,
-            status=status,
-        )
-        if state is not None:
-            identifiers = state.artifact_ids.setdefault(artifact_type, [])
-            if envelope.artifact_id not in identifiers:
-                identifiers.append(envelope.artifact_id)
-        return envelope.artifact_id
-
-    def persist_graph_stack(self, state: ReachAvoidState) -> tuple[str, ...]:
-        parent_ids: list[str] = []
-        for artifact_type, payload in (
-            ("semantic_hypothesis_graph", state.semantic_graph),
-            ("episode_assignment", state.assignment),
-            ("requirement_graph", state.requirement_graph),
-            ("program_graph", state.program_graph),
-            ("active_binding_graph", state.active_binding_graph),
-            ("challenge_graph", state.challenge_graph),
+def record_locked_passes(
+    state: ReachAvoidState,
+    graph_stack: GraphStack,
+    executions: tuple[PairedTraceBundle, ...],
+) -> None:
+    """Lock only the concrete public checks that actually passed stably."""
+    for execution in executions:
+        cell = graph_stack.challenge_graph.cells.get(execution.challenge_id)
+        if cell is None:
+            continue
+        requirement = graph_stack.requirement_graph.leaves.get(cell.requirement_id)
+        binding = graph_stack.binding_graph.units.get(cell.binding_id)
+        check_id = execution.check_id
+        if requirement is None or binding is None or not check_id:
+            continue
+        if (
+            execution.oracle_authority not in {"A", "B", "C"}
+            or execution.stable_runs < 2
+            or execution.patched.observation.status is not OutcomeStatus.PASS
+            or cell.terminal_status is not ChallengeStatus.PASS
+            or cell.origin != "PUBLIC_CHECK"
+            or cell.input_recipe.kind != "PUBLIC_REPLAY"
+            or cell.input_recipe.source_check_id != check_id
         ):
-            identifier = self.put(
-                artifact_type,
-                payload,
-                state=state,
-                producer="reachpatch.graph-pipeline",
-                parent_ids=tuple(parent_ids[-2:]),
-                authority=Authority.C,
-                confidence=Confidence.HIGH,
-            )
-            parent_ids.append(identifier)
-        for path_class in state.program_graph.path_classes.values():
-            self.put(
-                "path_class", path_class, state=state,
-                producer="reachpatch.program-graph",
-                authority=Authority.C,
-                confidence=Confidence.HIGH,
-            )
-        for unit in state.active_binding_graph.units.values():
-            self.put(
-                "active_binding_unit", unit, state=state,
-                producer="reachpatch.active-binding-graph",
-                authority=Authority.C,
-                confidence=Confidence.HIGH,
-            )
-        for recipe in state.challenge_graph.recipes.values():
-            self.put(
-                "input_recipe", recipe, state=state,
-                producer="reachpatch.challenge-materializer",
-                authority=Authority.C,
-                confidence=Confidence.HIGH,
-            )
-        for cell in state.challenge_graph.cells.values():
-            self.put(
-                "challenge_cell", cell, state=state,
-                producer="reachpatch.challenge-materializer",
-                authority=Authority.C,
-                confidence=Confidence.HIGH,
-            )
-        return tuple(parent_ids)
+            continue
+        if requirement.preservation:
+            if (
+                execution.classification is PairClassification.PASS_PRESERVED
+                and check_id in binding.preservation_check_ids
+            ):
+                state.locked_checks.preservation_ids.add(check_id)
+        elif (
+            execution.classification in {
+                PairClassification.TARGET_FIXED,
+                PairClassification.PASS_PRESERVED,
+            }
+            and check_id in binding.target_check_ids
+        ):
+            state.locked_checks.target_ids.add(check_id)
 
-    def persist_state(self, state: ReachAvoidState) -> str:
-        parents = tuple(
-            identifiers[-1]
-            for key, identifiers in sorted(state.artifact_ids.items())
-            if identifiers and key != "reach_avoid_state"
+
+def _record_trial_evidence(state: ReachAvoidState, trial: TrialTransition) -> None:
+    if not trial.challenge_result:
+        return
+    for execution in trial.challenge_result.executions:
+        cell = trial.graph_stack.challenge_graph.cells.get(execution.challenge_id)
+        if cell is not None:
+            state.observations.record(execution, cell.requirement_id)
+    existing_packets = {item.counterexample_id for item in state.counterexamples}
+    state.counterexamples.extend(
+        packet for packet in trial.challenge_result.counterexamples
+        if packet.counterexample_id not in existing_packets
+    )
+    existing_failures = {item.failure_id for item in state.confirmed_failures}
+    state.confirmed_failures.extend(
+        failure for failure in trial.challenge_result.confirmed_failures
+        if failure.failure_id not in existing_failures
+    )
+    for failure in trial.challenge_result.confirmed_failures:
+        history = state.failure_history.setdefault(
+            failure.failure_signature,
+            FailureHistory(failure.failure_signature),
         )
-        return self.put(
-            "reach_avoid_state",
-            state.to_dict(),
-            state=state,
-            producer="reachpatch.controller",
-            parent_ids=parents,
-            authority=Authority.C,
-            confidence=Confidence.CONFIRMED,
-            status=state.termination_status or "ACTIVE",
+        if failure.counterexample_id not in history.counterexample_ids:
+            history.counterexample_ids.append(failure.counterexample_id)
+
+
+def apply_transition_decision(
+    state: ReachAvoidState,
+    trial: TrialTransition,
+    store: CheckpointStore,
+) -> TransitionCertificate:
+    source = state.working_checkpoint
+    if trial.source_checkpoint_id != source.checkpoint_id:
+        raise RuntimeError("transition source is not the current working checkpoint")
+    if state.graph_stack.graph_hashes() != source.graph_hashes:
+        raise RuntimeError("working GraphStack does not match the transition source checkpoint")
+    _record_trial_evidence(state, trial)
+    if trial.decision in {Decision.COMMIT_WORKING, Decision.KEEP_PROVISIONAL}:
+        closed_failure_ids = set(trial.evidence.confirmed_failures_closed)
+        if closed_failure_ids:
+            state.confirmed_failures = [
+                replace(item, open=False) if item.failure_id in closed_failure_ids else item
+                for item in state.confirmed_failures
+            ]
+            for item in state.confirmed_failures:
+                history = state.failure_history.get(item.failure_signature)
+                if history is not None and item.failure_id in closed_failure_ids:
+                    history.closed = True
+        if trial.challenge_result:
+            record_locked_passes(
+                state, trial.graph_stack, trial.challenge_result.executions,
+            )
+        if trial.transition_decision.next_objective_kind:
+            state.generator_session.conversation.append({
+                "role": "system",
+                "patch_hash": trial.graph_stack.patch_hash,
+                "pending_objective_kind": trial.transition_decision.next_objective_kind,
+            })
+        state.observations.retain_patch(trial.graph_stack.patch_hash)
+        checkpoint = capture_checkpoint(
+            state, trial, store,
+            "WORKING" if trial.decision is Decision.COMMIT_WORKING else "PROVISIONAL",
         )
+        certificate = build_transition_certificate(state, trial, checkpoint)
+        state.working_checkpoint = checkpoint
+        state.graph_stack = trial.graph_stack
+        if trial.decision is Decision.COMMIT_WORKING:
+            state.certified_checkpoint = checkpoint
+        state.checkpoint_history[checkpoint.checkpoint_id] = checkpoint
+        if trial.transition_decision.promote_to_best and (
+            checkpoint.evidence.rank() > state.best_checkpoint.evidence.rank()
+        ):
+            state.best_checkpoint = checkpoint
+        result = checkpoint
+    else:
+        # Rollback restores the source patch and graph stack while retaining
+        # the trial's execution evidence and mechanism history in a new
+        # content-addressed evidence checkpoint.
+        state.graph_stack = store.graph_stack(source)
+        state.observations.retain_patch(source.patch_hash)
+        state.generator_session.conversation.append({
+            "role": "system",
+            "patch_hash": source.patch_hash,
+            "pending_objective_kind": "CONFIRMED_FAILURE",
+            "rejected_trial_patch_hash": trial.cumulative_diff.patch_hash,
+            "rejected_trial_reasons": trial.transition_decision.reasons,
+        })
+        result = capture_current_graph_checkpoint(state, store, "ROLLBACK_EVIDENCE")
+        state.graph_stack.validate()
+        certificate = build_transition_certificate(state, trial, result)
+        state.working_checkpoint = result
+        state.checkpoint_history[result.checkpoint_id] = result
+    trial.certificate = certificate
+    persist_transition(state, trial, certificate, store)
+    verify_transition_certificate(certificate, store)
+    return certificate
+
+
+def persist_transition(
+    state: ReachAvoidState,
+    trial: TrialTransition,
+    certificate: TransitionCertificate,
+    store: CheckpointStore,
+) -> Path:
+    transitions = state.run_root / "transitions"
+    transitions.mkdir(parents=True, exist_ok=True)
+    path = transitions / f"{certificate.transition_id}.json"
+    temporary = path.with_suffix(".tmp")
+    payload = {
+        "schema": "reachpatch-reach-avoid-v2",
+        "certificate": certificate.to_dict(),
+        "incremental_diff": trial.incremental_diff.to_dict(),
+        "cumulative_diff": trial.cumulative_diff.to_dict(),
+        "transition_evidence": trial.evidence.to_dict(),
+        "executions": [
+            item.to_dict() for item in (
+                trial.challenge_result.executions if trial.challenge_result else ()
+            )
+        ],
+        "trial_graphs": {
+            "requirement": trial.graph_stack.requirement_graph.to_dict(),
+            "program": trial.graph_stack.program_graph.to_dict(),
+            "binding": trial.graph_stack.binding_graph.to_dict(),
+            "challenge": trial.graph_stack.challenge_graph.to_dict(),
+        },
+    }
+    temporary.write_text(canonical_json(payload) + "\n", encoding="utf-8")
+    temporary.replace(path)
+    return path

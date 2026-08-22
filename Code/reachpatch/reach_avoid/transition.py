@@ -1,2535 +1,701 @@
 from __future__ import annotations
 
-import copy
-import os
-import platform
-import re
-import sys
-import time
-from dataclasses import asdict
 from dataclasses import replace
 from pathlib import Path
-from typing import Iterable
 
-from reachpatch.binding_graph import (
-    build_active_binding_graph, update_active_binding_graph,
+from reachpatch.challenge_graph.execute import execute_challenge_round
+from reachpatch.challenge_graph.models import (
+    challenge_obligation_key, open_high_challenge_ids,
 )
-from reachpatch.challenge_graph.dicc import (
-    compile_executable_challenge_evidence,
-    diff_induced_challenge_plan,
-    evaluate_dicc,
-    finalize_diff_induced_challenge_closure,
-)
-from reachpatch.challenge_graph.materialize import (
-    execute_challenges, materialize_active_challenges,
-)
-from reachpatch.challenge_graph.models import ChallengeGraph
 from reachpatch.execution import (
-    CheckClassification, CheckRole,
-    CheckComparison,
-    TraceExecutor,
-    WorktreeManager,
-    select_project_runner,
+    apply_generator_result, create_trial_tree, diff_between, run_mechanical_checks,
 )
-from reachpatch.execution.mechanical import mechanical_pass, run_mechanical_checks
-from reachpatch.execution.reconcile import ActualDiff, reconcile_actual_diff
-from reachpatch.execution.target_recovery import certify_recovered_targets
-from reachpatch.execution.worktree import tree_hash
-from reachpatch.models.base import content_hash, stable_id
-from reachpatch.models.budget import BudgetVector
-from reachpatch.models.controller import (
-    CounterexamplePacket,
-    IncumbentCheckpoint,
-    MechanismAttempt,
-    ReachAvoidState,
-    TerminalCertificate,
-    TransitionCertificate,
-    TransitionResult,
-    WorkingPatch,
+from reachpatch.models.base import stable_id
+from reachpatch.models.evidence import (
+    ExecutableCheck, PairClassification, PublicEvidence,
 )
-from reachpatch.models.core import Frontier
-from reachpatch.models.enums import ChallengeTerminalStatus, ControllerPhase, Decision, OutcomeStatus
-from reachpatch.oracle.discriminator import (
-    discriminator_probe_from_dict,
-    enqueue_discriminator_probes,
+from reachpatch.models.graphs import ChallengeStatus, GraphBudget
+from reachpatch.models.reach_avoid import (
+    AvoidEvaluation, AvoidKind, ChallengeSelection, CheckpointEvidence, Decision,
+    GeneratorResult, ProgressEvaluation, ReachAvoidState, ReachEvaluation,
+    StateCheckpoint, TransitionDecision, TransitionEvidence, TrialTransition,
 )
-from reachpatch.program_graph.budget import Deadline, GraphBudget
-from reachpatch.program_graph import (
-    build_diff_impact_slice, causal_repair_cut,
+from reachpatch.reach_avoid.gates import compare_progress, evaluate_avoid, evaluate_reach
+from reachpatch.reach_avoid.graph_stack import (
+    latest_graph_metrics, set_graph_metrics, update_graph_stack_after_diff,
 )
-from reachpatch.program_graph.incremental import update_active_program_slice
-from reachpatch.program_graph.index import update_repository_index
-from reachpatch.program_graph.tracing import merge_trace_bundles
-from reachpatch.program_graph.impact import guarded_diff_influence_cone
-from reachpatch.reach_avoid.certificates import finalize_certificate
-from reachpatch.reach_avoid.gates import in_target_set, raw_avoid_reasons
-from reachpatch.reach_avoid.trajectory import (
-    checkpoint_from_state,
-    checkpoint_from_trial_diff,
-    decide_transition,
-    evaluate_trial_against_checkpoint,
-    evidence_vector_from_comparison,
-    initialize_patch_trajectory,
-    refresh_confirmed_failures,
-    record_transition,
-)
-from reachpatch.reach_avoid.metrics import (
-    RevisionEvidence, component_shadow_pass,
-    progress_metrics, progress_vector_from_trial_comparison,
-    progress_vector_from_comparisons, should_commit,
-)
-from reachpatch.reach_avoid.state import outcomes_from_challenges
-from reachpatch.reach_avoid.observations import ObservationBundle
-from reachpatch.repair.counterexamples import (
-    counterexample_from_check_comparison, packets_for_nonpass_challenges,
-)
-from reachpatch.repair.policy import accept_edit_scope
-from reachpatch.repair.diagnosis import mechanism_fingerprint
-from reachpatch.repair.operators import apply_registered_operator
-from reachpatch.repair.session import PersistentGeneratorSession
-from reachpatch.repair.deepseek_agent import GeneratorRevision, convert_revision_action, ActionConversionStatus
-from reachpatch.requirement_graph import (
-    compile_requirement_paths, promote_domains_from_diff,
-    refresh_requirement_paths,
-    update_requirement_coverage,
+from reachpatch.reach_avoid.regression import (
+    build_diff_conditioned_regression_plan, materialize_trial_challenges,
 )
 
 
-def _enqueue_pending_discriminators(
-    state: ReachAvoidState,
-    graph: ChallengeGraph,
-) -> dict[str, tuple[str, ...]]:
-    probes = tuple(
-        discriminator_probe_from_dict(raw)
-        for raw in state.runtime_metrics.get("discriminator_probes", ())
-    )
-    return enqueue_discriminator_probes(
-        graph,
-        probes,
-        completed_probe_ids=state.runtime_metrics.get(
-            "executed_discriminator_probe_ids", ()
-        ),
-    )
-
-
-def _executed_discriminator_probe_ids(
-    graph: ChallengeGraph,
-    executed_challenge_ids: Iterable[str],
-) -> set[str]:
-    return {
-        str(probe_id)
-        for challenge_id in executed_challenge_ids
-        if challenge_id in graph.cells
-        for probe_id in graph.cells[challenge_id].diff_dependency.get(
-            "discriminator_probe_ids", ()
+def _public_evidence_from_stack(state: ReachAvoidState) -> PublicEvidence:
+    checks: dict[str, ExecutableCheck] = {}
+    for cell in state.graph_stack.challenge_graph.active_cells():
+        if not cell.execution_scenario.command:
+            continue
+        binding = state.graph_stack.binding_graph.units.get(cell.binding_id)
+        if binding is None:
+            continue
+        role = "PRESERVATION" if cell.kind == "PRESERVATION" else "TARGET"
+        bound_ids = (
+            binding.preservation_check_ids
+            if role == "PRESERVATION" else binding.target_check_ids
         )
-    }
-
-
-def _reset_for_trial(graph: ChallengeGraph) -> ChallengeGraph:
-    trial = copy.deepcopy(graph)
-    trial.diff_hash = "BASELINE"
-    for challenge_id, cell in list(trial.cells.items()):
-        if cell.scenario_id and cell.trigger_recipe_id:
-            trial.cells[challenge_id] = replace(
-                cell,
-                baseline_outcome=None,
-                patched_outcome=None,
-                stability_status="NOT_EXECUTED",
-                terminal_status=ChallengeTerminalStatus.PENDING,
-                execution_bundle_id=None,
-            )
-    return trial
-
-
-def _causal_touch(
-    state: ReachAvoidState,
-    actual_diff: ActualDiff,
-) -> dict[str, list[str]]:
-    touched_files = set(actual_diff.changed_files)
-    relations_by_file = {
-        relative: [item.relation_id for item in actual_diff.changed_relations if item.file == relative]
-        for relative in touched_files
-    }
-    witnesses: dict[str, list[str]] = {}
-    for unit in state.active_binding_graph.units.values():
-        cut_files = {
-            str(state.program_graph.nodes[node_id].attributes.get("file", ""))
-            for node_id in unit.repair_cut_node_ids
-            if node_id in state.program_graph.nodes
-        }
-        touched = sorted({
-            relation_id
-            for relative in cut_files & touched_files
-            for relation_id in relations_by_file.get(relative, [])
-        })
-        if touched:
-            witnesses[unit.path_obligation_id] = touched
-    return witnesses
-
-
-def _current_pairs(outcomes) -> tuple[tuple[str, str], ...]:
-    return tuple(sorted(
-        (item.path_obligation_id, item.scenario_id or "") for item in outcomes
-    ))
-
-
-def _environment_hash() -> str:
-    return content_hash({
-        "python": sys.version,
-        "platform": platform.platform(),
-        "implementation": platform.python_implementation(),
-    })
-
-
-def build_transition_certificate(
-    before_state: ReachAvoidState,
-    repair_action,
-    applied_patch,
-    observations,
-    active_binding_graph,
-    coverage_table,
-    after_state: ReachAvoidState,
-) -> TransitionCertificate:
-    """Build the single transition certificate from paired execution state.
-
-    The certificate is deliberately derived from the before/after snapshots;
-    generator claims are only identifiers for the submitted action.  This
-    keeps target, preservation, challenge, coverage, and reach decisions tied
-    to observations that actually ran on the applied working tree.
-    """
-    comparisons = tuple(getattr(observations, "check_comparisons", ()))
-    target_ids = {
-        str(item.check_id)
-        for item in getattr(getattr(after_state, "target_recovery", None), "targets", ())
-    }
-    target_rows = tuple(item for item in comparisons if str(item.check_id) in target_ids)
-    preservation_rows = tuple(
-        item for item in comparisons
-        if getattr(item, "classification", None) in {
-            CheckClassification.PRESERVATION_REGRESSION,
-            CheckClassification.PASS_PRESERVED,
-        }
-    )
-    challenge_ids = tuple(
-        str(item.challenge_id)
-        for item in getattr(observations, "challenge_results", ())
-        if getattr(item, "challenge_id", None)
-    )
-    locked_comparison = dict(
-        getattr(after_state, "runtime_metrics", {}).get(
-            "last_locked_trial_comparison", {},
-        )
-        or {}
-    )
-    locked_executed_ids = tuple(map(
-        str, locked_comparison.get("executed_check_ids", ()),
-    ))
-    locked_set = getattr(after_state, "current_locked_check_set", None)
-    locked_target_ids = {
-        str(item.check_id)
-        for item in (
-            *getattr(locked_set, "target_checks", ()),
-            *getattr(locked_set, "counterexample_checks", ()),
-        )
-    }
-    locked_preservation_ids = {
-        str(item.check_id)
-        for item in getattr(locked_set, "preservation_checks", ())
-    }
-    locked_counterexample_ids = {
-        str(item.check_id)
-        for item in getattr(locked_set, "counterexample_checks", ())
-    }
-    locked_mechanical_ids = {
-        str(item.check_id)
-        for item in getattr(locked_set, "mechanical_checks", ())
-    } | {
-        str(check_id)
-        for key in (
-            "mechanical_failures_before", "mechanical_failures_after",
-        )
-        for check_id in locked_comparison.get(key, ())
-    }
-    executed_checks = tuple(dict.fromkeys(
-        (
-            *(str(item.check_id) for item in comparisons),
-            *locked_executed_ids,
-        )
-    ))
-    before_units = getattr(before_state.active_binding_graph, "units", {})
-    after_units = getattr(active_binding_graph, "units", {})
-    affected_units = tuple(sorted(
-        unit_id for unit_id, unit in after_units.items()
-        if unit_id not in before_units
-        or unit != before_units[unit_id]
-    ))
-    before_rows = getattr(getattr(before_state, "requirement_coverage", None), "rows", {})
-    after_rows = getattr(coverage_table, "rows", {})
-    requirements_improved = tuple(sorted(
-        requirement_id for requirement_id, row in after_rows.items()
-        if getattr(row, "status", None) == "PASSING"
-        and getattr(before_rows.get(requirement_id), "status", None) != "PASSING"
-    ))
-    requirements_regressed = tuple(sorted(
-        requirement_id for requirement_id, row in after_rows.items()
-        if getattr(row, "status", None) in {"FAILING", "PRESERVATION_RISK"}
-        and getattr(before_rows.get(requirement_id), "status", None) == "PASSING"
-    ))
-    before_counterexamples = {
-        str(item.counterexample_id) for item in getattr(before_state, "counterexamples", ())
-    }
-    after_counterexamples = {
-        str(item.counterexample_id) for item in getattr(after_state, "counterexamples", ())
-    }
-    patch_hash = str(
-        getattr(applied_patch, "canonical_diff_hash", "")
-        or getattr(applied_patch, "diff_hash", "")
-    )
-    from_revision = int(getattr(before_state, "transition_index", 0))
-    to_revision = max(
-        from_revision + 1,
-        int(getattr(after_state, "transition_index", from_revision + 1)),
-    )
-    action_id = str(getattr(repair_action, "action_id", getattr(repair_action, "revision_id", "")))
-    mechanism_id = str(getattr(repair_action, "mechanism_id", getattr(repair_action, "mechanism", "")))
-    transition_id = stable_id(
-        "transition", before_state.instance_id, from_revision, to_revision,
-        action_id, patch_hash,
-    )
-    mechanical_checks = tuple(getattr(observations, "mechanical_checks", ()))
-    mechanical_passed = all(
-        getattr(getattr(item, "status", None), "value", getattr(item, "status", ""))
-        in {"PASS", "PASSING"}
-        for item in mechanical_checks
-    ) if mechanical_checks else True
-    target_fixed = bool(target_rows) and all(
-        getattr(item, "classification", None) == CheckClassification.TARGET_FIXED
-        for item in target_rows
-    )
-    preservation_pass = not any(
-        getattr(item, "classification", None) == CheckClassification.PRESERVATION_REGRESSION
-        for item in preservation_rows
-    )
-    reach_decision = str(getattr(after_state, "reach_status", "NOT_REACHED"))
-    avoid_decision = str(getattr(after_state, "avoid_status", "NOT_AVOIDED"))
-    rollback_decision = "ROLLBACK" if getattr(after_state, "checkpoint", None) is getattr(before_state, "checkpoint", None) else (
-        "COMMIT" if patch_hash else ""
-    )
-    decision = (
-        Decision.COMMIT if rollback_decision == "COMMIT"
-        else Decision.ROLLBACK if rollback_decision == "ROLLBACK"
-        else Decision.KEEP_UNCERTIFIED
-    )
-    diff = getattr(applied_patch, "canonical_diff", "")
-    graph_delta = {
-        "active_binding_graph_hash": active_binding_graph.graph_hash(),
-        "requirement_coverage_hash": (
-            str(getattr(coverage_table, "table_hash", ""))
-            or content_hash(coverage_table)
-        ),
-        "executed_check_count": len(executed_checks),
-        "real_execution_count": int(getattr(observations, "real_execution_count", 0)),
-    }
-    certificate = TransitionCertificate(
-        transition_id=transition_id,
-        update_id=stable_id("update", transition_id, patch_hash),
-        source_checkpoint_id=before_state.checkpoint.checkpoint_id,
-        result_checkpoint_id=getattr(after_state.checkpoint, "checkpoint_id", None),
-        incremental_diff_hash=patch_hash,
-        cumulative_diff_hash=str(getattr(after_state.checkpoint.patch, "canonical_diff_hash", patch_hash)),
-        actual_edit_ids=tuple(
-            str(getattr(item, "edit_id", stable_id("edit", item)))
-            for item in getattr(repair_action, "edit_intents", ())
-        ),
-        causal_cut_ids=tuple(sorted({
-            cut_id for unit in after_units.values() for cut_id in unit.causal_cut_ids
-            if unit.binding_id in affected_units
-        })),
-        graph_delta=graph_delta,
-        mechanical_check_ids=tuple(dict.fromkeys((
-            *(str(getattr(item, "check_id", "")) for item in mechanical_checks),
-            *sorted(locked_mechanical_ids),
-        ))),
-        outcome_ids=tuple(sorted(getattr(after_state, "outcomes", {}))),
-        new_counterexample_ids=tuple(sorted(after_counterexamples - before_counterexamples)),
-        eliminated_counterexample_ids=tuple(sorted(before_counterexamples - after_counterexamples)),
-        impact_regression_ids=tuple(str(item.check_id) for item in preservation_rows if getattr(item, "classification", None) == CheckClassification.PRESERVATION_REGRESSION),
-        adjacent_partition_obligation_ids=challenge_ids,
-        hard_frontier_ids=tuple(sorted(
-            getattr(item, "frontier_id", "")
-            for item in getattr(after_state, "unresolved_frontier", ())
-            if getattr(item, "hard", False)
-        )),
-        old_target_deficit=float(before_state.target_deficit()),
-        new_target_deficit=float(after_state.target_deficit()),
-        repaired_losing_path_ids=(),
-        mechanical_pass=mechanical_passed,
-        forbidden_edit=False,
-        oracle_contamination=False,
-        established_successes_pass=preservation_pass,
-        preservation_pass=preservation_pass,
-        component_shadow_pass=True,
-        diff_safety_pass=mechanical_passed,
-        safe=bool(getattr(after_state.checkpoint, "safe", False)),
-        strict_target_progress=target_fixed or bool(requirements_improved),
-        reach=reach_decision in {"REACHED", "EVIDENCE_LIMITED_COMPLETE"},
-        avoid=avoid_decision not in {"NOT_AVOIDED", ""},
-        progress=bool(target_fixed or requirements_improved),
-        decision=decision,
-        restoration_or_commit_receipt=str(getattr(after_state.checkpoint, "checkpoint_id", "")),
-        input_artifact_ids=tuple(
-            values[-1] for values in getattr(before_state, "artifact_ids", {}).values() if values
-        ),
-        recomputation_hash="",
-        instance_id=before_state.instance_id,
-        generation_run_id=before_state.generation_run_id,
-        from_revision=from_revision,
-        to_revision=to_revision,
-        before_patch_hash=before_state.checkpoint.patch.canonical_diff_hash,
-        after_patch_hash=str(getattr(after_state.checkpoint.patch, "canonical_diff_hash", patch_hash)),
-        action_id=action_id,
-        mechanism_id=mechanism_id,
-        active_binding_graph_hash=active_binding_graph.graph_hash(),
-        affected_binding_unit_ids=affected_units,
-        executed_check_ids=executed_checks,
-        target_comparisons=tuple(dict.fromkeys((
-            *(str(item.check_id) for item in target_rows),
-            *(check_id for check_id in locked_executed_ids if check_id in locked_target_ids),
-        ))),
-        preservation_comparisons=tuple(dict.fromkeys((
-            *(str(item.check_id) for item in preservation_rows),
-            *(check_id for check_id in locked_executed_ids if check_id in locked_preservation_ids),
-        ))),
-        challenge_comparisons=tuple(dict.fromkeys((
-            *challenge_ids,
-            *(check_id for check_id in locked_executed_ids if check_id in locked_counterexample_ids),
-        ))),
-        requirements_improved=requirements_improved,
-        requirements_regressed=requirements_regressed,
-        counterexamples_closed=tuple(sorted(before_counterexamples - after_counterexamples)),
-        counterexamples_opened=tuple(sorted(after_counterexamples - before_counterexamples)),
-        progress_before={"target_deficit": before_state.target_deficit()},
-        progress_after={"target_deficit": after_state.target_deficit()},
-        reach_decision=reach_decision,
-        avoid_decision=avoid_decision,
-        rollback_decision=rollback_decision,
-        code_commit_sha=before_state.code_commit_sha,
-        config_hash=before_state.method_config_hash,
-        prompt_hash=before_state.prompt_hash,
-        patch_hash=str(getattr(after_state.checkpoint.patch, "canonical_diff_hash", patch_hash)),
-        evidence_hashes=tuple(sorted({
-            str(evidence_id)
-            for unit in after_units.values() if unit.binding_id in affected_units
-            for evidence_id in unit.evidence_ids
-        })),
-    )
-    return finalize_certificate(certificate)
-
-
-def decide_execution_transition(previous, trial: RevisionEvidence) -> Decision:
-    if trial.new_regressions > 0 or (
-        not trial.safe and not trial.environment_blocked
-    ):
-        return Decision.ROLLBACK
-    if trial.environment_blocked:
-        return Decision.KEEP_UNCERTIFIED
-    if should_commit(previous, trial):
-        return Decision.COMMIT
-    return Decision.ROLLBACK
-
-
-def _changed_nodes_for_diff(graph, actual_diff: ActualDiff) -> set[str]:
-    changed: set[str] = set()
-    for hunk in actual_diff.hunks:
-        lower = hunk.new_start
-        upper = hunk.new_start + max(hunk.new_count, 1) - 1
-        for node_id in graph.file_index.get(hunk.file, ()):
-            node = graph.nodes[node_id]
-            line = int(node.attributes.get("line", -1))
-            end = int(node.attributes.get("end_line", line))
-            if line <= upper and end >= lower:
-                changed.add(node_id)
-    return changed
-
-
-def _charge_execution(state: ReachAvoidState, seconds: float) -> None:
-    charge = BudgetVector(execution_seconds=seconds, wall_seconds=seconds)
-    try:
-        state.remaining_budget = state.remaining_budget.subtract(charge)
-    except Exception:
-        state.remaining_budget.execution_seconds = 0.0
-        state.remaining_budget.wall_seconds = 0.0
-
-
-def _stable_mechanical_failure_text(value: str) -> str:
-    """Remove per-trial paths and locations from mechanical diagnostics."""
-
-    text = str(value).replace("\\", "/")
-    text = re.sub(
-        r'File "[^"]+", line \d+', 'File "<PATH>", line <LINE>', text,
-    )
-    text = re.sub(r"0x[0-9a-fA-F]+", "0x<ADDR>", text)
-    return "\n".join(line.rstrip() for line in text.splitlines()[-40:]).strip()
-
-
-def _mechanical_action_guidance(
-    reason: str,
-    failed_checks: tuple[dict[str, object], ...],
-) -> tuple[tuple[str, ...], tuple[str, ...]]:
-    diagnostic = "\n".join((
-        reason,
-        *(str(item.get("stdout", "")) for item in failed_checks),
-        *(str(item.get("stderr", "")) for item in failed_checks),
-    )).lower()
-    actions: list[str] = []
-    guidance: list[str] = []
-    if "circular import" in diagnostic or "partially initialized module" in diagnostic:
-        actions.extend((
-            "move_import_inside_call_site",
-            "lazy_local_import",
-            "reuse_dependency_light_utility",
-        ))
-        guidance.append(
-            "Break the import-time dependency cycle: keep the working mechanism, "
-            "but resolve the dependency at the narrow runtime call site or use an "
-            "already available dependency-light utility."
-        )
-    if "indentationerror" in diagnostic or "syntaxerror" in diagnostic:
-        actions.extend(("repair_syntax_at_changed_hunk", "preserve_working_mechanism"))
-        guidance.append(
-            "Repair the exact changed hunk that made the module unparsable while "
-            "preserving the intended behavior change."
-        )
-    if "modulenotfounderror" in diagnostic:
-        actions.extend(("use_existing_project_dependency", "repair_import_boundary"))
-        guidance.append(
-            "Use a dependency that exists in the checked-out project and keep the "
-            "import on the correct package boundary."
-        )
-    if "nameerror" in diagnostic:
-        actions.extend(("bind_symbol_in_runtime_scope", "reuse_existing_symbol"))
-    if "import" in diagnostic and not actions:
-        actions.extend(("repair_import_boundary", "defer_import_time_work"))
-    if not actions:
-        actions.append("repair_mechanical_failure_at_changed_hunk")
-    return tuple(dict.fromkeys(actions)), tuple(dict.fromkeys(guidance))
-
-
-def _mechanical_packet(
-    state: ReachAvoidState,
-    transition_id: str,
-    actual_diff: ActualDiff,
-    reason: str,
-    checks: Iterable[object] = (),
-) -> CounterexamplePacket:
-    failed_checks = tuple(
-        {
-            "check_id": str(getattr(check, "check_id", "")),
-            "kind": str(getattr(check, "kind", "")),
-            "status": str(getattr(
-                getattr(check, "status", ""),
-                "value",
-                getattr(check, "status", ""),
-            )),
-            "command": tuple(map(str, getattr(check, "command", ()))),
-            "return_code": getattr(check, "return_code", None),
-            "stdout": str(getattr(check, "stdout", ""))[-4000:],
-            "stderr": str(getattr(check, "stderr", ""))[-8000:],
-        }
-        for check in checks
-        if getattr(check, "status", OutcomeStatus.UNKNOWN) != OutcomeStatus.PASS
-    )
-    changed_files = tuple(map(str, getattr(actual_diff, "changed_files", ())))
-    changed_hunk_ids = tuple(
-        str(getattr(hunk, "hunk_id", ""))
-        for hunk in getattr(actual_diff, "hunks", ())
-        if getattr(hunk, "hunk_id", "")
-    )
-    action_families, diagnostic_guidance = _mechanical_action_guidance(
-        reason, failed_checks,
-    )
-    signature_payload = {
-        "reason": reason,
-        "changed_files": changed_files,
-        "checks": tuple({
-            "kind": item["kind"],
-            "status": item["status"],
-            "command": item["command"],
-            "return_code": item["return_code"],
-            "stdout": _stable_mechanical_failure_text(str(item["stdout"])),
-            "stderr": _stable_mechanical_failure_text(str(item["stderr"])),
-        } for item in failed_checks),
-    }
-    failure_signature = stable_id("mechanical-failure", signature_payload)
-    return CounterexamplePacket(
-        # The evidence identity is deliberately independent of the revision and
-        # trial diff IDs. Repeating the same mechanical failure is history for
-        # one counterexample, not fabricated new repair evidence.
-        counterexample_id=stable_id("counterexample", failure_signature),
-        transition_id=transition_id,
-        path_obligation_id=None,
-        binding_unit_id=None,
-        challenge_id=None,
-        public_trigger_id=None,
-        entrypoint_id=None,
-        guarded_path_edge_ids=(),
-        exit_kind=None,
-        trusted_oracle_id=None,
-        expected_observation={"mechanical": "PASS"},
-        actual_observation={
-            "reason": reason,
-            "failed_checks": failed_checks,
-            "changed_files": changed_files,
-            "changed_hunk_ids": changed_hunk_ids,
-            "diagnostic_guidance": diagnostic_guidance,
-        },
-        minimal_input={"changed_files": changed_files},
-        reproduction_recipe_id=None,
-        raw_execution_ids=(),
-        relevant_source_slice_ids=(),
-        causal_touch_witness_ids=(),
-        candidate_repair_cut_ids=changed_hunk_ids,
-        protected_sibling_path_ids=tuple(sorted(
-            item.path_obligation_id for item in state.outcomes.values()
-            if item.status == OutcomeStatus.PASS
-        )),
-        preservation_path_ids=(),
-        forbidden_behavior_ids=(),
-        source_hash=state.checkpoint.patch.working_tree_hash,
-        diff_hash=actual_diff.canonical_diff_hash,
-        failure_origin="PATCH_MECHANICAL",
-        frontier_kind=reason,
-        uncertain_information=(),
-        mechanism_fingerprint_hash=str(actual_diff.fingerprint.get("hash")),
-        failure_signature=failure_signature,
-        failure_location=(
-            "changed files: " + ", ".join(changed_files)
-            if changed_files else "patch mechanical validation"
-        ),
-        causal_cut_ids=changed_hunk_ids,
-        impact_risks=(
-            ("import_time_initialization",)
-            if "lazy_local_import" in action_families else ()
-        ),
-        suggested_action_families=action_families,
-    )
-
-
-def _build_checkpoint(
-    state: ReachAvoidState,
-    checkpoint_id: str,
-    snapshot_tree: str,
-    cumulative: ActualDiff,
-    outcomes,
-    transition_id: str,
-    generator_cursor: int,
-    *,
-    safe: bool = False,
-    executed_target_deficit: float | None = None,
-    patch_status: str = "WORKING_UNCERTIFIED",
-) -> IncumbentCheckpoint:
-    passed = [item for item in outcomes.values() if item.status == OutcomeStatus.PASS]
-    failed = [item for item in outcomes.values() if item.status == OutcomeStatus.FAIL]
-    unknown = [
-        item for item in outcomes.values()
-        if item.status not in {OutcomeStatus.PASS, OutcomeStatus.FAIL}
-    ]
-    patch = WorkingPatch(
-        version=state.checkpoint.patch.version + 1,
-        base_commit=state.base_commit,
-        canonical_diff=cumulative.canonical_diff,
-        canonical_diff_hash=cumulative.canonical_diff_hash,
-        base_tree_hash=cumulative.base_tree_hash,
-        working_tree_hash=cumulative.trial_tree_hash,
-        parent_patch_hash=state.checkpoint.patch.canonical_diff_hash,
-        checkpoint_id=checkpoint_id,
-        status=patch_status,
-    )
-    return IncumbentCheckpoint(
-        checkpoint_id=checkpoint_id,
-        parent_checkpoint_id=state.checkpoint.checkpoint_id,
-        episode_id=state.episode_id,
-        assignment_id=state.assignment.assignment_id,
-        base_commit=state.base_commit,
-        snapshot_tree=snapshot_tree,
-        patch=patch,
-        actual_fingerprint=cumulative.fingerprint,
-        graph_hashes={},
-        environment_hash=_environment_hash(),
-        pass_pairs=_current_pairs(passed),
-        fail_pairs=_current_pairs(failed),
-        unknown_pairs=_current_pairs(unknown),
-        blocked_path_obligation_ids=tuple(sorted({
-            item.path_obligation_id for item in unknown
-        })),
-        executed_target_deficit=(
-            float(executed_target_deficit)
-            if executed_target_deficit is not None
-            else float(len(getattr(
-                getattr(state, "target_recovery", None), "targets", ()
-            )))
-        ),
-        accepted_transition_id=transition_id,
-        generator_session_cursor=str(generator_cursor),
-        remaining_budget=state.remaining_budget,
-        safe=safe,
-        graph_reached=False,
-    )
-
-
-def _preserve_initial_patch_after_rejection(
-    state: ReachAvoidState,
-    manager: WorktreeManager,
-    trial,
-    cumulative: ActualDiff,
-    transition_id: str,
-    checks: Iterable[object],
-) -> tuple[IncumbentCheckpoint, object] | None:
-    """Persist the first generated diff before handling its diagnostics.
-
-    The first generator edit is the incumbent fallback even when mechanical
-    validation rejects it.  Keeping its tree in the normal checkpoint store
-    gives a subsequent confirmed mechanical repair a real working parent and
-    prevents a rejected initial trial from turning the final artifact into the
-    empty base patch.
-    """
-
-    if cumulative.empty or not cumulative.applies:
-        return None
-    checkpoint_id = stable_id(
-        "checkpoint", state.episode_id, "first-patch", cumulative.canonical_diff_hash,
-    )
-    receipt = manager.commit(trial, checkpoint_id)
-    snapshot = manager.checkpoint_tree(checkpoint_id)
-    checkpoint = _build_checkpoint(
-        state,
-        checkpoint_id,
-        str(snapshot),
-        cumulative,
-        state.outcomes,
-        transition_id,
-        state.generator_session.cursor,
-        safe=False,
-        patch_status="FIRST_PATCH_MECHANICAL_FAILURE",
-    )
-    checkpoint = replace(checkpoint, graph_hashes=state.graph_hashes())
-    state.checkpoint = checkpoint
-    state.checkpoint_history[checkpoint_id] = checkpoint
-    state.current_patch_hash = checkpoint.patch.canonical_diff_hash
-    mechanical_failure_ids = tuple(
-        str(getattr(item, "check_id", ""))
-        for item in checks
-        if str(getattr(getattr(item, "status", None), "value", getattr(item, "status", "")))
-        != OutcomeStatus.PASS.value
-    )
-    initialize_patch_trajectory(
-        state,
-        mechanical_failure_ids=mechanical_failure_ids,
-    )
-    state.runtime_metrics["first_patch_preserved_after_rejection"] = True
-    state.runtime_metrics["first_patch_checkpoint_id"] = checkpoint_id
-    return checkpoint, receipt
-
-
-def _legacy_evaluate_single_update(
-    state: ReachAvoidState,
-    session: PersistentGeneratorSession,
-    intent,
-    *,
-    forbidden_patterns: Iterable[str] = (),
-    mechanical_commands: Iterable[Iterable[str]] = (),
-) -> TransitionResult | None:
-    """Read old repair-intent artifacts; patch-first production never calls this."""
-
-    if os.environ.get("REACHPATCH_ENABLE_LEGACY_FULL_GRAPH") != "1":
-        raise RuntimeError("legacy full-graph transition is disabled")
-    from reachpatch.reach_avoid.metrics import _legacy_progress_metrics
-    from reachpatch.binding_graph import build_binding_graph
-    from reachpatch.challenge_graph.materialize import materialize_challenges
-    from reachpatch.program_graph.builder import build_augmented_program_graph
-    from reachpatch.requirement_graph import compile_assignment_overlay
-    state.transition_phase(
-        ControllerPhase.GENERATOR_REVISE, event="repair_intent_submitted"
-    )
-    action = session.propose_action(state, intent)
-    state.generator_session = session.record
-    if action is None:
-        return None
-    transition_id = stable_id(
-        "transition", state.checkpoint.checkpoint_id, intent.intent_id,
-        state.transition_index + 1,
-    )
-    session.record_submission(transition_id)
-    manager = WorktreeManager(Path(state.run_root) / "worktrees")
-    trial = manager.begin_trial(state.checkpoint.checkpoint_id)
-    checkpoint_tree = Path(state.checkpoint.snapshot_tree)
-    state.transition_phase(
-        ControllerPhase.DIFF_RECONCILE, event="transactional_trial_started"
-    )
-    try:
-        application = apply_registered_operator(
-            action,
-            checkpoint_tree,
-            trial.tree,
-            state.program_graph,
-            forbidden_patterns=forbidden_patterns,
-        )
-        incremental = application.actual_diff
-    except Exception as exc:
-        incremental = reconcile_actual_diff(
-            checkpoint_tree, trial.tree, forbidden_patterns=forbidden_patterns
-        )
-        receipt = manager.rollback(trial)
-        packet = _mechanical_packet(state, transition_id, incremental, f"EDIT_APPLY:{exc}")
-        certificate = finalize_certificate(TransitionCertificate(
-            transition_id=transition_id,
-            update_id=incremental.diff_id,
-            source_checkpoint_id=state.checkpoint.checkpoint_id,
-            result_checkpoint_id=None,
-            incremental_diff_hash=incremental.canonical_diff_hash,
-            cumulative_diff_hash=state.checkpoint.patch.canonical_diff_hash,
-            actual_edit_ids=tuple(edit.edit_id for edit in action.edit_intents),
-            causal_cut_ids=action.causal_cut_ids,
-            graph_delta={},
-            mechanical_check_ids=(),
-            outcome_ids=(),
-            new_counterexample_ids=(packet.counterexample_id,),
-            eliminated_counterexample_ids=(),
-            impact_regression_ids=(),
-            adjacent_partition_obligation_ids=(),
-            hard_frontier_ids=(),
-            old_target_deficit=state.target_deficit(),
-            new_target_deficit=state.target_deficit(),
-            repaired_losing_path_ids=(),
-            mechanical_pass=False,
-            forbidden_edit=bool(incremental.forbidden_paths),
-            oracle_contamination=bool(incremental.oracle_contamination_paths),
-            established_successes_pass=False,
-            preservation_pass=False,
-            component_shadow_pass=False,
-            diff_safety_pass=False,
-            safe=False,
-            strict_target_progress=False,
-            reach=False,
-            avoid=True,
-            progress=False,
-            decision=Decision.ROLLBACK,
-            restoration_or_commit_receipt=receipt.receipt_id,
-            input_artifact_ids=(),
-            recomputation_hash="",
-        ))
-        state.counterexamples.append(packet)
-        state.repair_history.append(certificate)
-        state.transition_index += 1
-        session.resume(state.checkpoint.checkpoint_id, (packet.counterexample_id,))
-        state.generator_session = session.record
-        state.transition_phase(
-            ControllerPhase.COUNTEREXAMPLE_FEEDBACK, event="edit_apply_failed"
-        )
-        return TransitionResult(
-            transition_id, False, Decision.ROLLBACK, certificate,
-            (packet,), state.checkpoint, action, "EDIT_APPLY_FAILURE",
-        )
-    checks = run_mechanical_checks(
-        trial.tree,
-        incremental,
-        commands=mechanical_commands,
-        baseline_root=checkpoint_tree,
-    )
-    state.transition_phase(
-        ControllerPhase.DICC_VALIDATE, event="actual_diff_reconciled"
-    )
-    trial_program = build_augmented_program_graph(trial.tree)
-    trial_challenges = _reset_for_trial(state.challenge_graph)
-    plan = diff_induced_challenge_plan(
-        state.requirement_graph,
-        state.program_graph,
-        trial_program,
-        state.active_binding_graph,
-        trial_challenges,
-        incremental,
-        update_id=incremental.diff_id,
-    )
-    executor = TraceExecutor(temporary_root=Path(state.run_root) / "tmp")
-    bundles = execute_challenges(
-        trial_challenges,
-        executor,
-        state.base_repository,
-        trial.tree,
-    )
-    # Dynamic observations refine only the trial graph.  They are consumed by
-    # the accepted incremental rebuild below; a rejected trial never mutates
-    # the incumbent graph.
-    baseline_trace_delta = merge_trace_bundles(
-        trial_program, bundles, role="BASELINE"
-    )
-    patched_trace_delta = merge_trace_bundles(
-        trial_program, bundles, role="PATCH"
-    )
-    changed_nodes = _changed_nodes_for_diff(trial_program, incremental)
-    try:
-        diff_impact_cone = guarded_diff_influence_cone(
-            state.program_graph, trial_program, changed_nodes
-        ) if changed_nodes else None
-    except (KeyError, ValueError):
-        diff_impact_cone = None
-    bundle_map = {item.paired_bundle_id: item for item in bundles}
-    state.trace_bundles.update(bundle_map)
-    validation_outcomes = outcomes_from_challenges(state, trial_challenges, bundles)
-    causal_touch = _causal_touch(state, incremental)
-    impact_nodes = set(diff_impact_cone.downstream_node_ids) if diff_impact_cone else set()
-    impact_path_ids = {
-        unit.path_obligation_id
-        for unit in state.active_binding_graph.units.values()
-        if impact_nodes & (set(unit.interaction_path_ids) | set(unit.preservation_node_ids))
-    }
-    closure = finalize_diff_induced_challenge_closure(
-        plan,
-        trial_challenges,
-        checkpoint_id=state.checkpoint.checkpoint_id,
-        transition_index=state.transition_index + 1,
-        causal_touch_witnesses=causal_touch,
-    )
-    progress = _legacy_progress_metrics(
-        state,
-        validation_outcomes,
-        causal_touch,
-        new_requirement_graph=state.requirement_graph,
-        new_program_graph=trial_program,
-        new_binding_graph=state.active_binding_graph,
-        new_challenge_graph=trial_challenges,
-    )
-    shadow_pass = component_shadow_pass(intent, validation_outcomes)
-    state.transition_phase(
-        ControllerPhase.TRANSITION_GATE, event="diff_challenge_closure_computed"
-    )
-    established_ids = {
-        item.challenge_id for item in state.outcomes.values()
-        if item.status == OutcomeStatus.PASS and item.challenge_id
-    }
-    avoid_reasons = raw_avoid_reasons(
-        state,
-        validation_outcomes,
-        checks,
-        forbidden_edit=bool(incremental.forbidden_paths),
-        oracle_contamination=bool(incremental.oracle_contamination_paths),
-        diff_safety_pass=closure.commit_safety_closed,
-    )
-    if not shadow_pass:
-        avoid_reasons = tuple(sorted(set(avoid_reasons) | {"COMPONENT_SHADOW_NOT_CLOSED"}))
-    safe = not avoid_reasons
-    accepted = safe and bool(progress["strict_target_progress"])
-    packets = packets_for_nonpass_challenges(
-        state,
-        trial_challenges,
-        incremental,
-        transition_id=transition_id,
-        executor=executor,
-        base_repository=state.base_repository,
-        patch_repository=trial.tree,
-    )
-    execution_seconds = sum(
-        run.duration_seconds
-        for bundle in bundles
-        for trace_bundle in (bundle.base_bundle, bundle.patch_bundle)
-        for run in trace_bundle.runs
-    )
-    _charge_execution(state, execution_seconds)
-    cumulative = reconcile_actual_diff(
-        state.base_repository,
-        trial.tree,
-        forbidden_patterns=forbidden_patterns,
-    )
-    result_checkpoint_id = None
-    if accepted:
-        result_checkpoint_id = stable_id(
-            "checkpoint", state.episode_id, cumulative.canonical_diff_hash,
-            state.transition_index + 1,
-        )
-        receipt = manager.commit(trial, result_checkpoint_id)
-        snapshot = manager.checkpoint_tree(result_checkpoint_id)
-        accepted_requirements = compile_assignment_overlay(
-            state.semantic_graph, state.assignment
-        )
-        compile_requirement_paths(accepted_requirements, trial_program)
-        accepted_binding = build_binding_graph(accepted_requirements, trial_program)
-        accepted_challenges = materialize_challenges(
-            accepted_requirements,
-            trial_program,
-            accepted_binding,
-            diff_hash=cumulative.canonical_diff_hash,
-        )
-        accepted_bundles = execute_challenges(
-            accepted_challenges,
-            executor,
-            state.base_repository,
-            snapshot,
-        )
-        old_requirement = state.requirement_graph
-        old_binding = state.active_binding_graph
-        state.requirement_graph = accepted_requirements
-        state.program_graph = trial_program
-        state.active_binding_graph = accepted_binding
-        state.challenge_graph = accepted_challenges
-        accepted_outcomes = outcomes_from_challenges(
-            state, accepted_challenges, accepted_bundles
-        )
-        checkpoint = _build_checkpoint(
-            state,
-            result_checkpoint_id,
-            str(snapshot),
-            cumulative,
-            accepted_outcomes,
-            transition_id,
-            session.record.cursor,
-        )
-        checkpoint = replace(
-            checkpoint,
-            graph_hashes=state.graph_hashes(),
-            executed_target_deficit=sum(
-                state.requirement_graph.leaves[unit.leaf_id].weight
-                for unit in state.active_binding_graph.units.values()
-                if any(
-                    outcome.unit_id == unit.unit_id and outcome.status != OutcomeStatus.PASS
-                    for outcome in accepted_outcomes.values()
-                )
-            ),
-        )
-        state.checkpoint = checkpoint
-        state.outcomes = accepted_outcomes
-        state.trace_bundles.update({
-            item.paired_bundle_id: item for item in accepted_bundles
-        })
-        graph_delta = {
-            "old_requirement": old_requirement.semantic_layer_hash(),
-            "new_requirement": accepted_requirements.semantic_layer_hash(),
-            "old_binding": old_binding.graph_hash(),
-            "new_binding": accepted_binding.graph_hash(),
-            "program_version": trial_program.version,
-            "dynamic_trace": {
-                "baseline": baseline_trace_delta,
-                "patched": patched_trace_delta,
-            },
-            "diff_impact_cone": diff_impact_cone.to_dict() if diff_impact_cone else None,
-        }
-    else:
-        receipt = manager.rollback(trial)
-        checkpoint = state.checkpoint
-        graph_delta = {
-            "trial_program_hash": trial_program.program_hash(),
-            "committed": False,
-            "dynamic_trace": {
-                "baseline": baseline_trace_delta,
-                "patched": patched_trace_delta,
-            },
-            "diff_impact_cone": diff_impact_cone.to_dict() if diff_impact_cone else None,
-        }
-    state.diff_closure_certificates.append(closure)
-    validation_by_challenge = {
-        item.challenge_id: item for item in validation_outcomes.values() if item.challenge_id
-    }
-    established_pass = all(
-        challenge_id in validation_by_challenge
-        and validation_by_challenge[challenge_id].status == OutcomeStatus.PASS
-        for challenge_id in established_ids
-    )
-    preservation_pass = all(
-        item.status == OutcomeStatus.PASS
-        for item in validation_outcomes.values() if item.kind == "PRESERVATION"
-    )
-    certificate = finalize_certificate(TransitionCertificate(
-        transition_id=transition_id,
-        update_id=incremental.diff_id,
-        source_checkpoint_id=intent.source_checkpoint_id,
-        result_checkpoint_id=result_checkpoint_id,
-        incremental_diff_hash=incremental.canonical_diff_hash,
-        cumulative_diff_hash=(
-            cumulative.canonical_diff_hash if accepted
-            else state.checkpoint.patch.canonical_diff_hash
-        ),
-        actual_edit_ids=tuple(edit.edit_id for edit in action.edit_intents),
-        causal_cut_ids=action.causal_cut_ids,
-        graph_delta=graph_delta,
-        mechanical_check_ids=(
-            tuple(item.check_id for item in checks)
-            + tuple(
-                str(item.get("check_id"))
-                for item in graph_delta.get("public_check_comparisons", ())
-                if item.get("check_id")
-            )
-        ),
-        outcome_ids=tuple(sorted(validation_outcomes)),
-        new_counterexample_ids=tuple(item.counterexample_id for item in packets),
-        eliminated_counterexample_ids=tuple(sorted({
-            item.counterexample_id for item in state.counterexamples
-            if item.path_obligation_id in progress["repaired_losing_path_ids"]
-        })),
-        impact_regression_ids=tuple(
-            item.outcome_id for item in validation_outcomes.values()
-            if item.status != OutcomeStatus.PASS
-            and (
-                item.kind == "PRESERVATION"
-                or item.path_obligation_id in impact_path_ids
-            )
-        ),
-        adjacent_partition_obligation_ids=plan.overlay_obligation_ids,
-        hard_frontier_ids=closure.hard_frontier_ids,
-        old_target_deficit=float(progress["old_target_deficit"]),
-        new_target_deficit=float(progress["new_target_deficit"]),
-        repaired_losing_path_ids=tuple(progress["repaired_losing_path_ids"]),
-        mechanical_pass=mechanical_pass(checks),
-        forbidden_edit=bool(incremental.forbidden_paths),
-        oracle_contamination=bool(incremental.oracle_contamination_paths),
-        established_successes_pass=established_pass,
-        preservation_pass=preservation_pass,
-        component_shadow_pass=shadow_pass,
-        diff_safety_pass=closure.commit_safety_closed,
-        safe=safe,
-        strict_target_progress=bool(progress["strict_target_progress"]),
-        reach=accepted and in_target_set(state),
-        avoid=bool(avoid_reasons),
-        progress=bool(progress["strict_target_progress"]),
-        decision=Decision.COMMIT if accepted else Decision.ROLLBACK,
-        restoration_or_commit_receipt=receipt.receipt_id,
-        input_artifact_ids=tuple(
-            identifiers[-1]
-            for identifiers in state.artifact_ids.values() if identifiers
-        ),
-        recomputation_hash="",
-    ))
-    fingerprint = mechanism_fingerprint(incremental)
-    attempts = state.mechanism_memory.setdefault(intent.losing_core_id, [])
-    equivalent = sum(
-        item.fingerprint_hash == fingerprint["fingerprint_hash"] for item in attempts
-    ) + 1
-    attempts.append(MechanismAttempt(
-        component_id=intent.component_id,
-        losing_core_id=intent.losing_core_id,
-        mechanism_class=intent.root_mechanism_class,
-        fingerprint_hash=str(fingerprint["fingerprint_hash"]),
-        result="COMMIT" if accepted else "ROLLBACK",
-        causal_cut_ids=action.causal_cut_ids,
-        failure_observation_hash=content_hash([
-            item.actual_observation for item in packets
-        ]),
-        transition_id=transition_id,
-        equivalent_attempt_count=equivalent,
-        forbidden_next=not accepted and equivalent >= 2,
-    ))
-    state.repair_history.append(certificate)
-    state.transition_index += 1
-    session.resume(
-        state.checkpoint.checkpoint_id,
-        tuple(item.counterexample_id for item in packets),
-    )
-    state.generator_session = session.record
-    state.transition_phase(
-        ControllerPhase.COUNTEREXAMPLE_FEEDBACK,
-        event="transition_committed" if accepted else "transition_rolled_back",
-    )
-    state.refresh_id()
-    reason = "SAFE_STRICT_PROGRESS" if accepted else (
-        ",".join(avoid_reasons) if avoid_reasons else "NO_STRICT_TARGET_PROGRESS"
-    )
-    return TransitionResult(
-        transition_id=transition_id,
-        accepted=accepted,
-        decision=Decision.COMMIT if accepted else Decision.ROLLBACK,
-        certificate=certificate,
-        counterexamples=packets,
-        checkpoint=state.checkpoint,
-        action=action,
-        reason=reason,
-    )
-
-
-def _apply_revision_edits(tree: Path, revision: GeneratorRevision) -> None:
-    by_file: dict[str, list] = {}
-    prepared: dict[str, list[str]] = {}
-    for edit in revision.edits:
-        path = (tree / edit.relative_path).resolve()
-        if not path.is_relative_to(tree.resolve()) or not path.is_file():
-            raise ValueError(f"invalid revision path: {edit.relative_path}")
-        lines = prepared.setdefault(
-            edit.relative_path,
-            path.read_text(encoding="utf-8", errors="strict").splitlines(),
-        )
-        if edit.start_line == len(lines) + 1 and not edit.expected_source.strip():
-            effective_end = len(lines)
-        elif 1 <= edit.start_line <= len(lines):
-            effective_end = min(edit.end_line, len(lines))
-        else:
-            raise ValueError(
-                f"invalid revision range: {edit.relative_path}:"
-                f"{edit.start_line}-{edit.end_line}"
-            )
-        actual = "\n".join(lines[edit.start_line - 1:effective_end])
-        if actual != edit.expected_source.rstrip("\n"):
-            raise ValueError(
-                f"expected source mismatch: {edit.relative_path}:{edit.start_line}"
-            )
-        by_file.setdefault(edit.relative_path, []).append(
-            replace(edit, end_line=effective_end)
-        )
-    for relative, edits in by_file.items():
-        ordered = sorted(edits, key=lambda item: (item.start_line, item.end_line), reverse=True)
-        previous_start = len(prepared[relative]) + 1
-        for edit in ordered:
-            if edit.end_line >= previous_start:
-                raise ValueError(f"overlapping edits in {relative}")
-            previous_start = edit.start_line
-            replacement = edit.replacement.splitlines()
-            prepared[relative][edit.start_line - 1:edit.end_line] = replacement
-        original = (tree / relative).read_text(encoding="utf-8", errors="strict")
-        trailing = "\n" if original.endswith("\n") else ""
-        (tree / relative).write_text(
-            "\n".join(prepared[relative]) + trailing, encoding="utf-8"
-        )
-
-
-def _revision_certificate(
-    state: ReachAvoidState,
-    revision: GeneratorRevision,
-    transition_id: str,
-    incremental: ActualDiff,
-    checks,
-    *,
-    decision: Decision,
-    receipt_id: str,
-    result_checkpoint_id: str | None,
-    graph_delta: dict,
-    outcomes: dict,
-    packets: tuple[CounterexamplePacket, ...],
-    safe: bool,
-    progress: bool,
-    reach: bool,
-    avoid_reasons: tuple[str, ...],
-) -> TransitionCertificate:
-    failed = [item for item in outcomes.values() if item.status == OutcomeStatus.FAIL]
-    preservation_pass = not any(
-        item.kind == "PRESERVATION" and item.status == OutcomeStatus.FAIL and item.stable
-        for item in outcomes.values()
-    )
-    established_pass = not any(
-        old.status == OutcomeStatus.PASS
-        and any(
-            current.unit_id == old.unit_id and current.status == OutcomeStatus.FAIL
-            for current in outcomes.values()
-        )
-        for old in state.outcomes.values()
-    )
-    old_target_deficit = float(
-        graph_delta.get("old_target_deficit", state.target_deficit())
-    )
-    comparison_rows = tuple(graph_delta.get("public_check_comparisons", ()))
-    if comparison_rows and state.target_recovery is not None:
-        target_ids = {
-            item.check_id for item in state.target_recovery.targets
-        }
-        classifications = {
-            str(item.get("check_id", "")): str(item.get("classification", ""))
-            for item in comparison_rows
-        }
-        new_target_deficit = float(sum(
-            classifications.get(check_id) != CheckClassification.TARGET_FIXED.value
-            for check_id in target_ids
-        ))
-    else:
-        new_target_deficit = old_target_deficit
-    return finalize_certificate(TransitionCertificate(
-        transition_id=transition_id, update_id=incremental.diff_id,
-        source_checkpoint_id=state.checkpoint.checkpoint_id,
-        result_checkpoint_id=result_checkpoint_id,
-        incremental_diff_hash=incremental.canonical_diff_hash,
-        cumulative_diff_hash=(
-            graph_delta.get("cumulative_diff_hash")
-            or state.checkpoint.patch.canonical_diff_hash
-        ),
-        actual_edit_ids=tuple(stable_id("proposed-edit", asdict(item)) for item in revision.edits),
-        causal_cut_ids=tuple(sorted({
-            node_id for unit in state.active_binding_graph.units.values()
-            for node_id in unit.repair_cut_node_ids
-            if any(
-                state.program_graph.nodes.get(node_id)
-                and state.program_graph.nodes[node_id].attributes.get("file") == edit.relative_path
-                for edit in revision.edits
-            )
-        })),
-        graph_delta=graph_delta,
-        mechanical_check_ids=tuple(item.check_id for item in checks),
-        outcome_ids=tuple(sorted(outcomes)),
-        new_counterexample_ids=tuple(item.counterexample_id for item in packets),
-        eliminated_counterexample_ids=(),
-        impact_regression_ids=tuple(item.outcome_id for item in failed if item.kind == "PRESERVATION"),
-        adjacent_partition_obligation_ids=tuple(graph_delta.get("active_challenge_ids", ())),
-        hard_frontier_ids=tuple(graph_delta.get("hard_frontier_ids", ())),
-        old_target_deficit=old_target_deficit,
-        new_target_deficit=new_target_deficit,
-        repaired_losing_path_ids=tuple(graph_delta.get("repaired_path_ids", ())),
-        mechanical_pass=mechanical_pass(checks),
-        forbidden_edit=bool(incremental.forbidden_paths),
-        oracle_contamination=bool(incremental.oracle_contamination_paths),
-        established_successes_pass=established_pass,
-        preservation_pass=preservation_pass,
-        component_shadow_pass=True,
-        diff_safety_pass=bool(graph_delta.get("diff_adequacy_closed", False)),
-        safe=safe, strict_target_progress=progress,
-        reach=reach, avoid=bool(avoid_reasons), progress=progress,
-        decision=decision,
-        restoration_or_commit_receipt=receipt_id,
-        input_artifact_ids=tuple(
-            values[-1] for values in state.artifact_ids.values() if values
-        ),
-        recomputation_hash="",
-    ))
-
-
-def evaluate_patch_revision(
-    state: ReachAvoidState,
-    revision: GeneratorRevision,
-) -> TransitionResult:
-    """Validate one incremental revision against the sole incumbent lineage."""
-
-    conversion = convert_revision_action(state, revision)
-    if conversion.status not in {
-        ActionConversionStatus.ACCEPTED,
-        ActionConversionStatus.NEEDS_SLICE_EXPANSION,
-    }:
-        raise ValueError(
-            f"revision conversion {conversion.status.value}: {'; '.join(conversion.reasons)}"
-        )
-    before_state = copy.copy(state)
-    initial_patch_submission = state.patch_trajectory is None
-    before_state.counterexamples = list(state.counterexamples)
-    before_state.outcomes = dict(state.outcomes)
-    before_state.check_comparisons = tuple(state.check_comparisons)
-    state.transition_phase(ControllerPhase.MECHANICAL_VALIDATE, event="generator_revision_submitted")
-    previous_target_deficit = state.target_deficit()
-    transition_id = stable_id(
-        "patch-revision-transition", state.checkpoint.checkpoint_id,
-        revision.revision_id, state.transition_index + 1,
-    )
-    manager = WorktreeManager(Path(state.run_root) / "worktrees")
-    trial = manager.begin_trial(state.checkpoint.checkpoint_id)
-    trial_tree = Path(trial.tree)
-    checkpoint_tree = Path(state.checkpoint.snapshot_tree)
-    config = state.runtime_config
-    graph_stage_timings: dict[str, float] = {}
-    transition_started = time.perf_counter()
-    forbidden = tuple(config.get("forbidden_patterns", ()))
-    public_commands = tuple(
-        tuple(map(str, item))
-        for item in config.get(
-            "public_check_commands", config.get("mechanical_commands", ())
-        )
-        if item
-    )
-    try:
-        _apply_revision_edits(trial_tree, revision)
-        incremental = reconcile_actual_diff(
-            checkpoint_tree, trial_tree, forbidden_patterns=forbidden
-        )
-    except Exception as exc:
-        incremental = reconcile_actual_diff(
-            checkpoint_tree, trial_tree, forbidden_patterns=forbidden
-        )
-        preserved_initial = (
-            _preserve_initial_patch_after_rejection(
-                state, manager, trial, incremental, transition_id, ()
-            )
-            if initial_patch_submission else None
-        )
-        receipt = (
-            preserved_initial[1]
-            if preserved_initial is not None
-            else manager.rollback(trial)
-        )
-        packet = _mechanical_packet(
-            state, transition_id, incremental, f"EDIT_APPLY:{type(exc).__name__}:{exc}"
-        )
-        certificate = _revision_certificate(
-            state, revision, transition_id, incremental, (),
-            decision=(
-                Decision.KEEP_UNCERTIFIED
-                if preserved_initial is not None else Decision.ROLLBACK
-            ), receipt_id=receipt.receipt_id,
-            result_checkpoint_id=(
-                preserved_initial[0].checkpoint_id
-                if preserved_initial is not None else None
-            ), graph_delta={
-                "edit_error": str(exc),
-                "actual_diff": incremental.to_dict(),
-            },
-            outcomes=state.outcomes, packets=(packet,), safe=False,
-            progress=False, reach=False, avoid_reasons=("EDIT_APPLY_FAILURE",),
-        )
-        state.counterexamples.append(packet)
-        state.repair_history.append(certificate)
-        state.transition_index += 1
-        if state.generator_conversation is not None:
-            state.generator_conversation.rejected_patch_hashes.append(
-                incremental.canonical_diff_hash
-            )
-        state.transition_phase(ControllerPhase.COUNTEREXAMPLE_FEEDBACK, event="edit_apply_failed")
-        return TransitionResult(
-            transition_id, False,
-            Decision.KEEP_UNCERTIFIED if preserved_initial is not None else Decision.ROLLBACK,
-            certificate, (packet,), state.checkpoint, revision,
-            "EDIT_APPLY_FAILURE",
-        )
-    checks = run_mechanical_checks(
-        trial_tree, incremental,
-        baseline_root=checkpoint_tree,
-    )
-    mechanical_ok = mechanical_pass(checks)
-    cumulative = reconcile_actual_diff(
-        state.base_repository, trial_tree, forbidden_patterns=forbidden
-    )
-    avoid_reasons: set[str] = set()
-    if incremental.empty:
-        avoid_reasons.add("EMPTY_REVISION")
-    if cumulative.empty and state.checkpoint.patch.canonical_diff:
-        # A revision may contain real edits that merely undo every incumbent
-        # hunk.  Treat that as non-progress unless an independently verified
-        # empty tree can satisfy the task; SWE-bench requires one real patch,
-        # and the prior mechanically healthy working patch is the better
-        # best-effort incumbent.
-        avoid_reasons.add("WORKING_PATCH_ERASURE")
-    if not mechanical_ok:
-        # Keep the failed mechanical execution in the authoritative
-        # ObservationBundle.  The trajectory controller can then certify a
-        # deterministic syntax/structure/import failure and give the same
-        # working patch to the generator for one causal correction.  Without
-        # this record the packet was only diagnostic text and could never
-        # trigger the allowed mechanical-repair path.
-        state.observations = ObservationBundle.create(
-            revision=state.transition_index + 1,
-            check_comparisons=state.check_comparisons,
-            mechanical_checks=checks,
-            environment_frontier_ids=(
-                item.frontier_id for item in state.environment_frontiers
-            ),
-        )
-        avoid_reasons.add("MECHANICAL_FAILURE")
-    if incremental.forbidden_paths:
-        avoid_reasons.add("FORBIDDEN_EDIT")
-    if incremental.oracle_contamination_paths:
-        avoid_reasons.add("ORACLE_CONTAMINATION")
-    if avoid_reasons:
-        preserved_initial = (
-            _preserve_initial_patch_after_rejection(
-                state, manager, trial, cumulative, transition_id, checks,
-            )
-            if initial_patch_submission else None
-        )
-        if state.patch_trajectory is not None and preserved_initial is None:
-            archived_trial = checkpoint_from_trial_diff(
-                state,
-                cumulative,
-                status="MECHANICAL_REJECTED",
-                snapshot_tree=str(trial_tree),
-            )
-            state.patch_trajectory.checkpoint_archive[
-                archived_trial.checkpoint_id
-            ] = archived_trial
-        receipt = (
-            preserved_initial[1]
-            if preserved_initial is not None
-            else manager.rollback(trial)
-        )
-        packet = _mechanical_packet(
-            state, transition_id, incremental, ",".join(sorted(avoid_reasons)),
-            checks,
-        )
-        certificate = _revision_certificate(
-            state, revision, transition_id, incremental, checks,
-            decision=(
-                Decision.KEEP_UNCERTIFIED
-                if preserved_initial is not None else Decision.ROLLBACK
-            ), receipt_id=receipt.receipt_id,
-            result_checkpoint_id=(
-                preserved_initial[0].checkpoint_id
-                if preserved_initial is not None else None
-            ),
-            graph_delta={"actual_diff": incremental.to_dict()},
-            outcomes=state.outcomes,
-            packets=(packet,), safe=False, progress=False, reach=False,
-            avoid_reasons=tuple(sorted(avoid_reasons)),
-        )
-        state.counterexamples.append(packet)
-        state.repair_history.append(certificate)
-        state.transition_index += 1
-        if state.generator_conversation is not None:
-            state.generator_conversation.rejected_patch_hashes.append(
-                incremental.canonical_diff_hash
-            )
-            state.generator_conversation.rolled_back_diffs.append(
-                incremental.canonical_diff
-            )
-        state.transition_phase(ControllerPhase.COUNTEREXAMPLE_FEEDBACK, event="mechanical_rollback")
-        return TransitionResult(
-            transition_id, False,
-            Decision.KEEP_UNCERTIFIED if preserved_initial is not None else Decision.ROLLBACK,
-            certificate, (packet,), state.checkpoint, revision,
-            ",".join(sorted(avoid_reasons)),
-        )
-    if not initial_patch_submission:
-        scope_decision = accept_edit_scope(
-            state.runtime_metrics.get("current_repair_intent", {}),
-            incremental,
-            state,
-        )
-        state.runtime_metrics["last_edit_scope_decision"] = {
-            key: value
-            for key, value in scope_decision.__dict__.items()
-        } if hasattr(scope_decision, "__dict__") else {
-            "allowed": scope_decision.allowed,
-            "touched_causal_cut": scope_decision.touched_causal_cut,
-            "unexplained_files": list(scope_decision.unexplained_files),
-            "unexplained_symbols": list(scope_decision.unexplained_symbols),
-            "public_api_changes": list(scope_decision.public_api_changes),
-            "signature_changes": list(scope_decision.signature_changes),
-            "shared_utility_changes": list(scope_decision.shared_utility_changes),
-            "base_class_changes": list(scope_decision.base_class_changes),
-        }
-        if not scope_decision.allowed:
-            if state.patch_trajectory is not None:
-                archived_trial = checkpoint_from_trial_diff(
-                    state,
-                    cumulative,
-                    status="EDIT_SCOPE_REJECTED",
-                    snapshot_tree=str(trial_tree),
-                )
-                state.patch_trajectory.checkpoint_archive[
-                    archived_trial.checkpoint_id
-                ] = archived_trial
-            receipt = manager.rollback(trial)
-            certificate = _revision_certificate(
-                state, revision, transition_id, incremental, checks,
-                decision=Decision.ROLLBACK, receipt_id=receipt.receipt_id,
-                result_checkpoint_id=None,
-                graph_delta={
-                    "actual_diff": incremental.to_dict(),
-                    "edit_scope_decision": state.runtime_metrics[
-                        "last_edit_scope_decision"
-                    ],
-                },
-                outcomes=state.outcomes, packets=(), safe=False,
-                progress=False, reach=False,
-                avoid_reasons=("EDIT_SCOPE_REJECTED",),
-            )
-            state.repair_history.append(certificate)
-            state.transition_index += 1
-            return TransitionResult(
-                transition_id, False, Decision.ROLLBACK, certificate,
-                (), state.checkpoint, revision, "EDIT_SCOPE_REJECTED",
-            )
-    project_runner = select_project_runner(
-        state.base_repository,
-        artifact_root=Path(state.run_root) / "execution",
-        base_commit=state.base_commit,
-    )
-    all_checks = tuple((
-        *state.target_recovery.targets,
-        *state.target_recovery.preservation_checks,
-    ))
-    check_by_id = {item.check_id: item for item in all_checks}
-    baseline_by_id = {
-        item.check_id: item for item in state.target_recovery.baseline_executions
-    }
-    trial_hash = tree_hash(trial_tree)
-    public_comparisons = tuple(
-        CheckComparison.create(
-            baseline_by_id[check.check_id],
-            project_runner.run_check(
-                check, repository=trial_tree, tree_hash=trial_hash,
-            ),
-            check.role,
-        )
-        for check in all_checks
-        if check.check_id in baseline_by_id
-    )
-    _charge_execution(state, sum(
-        item.patched.duration_seconds for item in public_comparisons
-    ))
-    locked_comparison = None
-    transition_label = "INITIAL_PATCH"
-    transition_reason = "FIRST_PATCH_SUBMISSION"
-    if not initial_patch_submission:
-        locked = state.current_locked_check_set
-        trajectory = state.patch_trajectory
-        if locked is None or trajectory is None:
-            receipt = manager.rollback(trial)
-            certificate = _revision_certificate(
-                state, revision, transition_id, incremental, checks,
-                decision=Decision.ROLLBACK, receipt_id=receipt.receipt_id,
-                result_checkpoint_id=None,
-                graph_delta={"actual_diff": incremental.to_dict()},
-                outcomes=state.outcomes, packets=(), safe=False,
-                progress=False, reach=False,
-                avoid_reasons=("LOCKED_CHECK_SET_MISSING",),
-            )
-            state.repair_history.append(certificate)
-            state.transition_index += 1
-            return TransitionResult(
-                transition_id, False, Decision.ROLLBACK, certificate,
-                (), state.checkpoint, revision, "LOCKED_CHECK_SET_MISSING",
-            )
-        before_checkpoint = trajectory.working_patch
-        locked_comparison = evaluate_trial_against_checkpoint(
-            before=before_checkpoint,
-            after_patch_hash=incremental.canonical_diff_hash,
-            before_repository=checkpoint_tree,
-            after_repository=trial_tree,
-            locked_checks=locked,
-            project_runner=project_runner,
-            before_tree_hash=tree_hash(checkpoint_tree),
-            after_tree_hash=trial_hash,
-        )
-        transition_label, transition_reason = decide_transition(locked_comparison)
-        state.runtime_metrics["last_locked_trial_comparison"] = (
-            locked_comparison.to_dict()
-        )
-        if transition_label == "ROLLBACK":
-            selected_failure = next((
-                item for item in state.confirmed_failures
-                if item.failure_id == state.runtime_metrics.get(
-                    "selected_confirmed_failure_id"
-                )
-            ), None)
-            trial_checkpoint = checkpoint_from_trial_diff(
-                state,
-                cumulative,
-                status="ROLLED_BACK",
-                evidence_vector=evidence_vector_from_comparison(
-                    locked_comparison
-                ),
-                executed_check_ids=locked_comparison.executed_check_ids,
-                snapshot_tree=str(trial_tree),
-            )
-            if selected_failure is not None:
-                record_transition(
-                    state,
-                    failure=selected_failure,
-                    comparison=locked_comparison,
-                    trial=trial_checkpoint,
-                    action_id=revision.revision_id,
-                    mechanism_id=revision.mechanism,
-                    decision="ROLLBACK",
-                    reason=transition_reason,
-                )
-            receipt = manager.rollback(trial)
-            certificate = _revision_certificate(
-                state, revision, transition_id, incremental, checks,
-                decision=Decision.ROLLBACK, receipt_id=receipt.receipt_id,
-                result_checkpoint_id=None,
-                graph_delta={
-                    "actual_diff": incremental.to_dict(),
-                    "locked_trial_comparison": locked_comparison.to_dict(),
-                    "transition_reason": transition_reason,
-                },
-                outcomes=state.outcomes, packets=(), safe=False,
-                progress=False, reach=False,
-                avoid_reasons=(transition_reason,),
-            )
-            state.repair_history.append(certificate)
-            state.transition_index += 1
-            state.runtime_metrics.setdefault("rolled_back_transitions", 0)
-            state.runtime_metrics["rolled_back_transitions"] += 1
-            return TransitionResult(
-                transition_id, False, Decision.ROLLBACK, certificate,
-                (), state.checkpoint, revision, transition_reason,
-            )
-    cuts_by_check = {
-        comparison.check_id: causal_repair_cut(
-            comparison.patched,
-            check_by_id[comparison.check_id],
-            state.program_graph,
-            incremental,
-        )
-        for comparison in public_comparisons
-        if comparison.check_id in check_by_id
-        and comparison.classification in {
-            CheckClassification.TARGET_STILL_FAILING,
-            CheckClassification.TARGET_REGRESSED,
-            CheckClassification.PRESERVATION_REGRESSION,
-        }
-    }
-    public_packets = tuple(
-        packet
-        for item in public_comparisons
-        if item.check_id in check_by_id
-        for packet in (
-            counterexample_from_check_comparison(
-                state, check_by_id[item.check_id], item, incremental,
-                transition_id=transition_id,
-                repair_cuts=cuts_by_check.get(item.check_id, ()),
-            ),
-        )
-        if packet is not None
-    )
-    public_regressions = tuple(
-        item for item in public_comparisons
-        if item.classification in {
-            CheckClassification.TARGET_REGRESSED,
-            CheckClassification.PRESERVATION_REGRESSION,
-        }
-        or (
-            item.classification == CheckClassification.NEW_INFRA_FAILURE
-            and check_by_id[item.check_id].role == CheckRole.PRESERVATION
-        )
-    )
-    target_fixed_with_regression = bool(public_regressions) and any(
-        item.classification == CheckClassification.TARGET_FIXED
-        for item in public_comparisons
-    )
-    if (
-        public_regressions
-        and not target_fixed_with_regression
-        and not initial_patch_submission
-    ):
-        receipt = manager.rollback(trial)
-        graph_delta = {
-            "actual_diff": incremental.to_dict(),
-            "public_check_comparisons": [
-                item.to_dict() for item in public_comparisons
-            ],
-            "public_check_classification_counts": {
-                classification: sum(
-                    item.classification == classification
-                    for item in public_comparisons
-                )
-                for classification in sorted({
-                    item.classification for item in public_comparisons
-                })
-            },
-        }
-        certificate = _revision_certificate(
-            state, revision, transition_id, incremental, checks,
-            decision=Decision.ROLLBACK, receipt_id=receipt.receipt_id,
-            result_checkpoint_id=None, graph_delta=graph_delta,
-            outcomes=state.outcomes, packets=public_packets,
-            safe=False, progress=False, reach=False,
-            avoid_reasons=("PUBLIC_EXECUTION_REGRESSION",),
-        )
-        state.counterexamples.extend(public_packets)
-        state.repair_history.append(certificate)
-        state.transition_index += 1
-        state.runtime_metrics["last_public_check_comparisons"] = [
-            item.to_dict() for item in public_comparisons
-        ]
-        state.runtime_metrics["public_check_execution_count"] = int(
-            state.runtime_metrics.get("public_check_execution_count", 0)
-        ) + len(public_comparisons) * 2
-        if state.generator_conversation is not None:
-            state.generator_conversation.rejected_patch_hashes.append(
-                incremental.canonical_diff_hash
-            )
-        state.transition_phase(
-            ControllerPhase.COUNTEREXAMPLE_FEEDBACK,
-            event="public_preservation_regression",
-        )
-        return TransitionResult(
-            transition_id, False, Decision.ROLLBACK, certificate,
-            public_packets, state.checkpoint, revision,
-            "PUBLIC_EXECUTION_REGRESSION",
-        )
-    if state.repository_index is None:
-        manager.rollback(trial)
-        raise RuntimeError("patch-first transition requires a persisted RepositoryIndex")
-    graph_budget = GraphBudget.from_limits(
-        seconds=float(config.get("program_slice_deadline_seconds", 90.0)),
-        max_nodes=int(config.get("max_program_nodes", 50_000)),
-        max_edges=int(config.get("max_program_edges", 150_000)),
-        max_files=int(config.get("max_precise_files", 40)),
-        max_functions=int(config.get("max_precise_functions", 200)),
-        max_rss_mib=int(config.get("graph_memory_limit_mib", 2048)),
-        max_protocol_candidates_per_operation=int(
-            config.get("max_protocol_candidates_per_operation", 8)
-        ),
-    )
-    state.transition_phase(ControllerPhase.ACTIVE_GRAPH_BUILD, event="mechanical_checks_passed")
-    graph_stage_timings_started = time.perf_counter()
-    trial_repository_index = update_repository_index(
-        state.repository_index, trial_tree, tuple(incremental.changed_files),
-        deadline=Deadline.after(float(
-            config.get("repository_index_deadline_seconds", 60.0)
-        )),
-    )
-    graph_stage_timings["repository_index_seconds"] = time.perf_counter() - graph_stage_timings_started
-    graph_stage_timings_started = time.perf_counter()
-    graph_delta_result = update_active_program_slice(
-        state.program_graph, trial_repository_index, trial_tree,
-        incremental, None, tuple(revision.context_requests), graph_budget,
-    )
-    graph_stage_timings["program_graph_seconds"] = time.perf_counter() - graph_stage_timings_started
-    trial_program = graph_delta_result.graph
-    graph_stage_timings_started = time.perf_counter()
-    trial_requirements = copy.deepcopy(state.requirement_graph)
-    requirement_delta = promote_domains_from_diff(
-        trial_requirements, trial_program, incremental, None,
-        deadline=time.monotonic() + float(
-            config.get("requirement_deadline_seconds", 30.0)
-        ),
-    )
-    changed_program_nodes = set(
-        graph_delta_result.added_node_ids
-        + graph_delta_result.removed_node_ids
-        + graph_delta_result.modified_node_ids
-    )
-    affected_leaf_ids = set(requirement_delta.affected_leaf_ids)
-    affected_path_ids = {
-        unit.path_obligation_id
-        for unit in state.active_binding_graph.units.values()
-        if changed_program_nodes & set(unit.interaction_path_ids)
-    }
-    affected_leaf_ids.update(
-        state.requirement_graph.path_obligations[path_id].leaf_id
-        for path_id in affected_path_ids
-        if path_id in state.requirement_graph.path_obligations
-    )
-    if not trial_requirements.path_obligations:
-        compile_requirement_paths(
-            trial_requirements, trial_program,
-            max_open_world_seeds=min(64, int(config.get("max_precise_functions", 200))),
-            max_observation_nodes=min(128, int(config.get("max_program_nodes", 50_000))),
-            max_paths_per_entry=int(config.get("max_path_classes_per_leaf", 24)),
-            max_path_classes_per_leaf=int(config.get("max_path_classes_per_leaf", 24)),
-            promote_all_program_predicates=False,
-            deadline=time.monotonic() + float(config.get("requirement_deadline_seconds", 30.0)),
-        )
-        affected_leaf_ids.update(trial_requirements.leaves)
-        affected_path_ids.update(trial_requirements.path_obligations)
-    elif affected_leaf_ids:
-        trial_requirements, removed_paths, added_paths = refresh_requirement_paths(
-            trial_requirements, trial_program,
-            affected_leaf_ids=affected_leaf_ids,
-            max_path_classes_per_leaf=int(
-                config.get("max_path_classes_per_leaf", 24)
-            ),
-            deadline=time.monotonic() + float(
-                config.get("requirement_deadline_seconds", 30.0)
-            ),
-        )
-        affected_path_ids.update(removed_paths)
-        affected_path_ids.update(added_paths)
-    affected_path_ids.update({
-        obligation.path_obligation_id
-        for obligation in trial_requirements.path_obligations.values()
-        if obligation.leaf_id in set(requirement_delta.affected_leaf_ids)
-        or set(obligation.path_edge_ids) & set(graph_delta_result.added_edge_ids + graph_delta_result.removed_edge_ids)
-    })
-    graph_stage_timings["requirement_graph_seconds"] = time.perf_counter() - graph_stage_timings_started
-    graph_stage_timings_started = time.perf_counter()
-    trial_binding = build_active_binding_graph(
-        trial_requirements,
-        trial_program,
-        incremental,
-        state.target_recovery,
-        all_checks,
-        previous_graph=state.active_binding_graph,
-        instance_id=state.instance_id,
-        revision=state.transition_index + 1,
-        active_slice_max_files=int(config.get("active_slice_max_files", 12)),
-        active_slice_max_symbols=int(config.get("active_slice_max_symbols", 40)),
-        direct_caller_depth=int(config.get("direct_caller_depth", 2)),
-        impact_cone_depth=int(config.get("impact_cone_depth", 2)),
-        failure_locations={
-            item.check_id: item.patched.first_project_frame
-            for item in public_comparisons
-            if item.patched.first_project_frame
-            and item.classification in {
-                CheckClassification.TARGET_STILL_FAILING,
-                CheckClassification.TARGET_REGRESSED,
-                CheckClassification.PRESERVATION_REGRESSION,
-            }
-        },
-    )
-    public_packets = tuple(
-        packet
-        for item in public_comparisons
-        if item.check_id in check_by_id
-        for packet in (
-            counterexample_from_check_comparison(
-                state,
-                check_by_id[item.check_id],
-                item,
-                incremental,
-                transition_id=transition_id,
-                repair_cuts=cuts_by_check.get(item.check_id, ()),
-                active_binding_graph=trial_binding,
-            ),
-        )
-        if packet is not None
-    )
-    graph_stage_timings["binding_graph_seconds"] = time.perf_counter() - graph_stage_timings_started
-    graph_stage_timings_started = time.perf_counter()
-    trial_challenges = materialize_active_challenges(
-        trial_requirements, trial_program, trial_binding,
-        actual_diff=incremental, previous_outcomes=state.outcomes,
-        max_challenges=int(config.get("max_active_challenges", 40)),
-        deadline=time.monotonic() + float(config.get("challenge_deadline_seconds", 15.0)),
-    )
-    discriminator_challenges = _enqueue_pending_discriminators(
-        state, trial_challenges
-    )
-    graph_stage_timings["challenge_graph_seconds"] = time.perf_counter() - graph_stage_timings_started
-    state.transition_phase(ControllerPhase.CHALLENGE_EXECUTE, event="active_graph_stack_updated")
-    executor = TraceExecutor(temporary_root=Path(state.run_root) / "tmp")
-    execution = execute_challenges(
-        trial_challenges, executor, state.base_repository, trial_tree,
-        max_workers=int(config.get("max_parallel_challenge_executions", 2)),
-    )
-    targeted_expansion = False
-    if execution.real_execution_count == 0:
-        trial_challenges.add_frontier(Frontier(
-            frontier_id=stable_id(
-                "challenge-frontier", "NO_EXECUTABLE_CHALLENGE",
-                incremental.canonical_diff_hash,
-            ),
-            kind="NO_EXECUTABLE_CHALLENGE",
-            owner_id=trial_binding.assignment_id,
-            reason="no active challenge had both an executable recipe and trusted oracle",
-            resolution_action="request a targeted slice or executable public oracle",
-            hard=False,
-            evidence_ids=(),
-        ))
-    # A pure-UNKNOWN first pass gets one bounded information-gain expansion
-    # while the trial worktree is still alive.  Only after this second pass is
-    # the revision committed or rolled back.
-    probe_state = copy.copy(state)
-    probe_state.requirement_graph = trial_requirements
-    probe_state.active_binding_graph = trial_binding
-    first_outcomes = outcomes_from_challenges(
-        probe_state, trial_challenges, execution
-    )
-    pure_unknown = (
-        not first_outcomes
-        or all(
-            item.status not in {OutcomeStatus.PASS, OutcomeStatus.FAIL}
-            for item in first_outcomes.values()
-        )
-    )
-    if pure_unknown:
-        expanded_challenges = materialize_active_challenges(
-            trial_requirements, trial_program, trial_binding,
-            actual_diff=incremental, previous_outcomes=state.outcomes,
-            max_challenges=min(
-                int(config.get("max_active_challenges", 40)) * 2,
-                int(config.get("max_active_challenges", 40)) + 40,
-            ),
-            deadline=time.monotonic() + float(
-                config.get("challenge_deadline_seconds", 15.0)
-            ),
-        )
-        expanded_discriminators = _enqueue_pending_discriminators(
-            state, expanded_challenges
-        )
-        if set(expanded_challenges.cells) - set(trial_challenges.cells):
-            trial_challenges = expanded_challenges
-            discriminator_challenges = expanded_discriminators
-            execution = execute_challenges(
-                trial_challenges, executor, state.base_repository, trial_tree,
-                max_workers=int(
-                    config.get("max_parallel_challenge_executions", 2)
-                ),
-            )
-            targeted_expansion = True
-    executed_discriminator_ids = _executed_discriminator_probe_ids(
-        trial_challenges, execution.executed_challenge_ids
-    )
-    if execution.real_execution_count > 0 and execution.trace_delta.get("nonempty"):
-        merge_trace_bundles(trial_program, execution, role="PATCH")
-        trial_binding = update_active_binding_graph(
-            trial_binding,
-            incremental,
-            ObservationBundle.create(
-                revision=state.transition_index + 1,
-                check_comparisons=public_comparisons,
-            ),
-            public_packets,
-            program_slice=trial_program,
-            target_recovery=state.target_recovery,
-            public_tests=all_checks,
-        )
-        trial_challenges.program_graph_hash = trial_program.program_hash()
-        trial_challenges.binding_graph_hash = trial_binding.graph_hash()
-        for challenge_id, cell in tuple(trial_challenges.cells.items()):
-            trial_challenges.cells[challenge_id] = replace(
-                cell,
-                graph_hashes={
-                    **cell.graph_hashes,
-                    "program": trial_challenges.program_graph_hash,
-                    "binding": trial_challenges.binding_graph_hash,
-                },
-            )
-    trial_state = copy.copy(state)
-    trial_state.requirement_graph = trial_requirements
-    trial_state.program_graph = trial_program
-    trial_state.active_binding_graph = trial_binding
-    trial_state.challenge_graph = trial_challenges
-    trial_state.outcomes = outcomes_from_challenges(
-        trial_state, trial_challenges, execution
-    )
-    trial_state.observations = ObservationBundle.create(
-        revision=state.transition_index + 1,
-        check_comparisons=public_comparisons,
-        challenge_results=trial_state.outcomes.values(),
-        mechanical_checks=checks,
-        environment_frontier_ids=(
-            item.frontier_id for item in state.environment_frontiers
-        ),
-    )
-    trial_binding = update_active_binding_graph(
-        trial_binding,
-        incremental,
-        trial_state.observations,
-        (*public_packets,),
-    )
-    trial_state.active_binding_graph = trial_binding
-    certifications = certify_recovered_targets(
-        state.target_recovery, trial_binding,
-    )
-    trial_state.target_recovery = replace(
-        state.target_recovery, certifications=certifications,
-    )
-    trial_state.runtime_metrics["target_certifications"] = [
-        item.to_dict() for item in certifications
-    ]
-    trial_state.runtime_metrics["certified_target_count"] = sum(
-        item.certified for item in certifications
-    )
-    trial_state.requirement_coverage = update_requirement_coverage(
-        state.requirement_coverage,
-        trial_binding,
-        trial_state.observations,
-        (*state.counterexamples, *public_packets),
-        attempted_mechanisms=(revision.mechanism,),
-    )
-    trial_challenges.binding_graph_hash = trial_binding.graph_hash()
-    trial_state.trace_bundles = {
-        **state.trace_bundles,
-        **{item.paired_bundle_id: item for item in execution},
-    }
-    coverage_keys = tuple(sorted({
-        relation.kind for relation in incremental.changed_relations
-        if any(
-            node.attributes.get("file") == relation.file
-            for node in trial_program.nodes.values()
-        )
-    } | set(execution.executed_challenge_ids)))
-    high_pending = tuple(sorted(
-        challenge_id for challenge_id, cell in trial_challenges.cells.items()
-        if cell.hard and cell.terminal_status not in {
-            ChallengeTerminalStatus.PASS, ChallengeTerminalStatus.INFEASIBLE_PROVED,
-        }
-    ))
-    command_key = lambda comparison: "\0".join(
-        check_by_id[comparison.check_id].command
-    )
-    previous_target_commands = set(
-        map(str, state.runtime_metrics.get("public_target_fixed_commands", ()))
-    )
-    current_by_command = {
-        command_key(item): item for item in public_comparisons
-    }
-    public_target_commands = {
-        command_key(item) for item in public_comparisons
-        if item.classification == "TARGET_FIXED"
-    } | {
-        key for key in previous_target_commands
-        if key in current_by_command
-        and current_by_command[key].classification == "PASS_PRESERVED"
-    }
-    active_target_unit_ids = {
-        unit.unit_id for unit in trial_binding.units.values()
-        if unit.target_check_ids
-    }
-    public_target_evidence_units = set(
-        map(str, state.runtime_metrics.get("public_target_evidence_unit_ids", ()))
-    )
-    if public_target_commands:
-        public_target_evidence_units.update(active_target_unit_ids)
-    trial_state.runtime_metrics = {
-        **state.runtime_metrics,
-        "graph_build_records": [
-            *[
-                dict(item) for item in state.runtime_metrics.get("graph_build_records", ())
-                if isinstance(item, dict)
-            ],
-            {
-                "kind": "incremental_transition",
-                "transition_id": transition_id,
-                **graph_stage_timings,
-                "total_seconds": sum(graph_stage_timings.values()),
-                "program_nodes": len(trial_program.nodes),
-                "program_edges": len(trial_program.edges),
-                "precise_files": len(trial_program.file_index),
-                "rebuilt_precise_files": len(graph_delta_result.rebuilt_files),
-                "precise_functions": len(trial_program.cfgs),
-                "requirement_leaves": len(trial_requirements.leaves),
-                "requirement_path_obligations": len(trial_requirements.path_obligations),
-                "binding_units": len(trial_binding.units),
-                "active_binding_units": trial_binding.build_stats.get("active_count", 0),
-                "deferred_binding_units": trial_binding.build_stats.get("deferred_count", 0),
-                "challenge_cells": len(trial_challenges.cells),
-                "peak_rss_mib": max(
-                    float(state.runtime_metrics.get("peak_rss_mib", 0.0)),
-                    graph_delta_result.build.peak_rss_mib,
-                ),
-                "truncated": bool(
-                    graph_delta_result.build.truncated_reason
-                    or any(
-                        frontier.kind == "ANALYSIS_TRUNCATED"
-                        for graph in (trial_requirements, trial_program, trial_binding, trial_challenges)
-                        for frontier in getattr(graph, "frontiers", {}).values()
-                    )
-                ),
-            },
-        ],
-        "last_graph_build_timings": dict(graph_stage_timings),
-        "graph_build_total_seconds": float(
-            state.runtime_metrics.get("graph_build_total_seconds", 0.0)
-        ) + sum(graph_stage_timings.values()),
-        "active_program_slice_seconds": graph_delta_result.build.elapsed_seconds,
-        "program_nodes": len(trial_program.nodes),
-        "program_edges": len(trial_program.edges),
-        "precise_files": len(trial_program.file_index),
-        "rebuilt_precise_files": len(graph_delta_result.rebuilt_files),
-        "precise_functions": len(trial_program.cfgs),
-        "peak_rss_mib": max(
-            float(state.runtime_metrics.get("peak_rss_mib", 0.0)),
-            graph_delta_result.build.peak_rss_mib,
-        ),
-        "requirement_leaves": len(trial_requirements.leaves),
-        "requirement_partitions": len(trial_requirements.partitions),
-        "candidate_binding_count": trial_binding.build_stats.get("candidate_count", 0),
-        "active_binding_count": trial_binding.build_stats.get("active_count", 0),
-        "deferred_binding_count": trial_binding.build_stats.get("deferred_count", 0),
-        "active_challenge_count": len(trial_challenges.cells),
-        "diff_adequacy_keys": coverage_keys,
-        "diff_adequacy_closed": bool(coverage_keys) and not high_pending,
-        "high_value_pending_challenge_ids": high_pending,
-        "high_risk_unknowns": len(high_pending),
-        "real_execution_challenge_count": execution.real_execution_count,
-        "targeted_challenge_expansion": targeted_expansion,
-        "discriminator_probe_challenges": {
-            probe_id: list(challenge_ids)
-            for probe_id, challenge_ids in sorted(
-                discriminator_challenges.items()
-            )
-        },
-        "executed_discriminator_probe_ids": sorted(
-            set(map(str, state.runtime_metrics.get(
-                "executed_discriminator_probe_ids", ()
-            ))) | executed_discriminator_ids
-        ),
-        "last_public_check_comparisons": [
-            item.to_dict() for item in public_comparisons
-        ],
-        "public_check_execution_count": int(
-            state.runtime_metrics.get("public_check_execution_count", 0)
-        ) + len(public_comparisons) * 2,
-        "public_target_fixed_commands": sorted(public_target_commands),
-        "public_target_evidence_unit_ids": sorted(public_target_evidence_units),
-        "public_stable_fail_commands": sorted(
-            command_key(item) for item in public_comparisons
-            if item.classification == CheckClassification.TARGET_STILL_FAILING
-        ),
-        "public_preservation_pass_commands": sorted(
-            command_key(item) for item in public_comparisons
-            if item.classification == CheckClassification.PASS_PRESERVED
-        ),
-        "public_unknown_commands": sorted(
-            command_key(item) for item in public_comparisons
-            if item.classification in {
-                CheckClassification.SAME_INFRA_FAILURE,
-                CheckClassification.NEW_INFRA_FAILURE,
-                CheckClassification.FLAKY_RESULT,
-                CheckClassification.UNSUPPORTED_CHECK,
-            }
-        ),
-    }
-    challenge_packets = packets_for_nonpass_challenges(
-        trial_state, trial_challenges, incremental,
-        transition_id=transition_id, executor=executor,
-        base_repository=state.base_repository, patch_repository=trial_tree,
-    )
-    packets = tuple(challenge_packets) + public_packets
-    trial_state.counterexamples = state.counterexamples + list(packets)
-    graph_metrics = progress_metrics(state, trial_state)
-    established_regression = any(
-        old.status == OutcomeStatus.PASS
-        and any(
-            new.unit_id == old.unit_id and new.status == OutcomeStatus.FAIL and new.stable
-            for new in trial_state.outcomes.values()
-        )
-        for old in state.outcomes.values()
-    )
-    if established_regression:
-        avoid_reasons.add("ESTABLISHED_SUCCESS_LOST")
-    if graph_metrics.new_preservation_failures:
-        avoid_reasons.add("PRESERVATION_FAILURE")
-    if any(item.kind == "external_effect_added" for item in incremental.changed_relations):
-        avoid_reasons.add("NEW_HIGH_RISK_SIDE_EFFECT")
-    impact_slice = build_diff_impact_slice(
-        cumulative,
-        trial_repository_index,
-        trial_program,
-        GraphBudget.from_limits(
-            seconds=float(config.get("program_slice_deadline_seconds", 90.0)),
-            max_nodes=int(config.get("max_program_nodes", 8_000)),
-            max_edges=int(config.get("max_program_edges", 24_000)),
-            max_files=int(config.get("max_precise_files", 8)),
-            max_functions=int(config.get("max_precise_functions", 40)),
-            max_rss_mib=int(config.get("graph_memory_limit_mib", 2048)),
-            max_protocol_candidates_per_operation=int(
-                config.get("max_protocol_candidates_per_operation", 8)
-            ),
-        ),
-    )
-    executable_challenges = compile_executable_challenge_evidence(
-        trial_binding, public_comparisons, cumulative, impact_slice,
-        trace_results=(execution,),
-        checks=all_checks,
-        repository_index=trial_repository_index,
-    )
-    executable_obligation_count = len(trial_state.requirement_coverage.rows)
-    active_executable_binding_count = trial_binding.executable_unit_count
-    dicc = evaluate_dicc(
-        state.target_recovery.targets,
-        public_comparisons,
-        cumulative,
-        impact_slice,
-        executable_challenges,
-        path_obligation_count=executable_obligation_count,
-        active_binding_count=active_executable_binding_count,
-    )
-    trial_state.runtime_metrics.update({
-        "normative_requirement_path_obligations": len(
-            trial_requirements.path_obligations
-        ),
-        "executable_requirement_obligations": executable_obligation_count,
-        "requirement_path_obligations": (
-            len(trial_requirements.path_obligations)
-            + executable_obligation_count
-        ),
-        "normative_active_binding_count": trial_binding.build_stats.get(
-            "active_count", 0
-        ),
-        "active_binding_count": active_executable_binding_count,
-        "normative_challenge_cell_count": len(trial_challenges.cells),
-        "active_challenge_count": len(executable_challenges.challenge_ids),
-        "real_execution_challenge_count": (
-            executable_challenges.real_execution_count
-        ),
-        "executed_challenge_ids": list(executable_challenges.challenge_ids),
-        "dicc_status": dicc.status.value,
-    })
-    execution_progress = progress_vector_from_comparisons(
-        state.check_comparisons, public_comparisons,
-    )
-    if locked_comparison is not None:
-        execution_progress = progress_vector_from_trial_comparison(
-            locked_comparison,
-        )
-    infrastructure_blocked = any(
-        item.classification in {
-            CheckClassification.SAME_INFRA_FAILURE,
-            CheckClassification.NEW_INFRA_FAILURE,
-            CheckClassification.FLAKY_RESULT,
-            CheckClassification.UNSUPPORTED_CHECK,
-        }
-        for item in public_comparisons
-    )
-    execution_safe = (
-        not avoid_reasons
-        and not any(
-            item.classification in {
-                CheckClassification.TARGET_REGRESSED,
-                CheckClassification.PRESERVATION_REGRESSION,
-            }
-            or (
-                item.classification == CheckClassification.NEW_INFRA_FAILURE
-                and check_by_id[item.check_id].role == CheckRole.PRESERVATION
-            )
-            for item in public_comparisons
-        )
-    )
-    transition_evidence = RevisionEvidence(
-        progress=execution_progress,
-        safe=execution_safe,
-        real_execution_count=trial_state.observations.real_execution_count,
-        environment_blocked=infrastructure_blocked,
-    )
-    # A mechanically healthy revision remains the single working patch even
-    # when evidence is limited or the target still fails. The verified safe
-    # patch remains available as rollback insurance. Severe regressions that
-    # did not fix a target were already rejected above.
-    transition_decision = Decision.COMMIT
-    accepted = transition_decision == Decision.COMMIT
-    result_checkpoint_id = None
-    if accepted:
-        result_checkpoint_id = stable_id(
-            "checkpoint", state.episode_id, cumulative.canonical_diff_hash,
-            state.transition_index + 1,
-        )
-        receipt = manager.commit(trial, result_checkpoint_id)
-        snapshot = manager.checkpoint_tree(result_checkpoint_id)
-        checkpoint = _build_checkpoint(
-            state, result_checkpoint_id, str(snapshot), cumulative,
-            trial_state.outcomes, transition_id, state.generator_session.cursor,
-            safe=execution_safe,
-            executed_target_deficit=sum(
-                item.classification != CheckClassification.TARGET_FIXED
-                for item in public_comparisons
-                if item.check_id in {
-                    target.check_id for target in state.target_recovery.targets
-                }
-            ),
-            patch_status=(
-                "TARGET_FIXED_REGRESSION_OPEN"
-                if target_fixed_with_regression
-                else "REACHED" if dicc.status.value == "CLOSED"
-                else "EVIDENCE_LIMITED_COMPLETE"
-                if not state.target_recovery.targets
-                else "WORKING_IMPROVED"
-                if execution_progress.meaningful
-                else "WORKING_UNCERTIFIED"
-            ),
-        )
-        state.requirement_graph = trial_requirements
-        state.program_graph = trial_program
-        state.active_binding_graph = trial_binding
-        state.challenge_graph = trial_challenges
-        state.outcomes = trial_state.outcomes
-        state.trace_bundles = trial_state.trace_bundles
-        state.runtime_metrics = trial_state.runtime_metrics
-        state.repository_index = trial_repository_index
-        state.impact_slice = impact_slice
-        state.check_comparisons = public_comparisons
-        state.observations = trial_state.observations
-        state.requirement_coverage = trial_state.requirement_coverage
-        state.target_recovery = trial_state.target_recovery
-        state.dicc_certificate = dicc
-        state.checkpoint = replace(
-            checkpoint, graph_hashes=state.graph_hashes(),
-            graph_reached=False, safe=execution_safe,
-        )
-        state.checkpoint_history[state.checkpoint.checkpoint_id] = state.checkpoint
-        if state.patch_trajectory is not None:
-            trial_checkpoint = checkpoint_from_state(
-                state,
-                evidence_vector=(
-                    evidence_vector_from_comparison(locked_comparison)
-                    if locked_comparison is not None else None
-                ),
-                executed_check_ids=(
-                    locked_comparison.executed_check_ids
-                    if locked_comparison is not None
-                    else tuple(item.check_id for item in public_comparisons)
-                ),
-                status=state.checkpoint.patch.status,
-            )
-            selected_failure = next((
-                item for item in state.confirmed_failures
-                if item.failure_id == state.runtime_metrics.get(
-                    "selected_confirmed_failure_id"
-                )
-            ), None)
-            if selected_failure is not None and locked_comparison is not None:
-                record_transition(
-                    state,
-                    failure=selected_failure,
-                    comparison=locked_comparison,
-                    trial=trial_checkpoint,
-                    action_id=revision.revision_id,
-                    mechanism_id=revision.mechanism,
-                    decision=transition_label,
-                    reason=transition_reason,
-                )
-            elif initial_patch_submission:
-                # Establish the immutable first checkpoint immediately after
-                # the initial diff is committed.  The controller may still
-                # call initialize_patch_trajectory() defensively, but it must
-                # never have to reconstruct the first patch after a rollback.
-                initialize_patch_trajectory(state)
-        if (
-            (
-                initial_patch_submission
-                or (
-                    state.patch_trajectory is not None
-                    and state.patch_trajectory.best_evidence_patch.checkpoint_id
-                    == state.checkpoint.checkpoint_id
-                )
-            )
-            and execution_safe
-            and state.checkpoint.patch.canonical_diff
+        source_check_id = cell.input_recipe.source_check_id
+        if source_check_id and not source_check_id.startswith(
+            "retargeted-executable-evidence-"
         ):
-            state.verified_safe_patch = state.checkpoint.patch
-        state.current_patch_hash = cumulative.canonical_diff_hash
-        state.reach_status = (
-            "TARGET_FIXED_REGRESSION_OPEN"
-            if target_fixed_with_regression
-            else "EVIDENCE_LIMITED_COMPLETE"
-            if not state.target_recovery.targets
-            else "REACHED" if dicc.status.value == "CLOSED"
-            else "NOT_REACHED"
+            check_ids = (source_check_id,)
+        elif bound_ids and any(
+            not check_id.startswith("retargeted-executable-evidence-")
+            for check_id in bound_ids
+        ):
+            check_ids = tuple(
+                check_id for check_id in bound_ids
+                if not check_id.startswith("retargeted-executable-evidence-")
+            )
+        else:
+            check_ids = (stable_id(
+                "retargeted-executable-evidence",
+                cell.requirement_id,
+                role,
+                cell.execution_scenario.command,
+                cell.execution_scenario.cwd,
+                cell.execution_scenario.environment,
+                cell.input_recipe.concrete_input,
+                cell.oracle.authority,
+                cell.oracle.relation,
+                cell.oracle.expected,
+                cell.oracle.source_evidence_ids,
+            ),)
+        for check_id in check_ids:
+            checks[check_id] = ExecutableCheck(
+                check_id=check_id,
+                command=cell.execution_scenario.command,
+                role=role,
+                authority=cell.authority,
+                requirement_ids=(cell.requirement_id,),
+                symbol_references=tuple(
+                    state.graph_stack.program_graph.nodes[item].symbol.split(".")[-1]
+                    for item in binding.program_symbol_ids
+                    if item in state.graph_stack.program_graph.nodes
+                ),
+                cwd=cell.execution_scenario.cwd,
+                environment=cell.execution_scenario.environment,
+                timeout_seconds=cell.execution_scenario.timeout_seconds,
+                expected=cell.observation_contract.__class__(
+                    relation=cell.oracle.relation,
+                    expected=cell.oracle.expected,
+                    observable=cell.observation_contract.observable,
+                    comparator=cell.observation_contract.comparator,
+                ),
+                concrete_input=cell.input_recipe.concrete_input,
+                source_evidence_ids=cell.oracle.source_evidence_ids,
+            )
+    return PublicEvidence(checks=tuple(checks.values()))
+
+
+def _pass_sets(stack):
+    cells = tuple(
+        cell for cell in stack.challenge_graph.active_cells()
+        if cell.oracle.trusted and cell.oracle.executable
+    )
+    grouped: dict[str, dict[str, list]] = {}
+    for cell in cells:
+        grouped.setdefault(cell.requirement_id, {}).setdefault(
+            challenge_obligation_key(cell), [],
+        ).append(cell)
+
+    def closed(requirement_id: str) -> bool:
+        obligations = grouped[requirement_id]
+        return bool(obligations) and all(
+            any(
+                cell.terminal_status is ChallengeStatus.UNREACHABLE
+                or (
+                    cell.terminal_status is ChallengeStatus.PASS
+                    and cell.stability_runs >= 2
+                )
+                for cell in equivalent_cells
+            )
+            for equivalent_cells in obligations.values()
         )
-        state.working_trial = None
-        if state.generator_conversation is not None:
-            state.generator_conversation.accepted_patch_hashes.append(
-                cumulative.canonical_diff_hash
-            )
-            state.generator_conversation.current_working_diff = (
-                cumulative.canonical_diff
-            )
-            state.generator_conversation.passed_preservation_checks.update(
-                item.check_id for item in public_comparisons
-                if item.classification == CheckClassification.PASS_PRESERVED
-            )
-            state.generator_conversation.eliminated_counterexamples.update(
-                item.counterexample_id for item in state.counterexamples
-                if item.failure_signature
-                and item.failure_signature not in {
-                    comparison.patched.failure_signature
-                    for comparison in public_comparisons
-                }
-            )
-    elif transition_decision == Decision.KEEP_UNCERTIFIED:
-        receipt = manager.keep_uncertified(trial)
-        state.working_trial = {
-            "trial_id": trial.trial_id,
-            "source_checkpoint_id": trial.source_checkpoint_id,
-            "snapshot_tree": receipt.snapshot_tree,
-            "tree_hash": receipt.after_tree_hash,
-            "canonical_diff": cumulative.canonical_diff,
-            "canonical_diff_hash": cumulative.canonical_diff_hash,
-            "comparison_ids": [item.comparison_id for item in public_comparisons],
-            "status": "WORKING_UNCERTIFIED",
-        }
-        state.termination_status = "ENVIRONMENT_BLOCKED"
-    else:
-        receipt = manager.rollback(trial)
-        if state.generator_conversation is not None:
-            state.generator_conversation.rejected_patch_hashes.append(
-                incremental.canonical_diff_hash
-            )
-            state.generator_conversation.rolled_back_diffs.append(
-                incremental.canonical_diff
-            )
-            state.generator_conversation.unresolved_counterexamples.update(
-                item.counterexample_id for item in packets
-            )
-            state.generator_conversation.mechanism_failure_signatures.setdefault(
-                revision.mechanism, []
-            ).extend(
-                item.failure_signature for item in packets
-                if item.failure_signature
-            )
-    # Reach and the next repair selection must observe the just-executed
-    # counterexamples, not the preceding checkpoint's packet list.
-    state.counterexamples.extend(packets)
-    if not initial_patch_submission:
-        refresh_confirmed_failures(state)
-    graph_delta = {
-        "old_target_deficit": previous_target_deficit,
-        "actual_diff": incremental.to_dict(),
-        "program": {
-            "added_nodes": list(graph_delta_result.added_node_ids),
-            "removed_nodes": list(graph_delta_result.removed_node_ids),
-            "modified_nodes": list(graph_delta_result.modified_node_ids),
-            "added_edges": list(graph_delta_result.added_edge_ids),
-            "removed_edges": list(graph_delta_result.removed_edge_ids),
-            "rebuilt_files": list(graph_delta_result.rebuilt_files),
-            "updated_index_files": list(incremental.changed_files),
-        },
-        "graph_timings_seconds": dict(graph_stage_timings),
-        "graph_build_total_seconds": sum(graph_stage_timings.values()),
-        "requirement": asdict(requirement_delta),
-        "binding_stats": trial_binding.build_stats,
-        "active_challenge_ids": list(trial_challenges.cells),
-        "executed_challenge_ids": list(execution.executed_challenge_ids),
-        "real_execution_count": execution.real_execution_count,
-        "public_check_comparisons": [
-            item.to_dict() for item in public_comparisons
-        ],
-        "public_check_classification_counts": {
-            classification: sum(
-                item.classification == classification
-                for item in public_comparisons
-            )
-            for classification in sorted({
-                item.classification for item in public_comparisons
-            })
-        },
-        "diff_adequacy_closed": bool(trial_state.runtime_metrics["diff_adequacy_closed"]),
-        "hard_frontier_ids": list(high_pending),
-        "cumulative_diff_hash": cumulative.canonical_diff_hash if accepted else state.checkpoint.patch.canonical_diff_hash,
-        "progress_metrics": asdict(execution_progress),
-        "graph_progress_metrics": asdict(graph_metrics),
-        "dicc": dicc.to_dict(),
-        "impact_slice": impact_slice.to_dict(),
-        "avoid_reasons": sorted(avoid_reasons),
-        "trajectory_decision": transition_label,
-        "trajectory_reason": transition_reason,
-        "locked_trial_comparison": (
-            locked_comparison.to_dict() if locked_comparison is not None else None
-        ),
+
+    target = tuple(sorted(
+        requirement_id for requirement_id, obligations in grouped.items()
+        if obligations and next(iter(obligations.values()))[0].kind != "PRESERVATION"
+        and closed(requirement_id)
+    ))
+    hard = tuple(sorted(
+        requirement_id for requirement_id, obligations in grouped.items()
+        if obligations and any(
+            cell.hard
+            for equivalent_cells in obligations.values()
+            for cell in equivalent_cells
+        )
+        and closed(requirement_id)
+    ))
+    return target, hard
+
+
+def compute_transition_evidence(
+    state: ReachAvoidState,
+    trial_stack,
+    challenge_result,
+    mechanical,
+) -> TransitionEvidence:
+    before_target, before_hard = _pass_sets(state.graph_stack)
+    after_target, after_hard = _pass_sets(trial_stack)
+    classifications = {
+        item.challenge_id: item.classification for item in challenge_result.executions
     }
-    reach = accepted and in_target_set(state)
-    try:
-        certificate = build_transition_certificate(
-            before_state,
-            revision,
-            cumulative,
-            trial_state.observations,
-            trial_state.active_binding_graph,
-            trial_state.requirement_coverage,
-            state,
+    preservation_regressions = tuple(sorted(
+        challenge_id for challenge_id, classification in classifications.items()
+        if classification is PairClassification.PRESERVATION_REGRESSION
+    ))
+    target_regressions = tuple(sorted(
+        challenge_id for challenge_id, classification in classifications.items()
+        if classification is PairClassification.TARGET_REGRESSED
+    ))
+    locked_lost = tuple(sorted(
+        check_id for check_id in state.locked_checks.target_ids
+        if any(
+            execution.check_id == check_id
+            and execution.classification is PairClassification.TARGET_REGRESSED
+            for execution in challenge_result.executions
         )
-        certificate = replace(
-            certificate,
-            transition_id=transition_id,
-            update_id=incremental.diff_id,
-            result_checkpoint_id=result_checkpoint_id,
-            decision=transition_decision,
-            restoration_or_commit_receipt=receipt.receipt_id,
-            safe=execution_safe,
-            reach=reach,
-            avoid=bool(avoid_reasons),
-            progress=execution_progress.meaningful,
-            strict_target_progress=execution_progress.meaningful,
-            graph_delta=graph_delta,
+    ))
+    def matching_pass(requirement_id, binding_id, challenge_id):
+        old_cell = state.graph_stack.challenge_graph.cells.get(challenge_id)
+        old_binding = state.graph_stack.binding_graph.units.get(binding_id)
+        return any(
+            cell.requirement_id == requirement_id
+            and cell.terminal_status is ChallengeStatus.PASS
+            and cell.stability_runs >= 2
+            and (
+                old_cell is None
+                or challenge_obligation_key(cell)
+                == challenge_obligation_key(old_cell)
+            )
+            and (
+                old_binding is None
+                or (
+                    (current_binding := trial_stack.binding_graph.units.get(cell.binding_id))
+                    is not None
+                    and current_binding.status.execution_confirmed
+                )
+            )
+            for cell in trial_stack.challenge_graph.active_cells()
         )
-        certificate = finalize_certificate(certificate)
-    except (TypeError, ValueError, AttributeError):
-        certificate = _revision_certificate(
-            state, revision, transition_id, incremental, checks,
-            decision=transition_decision,
-            receipt_id=receipt.receipt_id, result_checkpoint_id=result_checkpoint_id,
-            graph_delta=graph_delta, outcomes=trial_state.outcomes,
-            packets=packets, safe=execution_safe,
-            progress=execution_progress.meaningful, reach=reach,
-            avoid_reasons=tuple(sorted(avoid_reasons)),
+
+    closed = tuple(
+        failure.failure_id for failure in state.confirmed_failures
+        if failure.open and failure.patch_hash == state.graph_stack.patch_hash
+        and matching_pass(
+            failure.requirement_id, failure.binding_id, failure.challenge_id,
         )
-    state.repair_history.append(certificate)
-    state.transition_index += 1
-    state.transition_phase(
-        ControllerPhase.TRANSITION_GATE,
-        event=(
-            "revision_committed" if accepted
-            else "revision_kept_uncertified"
-            if transition_decision == Decision.KEEP_UNCERTIFIED
-            else "revision_rolled_back"
+    )
+    opened = tuple(item.counterexample_id for item in challenge_result.counterexamples)
+    old_counterexamples = {
+        item.counterexample_id: item for item in state.counterexamples
+        if item.patch_hash == state.graph_stack.patch_hash
+    }
+    closed_counterexamples = tuple(
+        counterexample_id for counterexample_id, packet in old_counterexamples.items()
+        if matching_pass(packet.requirement_id, packet.binding_id, packet.challenge_id)
+    )
+    causal_reasons: list[str] = []
+    for old in state.confirmed_failures:
+        old_binding = state.graph_stack.binding_graph.units.get(old.binding_id)
+        downstream = [
+            new for new in challenge_result.confirmed_failures
+            if new.requirement_id == old.requirement_id
+            and new.failure_signature != old.failure_signature
+            and (
+                new.binding_id != old.binding_id
+                or (
+                    old_binding is not None
+                    and trial_stack.binding_graph.units.get(new.binding_id) is not None
+                    and trial_stack.binding_graph.units[new.binding_id].path_class_id
+                    != old_binding.path_class_id
+                )
+            )
+        ]
+        if downstream:
+            causal_reasons.append(
+                f"old failure signature disappeared and the same Requirement now fails downstream: {old.failure_id}"
+            )
+        old_cell = state.graph_stack.challenge_graph.cells.get(old.challenge_id)
+        if old_cell is not None:
+            matching_partition = [
+                cell for cell in trial_stack.challenge_graph.active_cells()
+                if cell.requirement_id == old.requirement_id
+                and challenge_obligation_key(cell)
+                == challenge_obligation_key(old_cell)
+            ]
+            if matching_partition and all(
+                cell.terminal_status is ChallengeStatus.PASS
+                and cell.stability_runs >= 2
+                for cell in matching_partition
+            ):
+                causal_reasons.append(f"original failing branch now passes: {old.challenge_id}")
+        old_packet = next((
+            packet for packet in state.counterexamples
+            if packet.counterexample_id == old.counterexample_id
+        ), None)
+        for new in downstream:
+            new_packet = next((
+                packet for packet in challenge_result.counterexamples
+                if packet.counterexample_id == new.counterexample_id
+            ), None)
+            old_line = (
+                old_packet.first_divergence.get("line")
+                if old_packet and isinstance(old_packet.first_divergence, dict) else None
+            )
+            new_line = (
+                new_packet.first_divergence.get("line")
+                if new_packet and isinstance(new_packet.first_divergence, dict) else None
+            )
+            if (
+                isinstance(old_line, int) and isinstance(new_line, int)
+                and new_line > old_line
+                and old_packet is not None
+                and old_packet.causal_cut_ids
+                and new_packet is not None
+                and new_packet.causal_cut_ids
+            ):
+                causal_reasons.append(
+                    f"first divergence moved after the prior causal cut: {old.failure_id}"
+                )
+    before_bindings = state.graph_stack.binding_graph.units
+    after_bindings = trial_stack.binding_graph.units
+    for binding_id, before in before_bindings.items():
+        after = after_bindings.get(binding_id)
+        if after is not None and before.status.value.endswith("FAILING") and after.status.value.endswith("PASSING"):
+            causal_reasons.append(f"original BindingUnit passes: {binding_id}")
+    for old in state.confirmed_failures:
+        old_binding = before_bindings.get(old.binding_id)
+        if old_binding is None:
+            continue
+        related = [
+            unit for unit in after_bindings.values()
+            if unit.requirement_id == old.requirement_id
+            and unit.path_class_id == old_binding.path_class_id
+        ]
+        if any(unit.status.value.endswith("PASSING") for unit in related) and any(
+            unit.status.value.endswith("FAILING") for unit in related
+        ):
+            causal_reasons.append(
+                f"original BindingUnit passes and a downstream BindingUnit fails: {old.binding_id}"
+            )
+    return TransitionEvidence(
+        mechanical=mechanical,
+        target_pass_ids_before=before_target,
+        target_pass_ids_after=after_target,
+        hard_pass_ids_before=before_hard,
+        hard_pass_ids_after=after_hard,
+        confirmed_failures_closed=closed,
+        counterexamples_closed=closed_counterexamples,
+        counterexamples_opened=opened,
+        locked_targets_lost=locked_lost,
+        target_regressions=target_regressions,
+        preservation_regressions=preservation_regressions,
+        new_executable_frontier=bool(challenge_result.frontiers),
+        environment_unknown=any(
+            execution.classification is PairClassification.UNKNOWN
+            for execution in challenge_result.executions
         ),
+        causal_progress_reasons=tuple(causal_reasons),
+        target_failures_closed=tuple(sorted(
+            failure_id for failure_id in closed
+            if any(
+                item.failure_id == failure_id
+                and not _requirement_is_preservation(state, item.requirement_id)
+                for item in state.confirmed_failures
+            )
+        )),
+        target_counterexamples_closed=tuple(sorted(
+            counterexample_id for counterexample_id in closed_counterexamples
+            if any(
+                item.counterexample_id == counterexample_id
+                and not _requirement_is_preservation(state, item.requirement_id)
+                for item in state.counterexamples
+            )
+        )),
     )
-    state.refresh_id()
-    return TransitionResult(
-        transition_id=transition_id, accepted=accepted,
-        decision=transition_decision,
-        certificate=certificate, counterexamples=packets,
-        checkpoint=state.checkpoint, action=revision,
-        reason=("SAFE_PROGRESS" if accepted else ",".join(sorted(avoid_reasons)) or "NO_CONFIRMED_PROGRESS"),
+
+
+def decide_reach_avoid_transition(
+    before_state: ReachAvoidState,
+    trial_graph_stack,
+    evidence: TransitionEvidence,
+) -> TransitionDecision:
+    target_progress = bool(
+        set(evidence.target_pass_ids_after) - set(evidence.target_pass_ids_before)
     )
+    closed_failures = set(evidence.confirmed_failures_closed)
+    target_failure_closed = bool(evidence.target_failures_closed) or bool(before_state and any(
+        failure.failure_id in closed_failures
+        and not _requirement_is_preservation(before_state, failure.requirement_id)
+        for failure in before_state.confirmed_failures
+    ))
+    if (
+        not evidence.target_failures_closed
+        and closed_failures
+        and before_state is not None
+        and not before_state.confirmed_failures
+    ):
+        # A synthetic transition may carry only the closure ids.  With no
+        # requirement record available it is safer to treat that explicit
+        # closure as target evidence than to let an unrelated HARD progress
+        # field certify the patch.
+        target_failure_closed = True
+    closed_counterexamples = set(evidence.counterexamples_closed)
+    target_counterexample_closed = bool(evidence.target_counterexamples_closed) or bool(before_state and any(
+        packet.counterexample_id in closed_counterexamples
+        and not _requirement_is_preservation(before_state, packet.requirement_id)
+        for packet in before_state.counterexamples
+    ))
+    # A missing PASS on the new patch can be an unexecuted frontier. Only a
+    # stable paired TARGET_REGRESSED execution is a target regression.
+    target_lost = bool(evidence.target_regressions)
+    # A preservation requirement can be HARD, but an ordinary preservation
+    # PASS is not target progress.  Closing a stable, confirmed failure is
+    # different: it is evidence that a previously observed defect is gone and
+    # therefore is strict progress even when the closed failure is a
+    # preservation failure.
+    confirmed_failure_closed = bool(evidence.confirmed_failures_closed)
+    counterexample_closed = bool(evidence.counterexamples_closed)
+    strict_progress = bool(
+        target_progress
+        or target_failure_closed
+        or target_counterexample_closed
+        or confirmed_failure_closed
+        or counterexample_closed
+    )
+    causal_progress = bool(evidence.causal_progress_reasons)
+    regression = bool(evidence.preservation_regressions)
+    hard_avoid_reasons = []
+    rollback_reasons = []
+    if not evidence.mechanical.passed:
+        hard_avoid_reasons.extend(evidence.mechanical.failure_reasons)
+    if evidence.locked_targets_lost:
+        hard_avoid_reasons.append("locked target lost")
+    if evidence.mechanical.unsafe_api_break or evidence.mechanical.high_risk_side_effect:
+        hard_avoid_reasons.append("unsafe API break or high-risk side effect")
+    if not target_progress and regression:
+        rollback_reasons.append("no target progress with new preservation regression")
+    if target_lost and not strict_progress and not causal_progress:
+        rollback_reasons.append("target behavior regressed without compensating progress")
+    if hard_avoid_reasons or rollback_reasons:
+        decision = Decision.ROLLBACK
+        next_kind = None
+    elif target_lost and (target_progress or strict_progress or causal_progress):
+        decision = Decision.KEEP_PROVISIONAL
+        next_kind = "TARGET_REGRESSION"
+    elif target_progress and regression:
+        decision = Decision.KEEP_PROVISIONAL
+        next_kind = "PRESERVATION_REGRESSION"
+    elif strict_progress and not regression:
+        decision = Decision.COMMIT_WORKING
+        next_kind = None
+    elif causal_progress and not regression:
+        decision = Decision.KEEP_PROVISIONAL
+        next_kind = "DOWNSTREAM_TARGET_FAILURE"
+    elif evidence.environment_unknown and evidence.new_executable_frontier:
+        decision = Decision.KEEP_PROVISIONAL
+        next_kind = "EXECUTABLE_FRONTIER"
+    else:
+        decision = Decision.ROLLBACK
+        next_kind = None
+    if hard_avoid_reasons or rollback_reasons:
+        reasons = tuple(hard_avoid_reasons + rollback_reasons)
+    elif decision is Decision.KEEP_PROVISIONAL and target_lost:
+        reasons = ("evidence-grounded progress with a repairable target regression",)
+    elif decision is Decision.KEEP_PROVISIONAL and regression:
+        reasons = ("target progress with executable preservation regression",)
+    elif decision is Decision.COMMIT_WORKING:
+        reasons = ("target failure closure or target pass without regression",)
+    elif causal_progress:
+        reasons = ("causal progress without regression",)
+    elif evidence.environment_unknown and evidence.new_executable_frontier:
+        reasons = ("environment remains unknown with a new executable frontier",)
+    else:
+        reasons = ("no evidence-grounded progress",)
+    return TransitionDecision(
+        decision=decision,
+        reasons=reasons,
+        strict_progress=strict_progress,
+        causal_progress=causal_progress,
+        hard_avoid=bool(hard_avoid_reasons),
+        repairable_regression=(
+            regression
+        ) or (
+            target_lost and (target_progress or strict_progress or causal_progress)
+        ),
+        promote_to_working=decision in {Decision.COMMIT_WORKING, Decision.KEEP_PROVISIONAL},
+        promote_to_best=decision is Decision.COMMIT_WORKING,
+        next_objective_kind=next_kind,
+    )
+
+
+def _requirement_is_preservation(
+    state: ReachAvoidState,
+    requirement_id: str,
+) -> bool:
+    leaf = state.graph_stack.requirement_graph.leaves.get(requirement_id)
+    return bool(leaf and leaf.preservation)
+
+
+def _virtual_state(
+    state: ReachAvoidState,
+    stack,
+    cumulative_diff,
+    mechanical,
+    challenge_result,
+):
+    evidence = CheckpointEvidence(
+        mechanical_pass=mechanical.passed,
+        no_known_preservation_regression=not any(
+            item.classification is PairClassification.PRESERVATION_REGRESSION
+            for item in challenge_result.executions
+        ),
+        confirmed_target_pass_count=len(_pass_sets(stack)[0]),
+        closed_confirmed_failure_count=0,
+        execution_confirmed_requirement_count=len({
+            unit.requirement_id for unit in stack.binding_graph.units.values()
+            if unit.status.execution_confirmed
+        }),
+        execution_confirmed_binding_count=sum(
+            unit.status.execution_confirmed for unit in stack.binding_graph.units.values()
+        ),
+        open_high_challenge_count=len(open_high_challenge_ids(
+            stack.challenge_graph.active_cells()
+        )),
+        open_counterexample_count=len(challenge_result.counterexamples),
+    )
+    checkpoint = replace(
+        state.working_checkpoint,
+        patch_hash=cumulative_diff.patch_hash,
+        canonical_diff=cumulative_diff.canonical_diff,
+        graph_hashes=stack.graph_hashes(),
+        evidence=evidence,
+    )
+    return replace(
+        state,
+        graph_stack=stack,
+        working_checkpoint=checkpoint,
+        counterexamples=state.counterexamples + list(challenge_result.counterexamples),
+        confirmed_failures=state.confirmed_failures + list(challenge_result.confirmed_failures),
+    )
+
+
+def _validate_repair_scope(state: ReachAvoidState, incremental, mechanical):
+    objective = state.current_repair_objective
+    if objective is None or not objective.editable_source_slices:
+        return mechanical
+    allowed: dict[str, list[tuple[int, int]]] = {}
+    for item in objective.editable_source_slices:
+        path = str(item.get("path", ""))
+        if not path:
+            continue
+        allowed.setdefault(path, []).append((
+            int(item.get("start_line", 1)), int(item.get("end_line", 10**9)),
+        ))
+    causal_nodes: set[str] = set()
+    for cut in objective.causal_cuts:
+        causal_nodes.update(
+            str(node_id) for key in (
+                "observation_node_id", "earliest_editable_node_id",
+            )
+            for node_id in (cut.get(key),) if node_id
+        )
+        causal_nodes.update(
+            str(node_id) for key in (
+                "responsible_node_ids", "preservation_consumer_ids",
+            )
+            for node_id in cut.get(key, ())
+        )
+    for key in (
+        "failing_path_symbols", "protected_target_path_symbols",
+        "target_only_path_symbols", "failure_only_path_symbols",
+        "shared_changed_symbols", "causal_cut_symbols",
+    ):
+        causal_nodes.update(
+            str(item["node_id"])
+            for item in objective.causal_guidance.get(key, ())
+            if item.get("node_id")
+        )
+    causal_nodes.update(
+        str(node_id)
+        for binding in objective.bindings
+        for node_id in binding.get("program_symbol_ids", ())
+    )
+    causal_windows = [
+        (node.path, node.start_line, node.end_line)
+        for node_id in causal_nodes
+        if (node := state.graph_stack.program_graph.nodes.get(node_id)) is not None
+    ]
+    if not causal_windows:
+        causal_windows = [
+            (path, start, end)
+            for path, spans in allowed.items()
+            for start, end in spans
+        ]
+    touched_causal_component = False
+    for hunk in incremental.hunks:
+        hunk_end = hunk.new_start + max(hunk.new_count, 1) - 1
+        if any(
+            hunk.path == path and hunk_end >= start and hunk.new_start <= end
+            for path, start, end in causal_windows
+        ):
+            touched_causal_component = True
+    violations = []
+    if incremental.hunks and not touched_causal_component:
+        violations.append("revision does not touch the selected causal component")
+    if not violations:
+        return mechanical
+    return replace(
+        mechanical,
+        passed=False,
+        forbidden_edit=True,
+        failure_reasons=tuple(dict.fromkeys(mechanical.failure_reasons + tuple(violations))),
+    )
+
+
+def _public_check_paths(state: ReachAvoidState) -> tuple[str, ...]:
+    return tuple(dict.fromkeys(
+        argument.replace("\\", "/").removeprefix("./")
+        for cell in state.graph_stack.challenge_graph.active_cells()
+        if cell.origin == "PUBLIC_CHECK"
+        for argument in cell.execution_scenario.command
+        if argument.endswith(".py")
+    ))
+
+
+def evaluate_trial_transition(
+    state: ReachAvoidState,
+    generator_result: GeneratorResult,
+) -> TrialTransition:
+    source_checkpoint = state.working_checkpoint
+    empty = diff_between(source_checkpoint.snapshot_tree, source_checkpoint.snapshot_tree)
+    try:
+        trial_tree = create_trial_tree(source_checkpoint, state.run_root / "trials")
+        apply_generator_result(trial_tree, generator_result)
+    except (OSError, RuntimeError, ValueError) as exc:
+        mechanical = run_mechanical_checks(Path(source_checkpoint.snapshot_tree), empty)
+        mechanical = replace(mechanical, passed=False, failure_reasons=(str(exc),))
+        evidence = TransitionEvidence(
+            mechanical, (), (), (), (), (), (), (), (), (), (), False, False, (),
+        )
+        decision = decide_reach_avoid_transition(state, state.graph_stack, evidence)
+        progress = ProgressEvaluation(False, False, 0, 0, (), (), ())
+        reach = evaluate_reach(state)
+        avoid = AvoidEvaluation(AvoidKind.HARD_AVOID, (str(exc),), (), ())
+        state.graph_stack.validate()
+        return TrialTransition(
+            source_checkpoint.checkpoint_id, None, empty, empty,
+            state.graph_stack, None, evidence, progress, reach, avoid,
+            decision, trial_patch_changed=False, entered_evaluation=False,
+        )
+    incremental = diff_between(source_checkpoint.snapshot_tree, trial_tree)
+    cumulative = diff_between(state.base_repository, trial_tree)
+    if incremental.empty or cumulative.empty or cumulative.patch_hash == state.graph_stack.patch_hash:
+        mechanical = run_mechanical_checks(trial_tree, cumulative)
+        evidence = TransitionEvidence(
+            mechanical, (), (), (), (), (), (), (), (), (), (), False, False, (),
+        )
+        decision = replace(
+            decide_reach_avoid_transition(state, state.graph_stack, evidence),
+            decision=Decision.ROLLBACK,
+            reasons=("empty or identical cumulative patch",),
+            promote_to_working=False,
+            promote_to_best=False,
+        )
+        progress = ProgressEvaluation(False, False, 0, 0, (), (), ())
+        reach = evaluate_reach(state)
+        avoid = AvoidEvaluation(AvoidKind.NOT_AVOID, (), (), ())
+        state.graph_stack.validate()
+        return TrialTransition(
+            source_checkpoint.checkpoint_id, str(trial_tree), incremental, cumulative,
+            state.graph_stack, None, evidence, progress, reach, avoid, decision,
+            trial_patch_changed=False, entered_evaluation=False,
+        )
+    mechanical = run_mechanical_checks(
+        trial_tree, cumulative, oracle_paths=_public_check_paths(state),
+        source_tree=Path(source_checkpoint.snapshot_tree),
+    )
+    mechanical = _validate_repair_scope(state, incremental, mechanical)
+    if not mechanical.passed:
+        evidence = TransitionEvidence(
+            mechanical, (), (), (), (), (), (), (), (), (), (), False, False, (),
+        )
+        decision = decide_reach_avoid_transition(state, state.graph_stack, evidence)
+        progress = ProgressEvaluation(False, False, 0, 0, (), (), ())
+        reach = ReachEvaluation(False, mechanical.failure_reasons, 0, 0, 0)
+        avoid = AvoidEvaluation(AvoidKind.HARD_AVOID, mechanical.failure_reasons, (), ())
+        state.graph_stack.validate()
+        return TrialTransition(
+            source_checkpoint.checkpoint_id, str(trial_tree), incremental, cumulative,
+            state.graph_stack, None, evidence, progress, reach, avoid, decision,
+            trial_patch_changed=True, entered_evaluation=True,
+        )
+    public_evidence = _public_evidence_from_stack(state)
+    trial_stack = update_graph_stack_after_diff(
+        state.graph_stack, cumulative, trial_tree, state.base_repository, "",
+        public_evidence, GraphBudget(),
+    )
+    diff_graph_metrics = latest_graph_metrics()
+    diff_program = trial_stack.program_graph
+    impact = trial_stack.program_graph.impact_cone
+    plan = build_diff_conditioned_regression_plan(state, cumulative, impact)
+    transient = replace(state, graph_stack=trial_stack)
+    selection = materialize_trial_challenges(state, trial_stack, plan)
+    challenge_result = execute_challenge_round(
+        transient, selection, state.base_repository, trial_tree,
+        previous_tree=Path(source_checkpoint.snapshot_tree),
+    )
+    execution_graph_metrics = latest_graph_metrics()
+    set_graph_metrics({
+        key: diff_graph_metrics.get(key, 0.0)
+        + execution_graph_metrics.get(key, 0.0)
+        for key in diff_graph_metrics
+    })
+    execution_program = challenge_result.updated_graph_stack.program_graph
+    combined_program = replace(
+        execution_program,
+        files_reparsed=(
+            diff_program.files_reparsed + execution_program.files_reparsed
+        ),
+        symbols_expanded=(
+            diff_program.symbols_expanded + execution_program.symbols_expanded
+        ),
+        cache_hits=diff_program.cache_hits + execution_program.cache_hits,
+    )
+    trial_stack = replace(
+        challenge_result.updated_graph_stack,
+        program_graph=combined_program,
+    )
+    challenge_result = replace(
+        challenge_result, updated_graph_stack=trial_stack,
+    )
+    evidence = compute_transition_evidence(state, trial_stack, challenge_result, mechanical)
+    placeholder = TrialTransition(
+        source_checkpoint.checkpoint_id, str(trial_tree), incremental, cumulative,
+        trial_stack, challenge_result, evidence,
+        ProgressEvaluation(False, False, 0, 0, (), (), ()),
+        ReachEvaluation(False, (), 0, 0, 0),
+        AvoidEvaluation(AvoidKind.NOT_AVOID, (), (), ()),
+        TransitionDecision(Decision.ROLLBACK, (), False, False, False, False, False, False, None),
+        trial_patch_changed=True,
+        entered_evaluation=True,
+    )
+    progress = compare_progress(state, placeholder)
+    decision = decide_reach_avoid_transition(state, trial_stack, evidence)
+    placeholder.progress = progress
+    placeholder.transition_decision = decision
+    placeholder.avoid = evaluate_avoid(state, placeholder)
+    virtual = _virtual_state(state, trial_stack, cumulative, mechanical, challenge_result)
+    placeholder.reach = evaluate_reach(virtual)
+    trial_stack.validate()
+    return placeholder

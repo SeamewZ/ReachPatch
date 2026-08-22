@@ -4,7 +4,7 @@ import json
 from pathlib import Path
 
 from reachpatch.models.core import Instance
-from reachpatch.reach_avoid.controller import ReachPatchConfig
+from reachpatch.reach_avoid.controller import ReachAvoidConfig
 
 
 def load_instance(path: str | Path) -> Instance:
@@ -18,22 +18,13 @@ def load_instance(path: str | Path) -> Instance:
         repository=str(repository),
         base_commit=str(raw.get("base_commit", "UNKNOWN")),
         issue=str(raw["issue"]),
-        visible_tests=tuple(str(item) for item in raw.get("visible_tests", ())),
+        visible_tests=tuple(map(str, raw.get("visible_tests", ()))),
         public_metadata=dict(raw.get("public_metadata", {})),
         environment=dict(raw.get("environment", {})),
     )
 
 
-def load_run_manifest(run_root: str | Path) -> dict:
-    return json.loads(
-        Path(run_root, "run_manifest.json").resolve().read_text(encoding="utf-8")
-    )
-
-
-def config_from_manifest(manifest: dict) -> ReachPatchConfig:
+def config_from_manifest(manifest: dict) -> ReachAvoidConfig:
     raw = dict(manifest.get("config", {}))
-    raw["forbidden_patterns"] = tuple(raw.get("forbidden_patterns", ()))
-    raw["mechanical_commands"] = tuple(
-        tuple(item) for item in raw.get("mechanical_commands", ())
-    )
-    return ReachPatchConfig(**raw)
+    raw.pop("graph_budget", None)
+    return ReachAvoidConfig(**raw)

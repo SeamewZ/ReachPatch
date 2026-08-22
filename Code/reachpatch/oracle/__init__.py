@@ -1,7 +1,4 @@
-"""Authority-gated executable observation contracts and paired classifiers."""
+from .observe import observe_oracle
+from .resolve import resolve_oracle
 
-from .authority import resolve_oracle
-from .classifier import classify_pair
-from .models import ExecutableScenario, ObservationContract, Oracle
-
-__all__ = ["ExecutableScenario", "ObservationContract", "Oracle", "classify_pair", "resolve_oracle"]
+__all__ = ["observe_oracle", "resolve_oracle"]

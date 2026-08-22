@@ -27,5 +27,11 @@ Code/experiments/swe51/harness/
 Code/experiments/swe51/public_instances/
 Code/experiments/swe51/generation_summary.json
 
+# Reach-Avoid 51 runtime trees and harness logs are local execution outputs.
+Code/experiments/reachavoid_51_final_v1_20260820/runs/
+Code/experiments/reachavoid_51_final_v1_20260820/failed_attempts/
+Code/experiments/reachavoid_51_final_v1_20260820/harness/*/logs/
+Code/experiments/new_swelite_51/case_trees
+
 # The manuscript is maintained outside the implementation repository.
 /Paper/

@@ -1,334 +1,398 @@
 from __future__ import annotations
 
-from dataclasses import dataclass, replace
+import time
+from dataclasses import replace
 from pathlib import Path
 
-from reachpatch.execution.reconcile import ActualDiff
-from reachpatch.models.base import SerializableRecord, content_hash, stable_id
-from reachpatch.models.core import Frontier
-from reachpatch.program_graph.budget import GraphBudget
-from reachpatch.program_graph.index import RepositoryIndex
-from reachpatch.program_graph.models import ProgramGraph
-from reachpatch.program_graph.slice import (
-    ContextRequest,
-    ProgramGraphBuildResult,
-    build_active_program_slice,
-    recover_repair_slice_seeds,
+from reachpatch.models.base import content_hash, stable_id
+from reachpatch.models.evidence import ActualDiff, TraceBundle
+from reachpatch.models.graphs import (
+    ContextRequest, GraphBudget, PathClass, ProgramEdge, ProgramEdgeKind,
+    ProgramGraph, ProgramGraphDelta, ProgramNodeKind,
 )
 
-
-def _derived_references(kind: str, value: object) -> tuple[set[str], set[str]]:
-    """Return node/edge references that make a derived record valid."""
-
-    if kind == "cfgs":
-        return ({
-            value.callable_id, value.entry_node_id, *value.exit_node_ids,
-            *value.statement_node_ids,
-        }, set(value.edge_ids))
-    if kind == "protocol_operations":
-        nodes = {
-            value.source_node_id,
-            *value.candidate_target_ids,
-        }
-        if value.selected_target_id:
-            nodes.add(value.selected_target_id)
-        return nodes, set()
-    if kind == "path_classes":
-        return ({
-            value.entrypoint_id, *value.node_ids, *value.observation_ids,
-            *value.state_effect_ids,
-        }, set(value.edge_ids))
-    if kind == "frontiers":
-        return ({value.owner_id}, set())
-    raise ValueError(f"unsupported derived Program Graph mapping: {kind}")
+from .local_builder import (
+    RepositoryIndex, _diff_focus, _limit_edges, _parse_file,
+    _resolve_call_edges,
+)
+from .slicing import compute_impact_cone, match_trace_nodes
 
 
-def _references_touched(
-    value: object,
-    kind: str,
-    previous: ProgramGraph,
-    touched: set[str],
-) -> bool:
-    node_ids, _ = _derived_references(kind, value)
-    if kind == "frontiers":
-        owner_id = value.owner_id
-        for mapping_name in ("cfgs", "protocol_operations", "path_classes"):
-            owned = getattr(previous, mapping_name).get(owner_id)
-            if owned is not None and _references_touched(
-                owned, mapping_name, previous, touched
-            ):
-                return True
-    return any(
-        str(previous.nodes[node_id].attributes.get("file", "")) in touched
-        for node_id in node_ids
-        if node_id in previous.nodes
-    )
+_CALLABLE_KINDS = {
+    ProgramNodeKind.FUNCTION,
+    ProgramNodeKind.METHOD,
+}
 
 
-def _derived_record_valid(
-    value: object,
-    kind: str,
+def materialize_execution_path_class(
     graph: ProgramGraph,
-) -> bool:
-    node_ids, edge_ids = _derived_references(kind, value)
-    # Frontier owners can be graph-level or protocol identifiers rather than
-    # nodes.  A missing node owner is therefore allowed; records with a known
-    # removed/touched owner have already been invalidated above.
-    if kind == "frontiers":
-        return True
-    valid = node_ids <= set(graph.nodes) and edge_ids <= set(graph.edges)
-    if kind == "path_classes":
-        valid = valid and set(value.protocol_selections) <= set(
-            graph.protocol_operations
+    trace: TraceBundle,
+    anchor_node_ids: tuple[str, ...],
+) -> tuple[ProgramGraph, PathClass | None]:
+    """Compress a real trace around a statically bound operation.
+
+    A trace may contain thousands of import and framework events.  Only the
+    executed nodes in the narrowest bound source scope are retained.  Requiring
+    a non-module anchor hit prevents an unrelated startup failure from being
+    rebound to a Requirement.
+    """
+
+    ordered, matched = match_trace_nodes(graph, trace)
+    anchor_hits = tuple(
+        node_id for node_id in anchor_node_ids
+        if node_id in matched
+        and node_id in graph.nodes
+        and graph.nodes[node_id].kind is not ProgramNodeKind.MODULE
+    )
+    if not anchor_hits:
+        return graph, None
+
+    def anchor_priority(node_id: str) -> tuple[int, int, int, str]:
+        node = graph.nodes[node_id]
+        return (
+            0 if node.kind in _CALLABLE_KINDS else
+            1 if node.kind is ProgramNodeKind.CLASS else 2,
+            -(node.symbol.count(".")),
+            node.end_line - node.start_line,
+            node.node_id,
         )
-    return valid
 
-
-@dataclass(frozen=True, slots=True)
-class ProgramGraphDeltaResult(SerializableRecord):
-    graph: ProgramGraph
-    added_node_ids: tuple[str, ...]
-    removed_node_ids: tuple[str, ...]
-    modified_node_ids: tuple[str, ...]
-    added_edge_ids: tuple[str, ...]
-    removed_edge_ids: tuple[str, ...]
-    rebuilt_files: tuple[str, ...]
-    retained_file_hashes: dict[str, str]
-    build: ProgramGraphBuildResult
-
-
-def _file_cost(graph: ProgramGraph, path: str) -> tuple[int, int, int]:
-    node_ids = set(graph.file_index.get(path, ()))
-    functions = sum(
-        graph.nodes.get(cfg.callable_id) is not None
-        and str(graph.nodes[cfg.callable_id].attributes.get("file", "")) == path
-        for cfg in graph.cfgs.values()
-    )
-    edges = sum(
-        bool(node_ids.intersection(edge.source_ids + edge.target_ids))
-        for edge in graph.edges.values()
-    )
-    return len(node_ids), edges, functions
-
-
-def _precise_files(graph: ProgramGraph) -> set[str]:
-    return {
-        str(graph.nodes[cfg.callable_id].attributes.get("file", ""))
-        for cfg in graph.cfgs.values()
-        if cfg.callable_id in graph.nodes
-        and graph.nodes[cfg.callable_id].attributes.get("file")
-    }
-
-
-def _admit_active_files(
-    previous: ProgramGraph,
-    rebuilt: ProgramGraph,
-    partial: ProgramGraphBuildResult,
-    touched: tuple[str, ...],
-    context_requests: tuple[ContextRequest, ...],
-    budget: GraphBudget,
-) -> tuple[tuple[str, ...], tuple[str, ...]]:
-    """Bound the cumulative active slice, not merely this update."""
-
-    context_files = tuple(
-        path
-        for request in context_requests
-        for path in request.file_paths
-    )
-    ordered = tuple(dict.fromkeys((
-        *touched,
-        *context_files,
-        *partial.analyzed_files,
-        *previous.file_index,
-    )))
-    rebuilt_precise_files = _precise_files(rebuilt)
-    admitted: list[str] = []
-    deferred: list[str] = []
-    nodes = edges = functions = 0
-    for path in ordered:
-        # A freshly precise file replaces its former precise representation.
-        # Summary-only files in the partial graph do not erase an existing
-        # precise slice and must be costed from the previous graph.
-        source = (
-            rebuilt
-            if path in rebuilt_precise_files or path in touched
-            else previous
+    anchor_id = min(anchor_hits, key=anchor_priority)
+    anchor = graph.nodes[anchor_id]
+    if anchor.kind in _CALLABLE_KINDS | {ProgramNodeKind.CLASS}:
+        scope = anchor.symbol
+    else:
+        callable_containers = tuple(
+            node for node in graph.nodes.values()
+            if node.path == anchor.path
+            and node.kind in _CALLABLE_KINDS | {ProgramNodeKind.CLASS}
+            and node.start_line <= anchor.start_line <= node.end_line
         )
-        if path not in source.file_index:
-            continue
-        file_nodes, file_edges, file_functions = _file_cost(source, path)
-        fits = (
-            len(admitted) < budget.max_files
-            and nodes + file_nodes <= budget.max_nodes
-            and edges + file_edges <= budget.max_edges
-            and functions + file_functions <= budget.max_functions
+        if not callable_containers:
+            return graph, None
+        container = min(
+            callable_containers,
+            key=lambda node: (
+                node.end_line - node.start_line,
+                -node.symbol.count("."),
+                node.node_id,
+            ),
         )
-        if not fits:
-            deferred.append(path)
-            continue
-        admitted.append(path)
-        nodes += file_nodes
-        edges += file_edges
-        functions += file_functions
-    if deferred:
-        budget.truncated_reason = budget.truncated_reason or "ACTIVE_SLICE_LIMIT"
-    return tuple(admitted), tuple(deferred)
+        scope = container.symbol
 
-
-def update_active_program_slice(
-    previous: ProgramGraph,
-    repository_index: RepositoryIndex,
-    repository_root: Path,
-    actual_diff: ActualDiff,
-    trace_delta: dict | None,
-    context_requests: tuple[ContextRequest, ...],
-    budget: GraphBudget,
-) -> ProgramGraphDeltaResult:
-    touched = tuple(sorted(actual_diff.changed_files))
-    seeds = recover_repair_slice_seeds(
-        "", (), repository_index, actual_diff=actual_diff,
-        trace_delta=trace_delta, context_requests=context_requests,
-    )
-    partial = build_active_program_slice(
-        repository_root, repository_index, seeds,
-        previous=previous, changed_files=touched, budget=budget,
-    )
-    rebuilt = partial.graph
-    admitted_files, deferred_files = _admit_active_files(
-        previous, rebuilt, partial, touched, context_requests, budget
-    )
-    admitted_set = set(admitted_files)
-    rebuilt_precise_files = _precise_files(rebuilt)
-    invalidated_previous_files = (
-        set(previous.file_index) - admitted_set
-    ) | set(touched) | rebuilt_precise_files
-    old_invalidated_nodes = {
-        node_id
-        for path in invalidated_previous_files
-        for node_id in previous.file_index.get(path, ())
-    }
-    retained_nodes = {
-        node_id: node for node_id, node in previous.nodes.items()
-        if node_id not in old_invalidated_nodes
+    relevant_ids = {
+        node_id for node_id in matched
+        if node_id in graph.nodes
+        and graph.nodes[node_id].path == anchor.path
         and (
-            not node.attributes.get("file")
-            or str(node.attributes.get("file")) in admitted_set
+            graph.nodes[node_id].symbol == scope
+            or graph.nodes[node_id].symbol.startswith(f"{scope}.")
         )
+        and graph.nodes[node_id].kind is not ProgramNodeKind.MODULE
     }
-    active_paths = admitted_set
-    source_hash = content_hash({
-        path: repository_index.source_hashes.get(path, "CHANGED")
-        for path in sorted(active_paths)
-    })
-    merged = ProgramGraph(
-        repository_root=str(repository_root.resolve()), source_hash=source_hash,
-        version=previous.version + 1,
+    if not relevant_ids:
+        return graph, None
+
+    executed_names = tuple(trace.executed_symbol_ids)
+    callables = tuple(
+        graph.nodes[node_id] for node_id in relevant_ids
+        if graph.nodes[node_id].kind in _CALLABLE_KINDS
     )
-    for node in retained_nodes.values():
-        if len(merged.nodes) >= budget.max_nodes:
-            budget.truncated_reason = budget.truncated_reason or "NODE_LIMIT"
-            break
-        merged.index_node(node)
-    for edge in previous.edges.values():
-        if len(merged.edges) >= budget.max_edges:
-            budget.truncated_reason = budget.truncated_reason or "EDGE_LIMIT"
-            break
-        if all(node_id in merged.nodes for node_id in edge.source_ids + edge.target_ids):
-            merged.add_edge(edge)
-    for node in rebuilt.nodes.values():
-        file_name = str(node.attributes.get("file", ""))
-        if file_name and file_name not in admitted_set:
-            continue
-        if len(merged.nodes) >= budget.max_nodes:
-            budget.truncated_reason = budget.truncated_reason or "NODE_LIMIT"
-            break
-        if node.node_id not in merged.nodes:
-            merged.index_node(node)
-    for edge in rebuilt.edges.values():
-        if len(merged.edges) >= budget.max_edges:
-            budget.truncated_reason = budget.truncated_reason or "EDGE_LIMIT"
-            break
-        if edge.edge_id not in merged.edges and all(node_id in merged.nodes for node_id in edge.source_ids + edge.target_ids):
-            merged.add_edge(edge)
-    invalidated_set = set(invalidated_previous_files)
-    for mapping_name in ("cfgs", "protocol_operations", "path_classes", "frontiers"):
-        target = getattr(merged, mapping_name)
-        for key, value in getattr(previous, mapping_name).items():
-            if _references_touched(
-                value, mapping_name, previous, invalidated_set
-            ):
-                continue
-            if _derived_record_valid(value, mapping_name, merged):
-                target[key] = value
-        # Rebuilt derived records are part of the incremental slice just as
-        # much as rebuilt nodes and edges.  Merge them under their own mapping
-        # after the retained records so touched callables replace stale CFG,
-        # protocol and path-class summaries.
-        for key, value in getattr(rebuilt, mapping_name).items():
-            if _derived_record_valid(value, mapping_name, merged):
-                target[key] = value
-    if deferred_files or budget.truncated_reason:
-        merged.add_frontier(Frontier(
-            frontier_id=stable_id(
-                "program-frontier", "ANALYSIS_TRUNCATED",
-                admitted_files, deferred_files, budget.truncated_reason,
-            ),
-            kind="ANALYSIS_TRUNCATED",
-            owner_id=merged.graph_kind,
-            reason=(
-                "cumulative active Program Graph reached its file/function/node/edge budget; "
-                f"deferred {len(deferred_files)} files"
-            ),
-            resolution_action="replace lower-priority active context or request a targeted slice",
-            hard=False,
-            evidence_ids=(),
-        ))
-    old_nodes = previous.nodes
-    new_nodes = merged.nodes
-    old_edges = previous.edges
-    new_edges = merged.edges
-    modified = tuple(sorted(
-        node_id for node_id in old_nodes.keys() & new_nodes.keys()
-        if old_nodes[node_id] != new_nodes[node_id]
-    ))
-    merged.build_timings = dict(rebuilt.build_timings)
-    merged.build_stats = dict(rebuilt.build_stats)
-    merged.build_stats.update({
-        "precise_file_count": len(merged.file_index),
-        "precise_function_count": len(merged.cfgs),
-        "deferred_active_file_count": len(deferred_files),
-    })
-    rebuilt_file_ids = tuple(
-        path for path in admitted_files if path in rebuilt.file_index
+
+    def callable_priority(node) -> tuple[int, int, int, str]:
+        terminal = node.symbol.rsplit(".", 1)[-1]
+        try:
+            execution_index = executed_names.index(terminal)
+        except ValueError:
+            execution_index = len(executed_names) + 1
+        return (
+            execution_index,
+            node.end_line - node.start_line,
+            -node.symbol.count("."),
+            node.node_id,
+        )
+
+    entry = min(callables, key=callable_priority) if callables else anchor
+    compressed_order = tuple(dict.fromkeys(
+        (entry.node_id,)
+        + tuple(node_id for node_id in ordered if node_id in relevant_ids)
+        + anchor_hits
+    ))[:64]
+    if not compressed_order:
+        return graph, None
+
+    repeated = max(
+        (sum(node_id == candidate for node_id in ordered) for candidate in relevant_ids),
+        default=1,
     )
-    build_record = replace(
-        partial,
-        analyzed_files=rebuilt_file_ids,
-        analyzed_callable_names=tuple(sorted(
-            str(merged.nodes[cfg.callable_id].attributes.get(
-                "qualified_name", merged.nodes[cfg.callable_id].label
-            ))
-            for cfg in merged.cfgs.values()
-            if cfg.callable_id in merged.nodes
-        )),
-        deferred_files=tuple(sorted(set(
-            partial.deferred_files + deferred_files
-        ))),
-        truncated_reason=budget.truncated_reason,
+    loop_class = "0" if repeated <= 1 else "1" if repeated == 2 else "MANY"
+    terminal_name = entry.symbol.rsplit(".", 1)[-1]
+    recursive_calls = (
+        executed_names.count(terminal_name)
+        if not terminal_name.startswith("__") else 1
     )
-    return ProgramGraphDeltaResult(
-        graph=merged,
-        added_node_ids=tuple(sorted(new_nodes.keys() - old_nodes.keys())),
-        removed_node_ids=tuple(sorted(old_nodes.keys() - new_nodes.keys())),
-        modified_node_ids=modified,
-        added_edge_ids=tuple(sorted(new_edges.keys() - old_edges.keys())),
-        removed_edge_ids=tuple(sorted(old_edges.keys() - new_edges.keys())),
-        rebuilt_files=rebuilt_file_ids,
-        retained_file_hashes={
-            path: digest for path, digest in repository_index.source_hashes.items()
-            if path in previous.file_index
-            and path in admitted_set
-            and path not in touched
+    recursion_class = (
+        "NONE" if recursive_calls <= 1 else
+        "ONE" if recursive_calls == 2 else "DEPTH_LIMIT"
+    )
+    dispatch_route = next(iter(trace.dispatch_routes), None) or str(
+        entry.metadata.get("protocol", "DIRECT")
+    )
+    raised = bool(trace.observation.exception) or any(
+        graph.nodes[node_id].kind is ProgramNodeKind.RAISE
+        for node_id in relevant_ids
+    )
+    exit_kind = "RAISE" if raised else "RETURN"
+    observed_effect = (
+        "EXCEPTION" if raised else
+        "STATE_WRITE" if trace.state_writes else
+        "EXTERNAL_EFFECT" if any(
+            graph.nodes[node_id].kind is ProgramNodeKind.EXTERNAL_EFFECT
+            for node_id in relevant_ids
+        ) else "RETURN_VALUE"
+    )
+    path_id = stable_id(
+        "execution-path-class", graph.patch_hash, entry.symbol,
+        dispatch_route, exit_kind, observed_effect, loop_class,
+        recursion_class, compressed_order,
+    )
+    path = PathClass(
+        path_class_id=path_id,
+        entrypoint=entry.symbol,
+        ordered_guard_outcomes=(),
+        dispatch_route=dispatch_route,
+        exit_kind=exit_kind,
+        observed_effect_kind=observed_effect,
+        loop_class=loop_class,
+        recursion_class=recursion_class,
+        node_ids=compressed_order,
+    )
+    paths = dict(graph.path_classes)
+    paths[path_id] = path
+    return replace(graph, path_classes=paths), path
+
+
+def update_program_graph_after_diff(
+    previous: ProgramGraph,
+    repository: Path,
+    actual_diff: ActualDiff,
+    trace_bundles: tuple[TraceBundle, ...],
+    context_requests: tuple[ContextRequest, ...],
+    budget: GraphBudget,
+    public_checks: tuple = (),
+) -> ProgramGraphDelta:
+    started = time.monotonic()
+    diff_focus = _diff_focus(actual_diff)
+    local_candidates = set(previous.file_hashes) | set(actual_diff.changed_files)
+    changed_files = {
+        relative for relative in local_candidates
+        if (
+            content_hash((repository / relative).read_bytes().hex())
+            if (repository / relative).is_file() else None
+        ) != previous.file_hashes.get(relative)
+    }
+    nodes = {
+        key: value for key, value in previous.nodes.items()
+        if value.path not in changed_files
+    }
+    removed = tuple(sorted(set(previous.nodes) - set(nodes)))
+    edges = {
+        key: value for key, value in previous.edges.items()
+        if value.source_id in nodes and value.target_id in nodes
+    }
+    paths = {
+        key: value for key, value in previous.path_classes.items()
+        if not any(node_id in removed for node_id in value.node_ids)
+    }
+    requested_nodes: set[str] = set()
+    requested_symbols: list[str] = []
+    adjacency = {
+        "EXPAND_DIRECT_CALLER": {
+            ProgramEdgeKind.CALLS, ProgramEdgeKind.MAY_CALL,
+            ProgramEdgeKind.EXECUTED_CALL,
         },
-        build=build_record,
+        "EXPAND_RETURN_CONSUMER": {
+            ProgramEdgeKind.RETURN_FLOW, ProgramEdgeKind.CONSUMER,
+        },
+        "EXPAND_EXCEPTION_HANDLER": {ProgramEdgeKind.EXCEPTION_FLOW},
+        "EXPAND_PROTOCOL_DISPATCH": {
+            ProgramEdgeKind.DISPATCH, ProgramEdgeKind.REFLECTED_DISPATCH,
+        },
+    }
+    previous_frontiers = {
+        (request.action, request.symbol_id, request.depth)
+        for request in previous.frontier_requests
+    }
+    effective_requests = tuple(
+        request for request in context_requests
+        if (request.action, request.symbol_id, request.depth) not in previous_frontiers
+    )
+    for request in effective_requests:
+        node = previous.nodes.get(request.symbol_id)
+        if node is not None:
+            requested_nodes.add(node.node_id)
+            requested_symbols.append(node.symbol.split(".")[-1])
+        else:
+            requested_symbols.append(request.symbol_id.split(".")[-1])
+    for request in effective_requests:
+        start = request.symbol_id if request.symbol_id in previous.nodes else None
+        if start is None or request.action not in adjacency:
+            continue
+        frontier = {start}
+        seen = {start}
+        for _ in range(min(2, max(1, request.depth))):
+            next_frontier: set[str] = set()
+            for edge in previous.edges.values():
+                if edge.kind not in adjacency[request.action]:
+                    continue
+                if request.action == "EXPAND_DIRECT_CALLER" and edge.target_id in frontier:
+                    next_frontier.add(edge.source_id)
+                elif edge.source_id in frontier:
+                    next_frontier.add(edge.target_id)
+                elif edge.target_id in frontier:
+                    next_frontier.add(edge.source_id)
+            next_frontier -= seen
+            seen.update(next_frontier)
+            frontier = next_frontier
+        requested_nodes.update(seen)
+    if any(request.action == "TRACE_PUBLIC_CHECK" for request in effective_requests):
+        requested_nodes.update(
+            node.node_id for node in previous.nodes.values()
+            if node.metadata.get("public_check_ids")
+        )
+    requested_symbols.extend(
+        previous.nodes[node_id].symbol.split(".")[-1]
+        for node_id in requested_nodes if node_id in previous.nodes
+    )
+    requested_symbol_tuple = tuple(dict.fromkeys(requested_symbols))
+    index = (
+        RepositoryIndex.build(
+            repository, previous.base_commit, requested_symbol_tuple,
+            max(budget.max_files, len(changed_files) + len(effective_requests)),
+        )
+        if effective_requests else
+        RepositoryIndex(repository, previous.base_commit, {}, {})
+    )
+    parse_files = sorted(changed_files)
+    parse_files.extend(
+        previous.nodes[node_id].path
+        for node_id in requested_nodes if node_id in previous.nodes
+    )
+    parse_files.extend(tuple(dict.fromkeys(
+        path
+        for trace in trace_bundles
+        for line_id in trace.executed_line_ids
+        for path, separator, raw_line in (line_id.rpartition(":"),)
+        if separator and raw_line.isdigit()
+        and (repository / path).is_file()
+        and path.endswith(".py")
+    )))
+    changed_definition_names = {
+        node.symbol.split(".")[-1]
+        for node in previous.nodes.values()
+        if node.path in changed_files
+        and node.kind.value in {"FUNCTION", "METHOD", "CLASS"}
+    } | set(actual_diff.changed_symbols)
+    for name in changed_definition_names:
+        parse_files.extend(previous.symbol_index.get(name, ()))
+    for request in effective_requests:
+        if request.depth > 2:
+            continue
+        symbol = (
+            previous.nodes[request.symbol_id].symbol.split(".")[-1]
+            if request.symbol_id in previous.nodes
+            else request.symbol_id.split(".")[-1]
+        )
+        parse_files.extend(index.symbol_files.get(symbol, ()))
+    cache_hits = index.cache_hits
+    files_reparsed = 0
+    parsed: set[str] = set()
+    for relative in dict.fromkeys(parse_files):
+        if len(parsed) >= budget.max_files or not (repository / relative).is_file():
+            continue
+        focus_lines, focus_symbols = diff_focus.get(relative, ((), ()))
+        stats = _parse_file(
+            index, relative, nodes, edges, paths, budget,
+            focus_lines=focus_lines, focus_symbols=focus_symbols,
+        )
+        cache_hits += int(stats.cache_hit)
+        files_reparsed += int(stats.file_reparsed)
+        parsed.add(relative)
+    _resolve_call_edges(nodes, edges)
+    _limit_edges(edges, budget.max_edges)
+    trace_graph = ProgramGraph(
+        patch_hash=actual_diff.patch_hash,
+        base_commit=previous.base_commit,
+        nodes=nodes,
+        edges=edges,
+        path_classes=paths,
+        file_hashes=previous.file_hashes,
+        symbol_index=previous.symbol_index,
+    )
+    for trace in trace_bundles:
+        ordered, _ = match_trace_nodes(trace_graph, trace)
+        transitions = (
+            ((ordered[0], ordered[0]),)
+            if len(ordered) == 1 else
+            tuple(dict.fromkeys(zip(ordered, ordered[1:])))
+        )
+        for ordinal, (before, after) in enumerate(transitions):
+            edge_id = stable_id(
+                "executed-edge", actual_diff.patch_hash,
+                trace.trace_bundle_id, ordinal, before, after,
+            )
+            edges[edge_id] = ProgramEdge(
+                edge_id, before, after, ProgramEdgeKind.EXECUTED_CALL,
+                True, (trace.trace_bundle_id,),
+            )
+    file_hashes = dict(previous.file_hashes)
+    for relative in changed_files:
+        path = repository / relative
+        if path.is_file():
+            file_hashes[relative] = content_hash(path.read_bytes().hex())
+        else:
+            file_hashes.pop(relative, None)
+    graph = ProgramGraph(
+        patch_hash=actual_diff.patch_hash,
+        base_commit=previous.base_commit,
+        nodes=nodes,
+        edges=edges,
+        path_classes=paths,
+        file_hashes=file_hashes,
+        symbol_index={
+            **previous.symbol_index,
+            **index.symbol_files,
+        },
+        causal_cuts={
+            key: value for key, value in previous.causal_cuts.items()
+            if value.earliest_editable_node_id in nodes
+        },
+        frontier_requests=tuple(
+            dict.fromkeys(
+                previous.frontier_requests + effective_requests,
+            )
+        )[-64:],
+        files_reparsed=files_reparsed,
+        symbols_expanded=len(set(nodes) - set(previous.nodes)),
+        cache_hits=cache_hits,
+    )
+    impact = compute_impact_cone(graph, actual_diff.hunks, public_checks)
+    if (
+        not public_checks
+        and previous.impact_cone is not None
+        and previous.impact_cone.changed_hunk_ids == impact.changed_hunk_ids
+    ):
+        impact = replace(
+            impact,
+            public_check_ids=previous.impact_cone.public_check_ids,
+        )
+    graph.impact_cone = impact
+    return ProgramGraphDelta(
+        graph=graph,
+        added_node_ids=tuple(sorted(set(nodes) - set(previous.nodes))),
+        removed_node_ids=removed,
+        files_reparsed=graph.files_reparsed,
+        symbols_expanded=graph.symbols_expanded,
+        cache_hits=cache_hits,
+        update_seconds=time.monotonic() - started,
     )

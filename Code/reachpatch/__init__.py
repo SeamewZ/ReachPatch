@@ -1,4 +1,4 @@
-"""ReachPatch production package."""
+"""Integrated four-graph Reach-Avoid patch repair."""
 
 from .models.base import SCHEMA_VERSION
 
