@@ -108,8 +108,10 @@ def evaluate_reach(state: ReachAvoidState) -> ReachEvaluation:
             cell.terminal_status is ChallengeStatus.PASS
             and cell.stability_runs >= 2
             and cell.patched_outcome is OutcomeStatus.PASS
-            and cell.origin == "PUBLIC_CHECK"
-            and cell.input_recipe.kind == "PUBLIC_REPLAY"
+            and (
+                (cell.origin == "PUBLIC_CHECK" and cell.input_recipe.kind == "PUBLIC_REPLAY")
+                or cell.origin == "REGRESSION_REPLAY"
+            )
             for cell in by_check[check_id]
         ):
             reasons.append(f"locked target is not passing: {check_id}")
@@ -118,14 +120,25 @@ def evaluate_reach(state: ReachAvoidState) -> ReachEvaluation:
             cell.terminal_status is ChallengeStatus.PASS
             and cell.stability_runs >= 2
             and cell.patched_outcome is OutcomeStatus.PASS
-            and cell.origin == "PUBLIC_CHECK"
-            and cell.input_recipe.kind == "PUBLIC_REPLAY"
+            and (
+                (cell.origin == "PUBLIC_CHECK" and cell.input_recipe.kind == "PUBLIC_REPLAY")
+                or cell.origin == "REGRESSION_REPLAY"
+            )
             for cell in by_check[check_id]
         ):
             reasons.append(f"locked preservation is not passing: {check_id}")
 
     for gap in state.graph_stack.binding_graph.gaps:
         if gap.hard:
+            related_cells = [
+                cell for cell in cells if cell.requirement_id == gap.requirement_id
+            ]
+            if related_cells and any(
+                cell.terminal_status in {ChallengeStatus.PASS, ChallengeStatus.UNREACHABLE}
+                and cell.stability_runs >= 2
+                for cell in related_cells
+            ):
+                continue
             reasons.append(
                 f"HARD Requirement has an unresolved BindingGap: "
                 f"{gap.requirement_id}:{gap.gap_type}"

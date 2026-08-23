@@ -243,6 +243,11 @@ def _runtime_state(state: ReachAvoidState | None) -> CheckpointRuntimeState:
         "termination_status": state.termination_status,
         "execution_budget_seconds": state.execution_budget_seconds,
         "remaining_wall_seconds": state.remaining_wall_seconds,
+        "repair_frontiers": {
+            key: value.to_dict() for key, value in state.repair_frontiers.items()
+        },
+        "challenge_attempts": dict(state.challenge_attempts),
+        "transition_counts": dict(state.transition_counts),
     })
 
 
@@ -538,6 +543,9 @@ def restore_checkpoint(
     state.termination_status = runtime.termination_status
     state.execution_budget_seconds = runtime.execution_budget_seconds
     state.remaining_wall_seconds = runtime.remaining_wall_seconds
+    state.repair_frontiers = runtime.repair_frontiers
+    state.challenge_attempts = runtime.challenge_attempts
+    state.transition_counts = runtime.transition_counts
 
 
 def select_best_checkpoint(

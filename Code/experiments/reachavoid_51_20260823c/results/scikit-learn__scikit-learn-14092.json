@@ -1,0 +1,84 @@
+{
+  "completed_at": "2026-08-23T04:25:08.626795+00:00",
+  "component_evidence": {
+    "binding_graph": {
+      "gap_count": 103,
+      "objective_binding_ids": [],
+      "participated": false,
+      "terminal_execution_confirmed_binding_ids": [],
+      "transition_confirmed_binding_ids": [],
+      "unit_count": 56
+    },
+    "challenge_graph": {
+      "cell_count": 6,
+      "counterexamples_closed": [],
+      "counterexamples_opened": [],
+      "executed_challenge_ids": [
+        "challenge-03c8333310525ec0e69d70a5"
+      ],
+      "execution_bundle_count": 1,
+      "participated": true,
+      "selected_challenge_ids": [
+        "challenge-03c8333310525ec0e69d70a5"
+      ],
+      "terminal_status_counts": {
+        "PENDING": 6
+      }
+    },
+    "program_graph": {
+      "causal_cut_count": 0,
+      "dynamic_edge_count": 102,
+      "edge_count": 2606,
+      "impact_risk_count": 17,
+      "node_count": 1500,
+      "objective_causal_cut_ids": [],
+      "participated": true,
+      "path_class_count": 134
+    },
+    "reach_avoid": {
+      "causal_progress_count": 0,
+      "commit_count": 0,
+      "decision_counts": {},
+      "frontier_count": 10,
+      "frontier_kind_counts": {
+        "IMPACT_RISK": 2,
+        "MECHANICAL_FAILURE": 1,
+        "REPRODUCTION_GAP": 6,
+        "REQUIREMENT_COVERAGE_GAP": 1
+      },
+      "frontier_status_counts": {
+        "ACTIONABLE": 10
+      },
+      "participated": true,
+      "provisional_count": 0,
+      "rollback_count": 0,
+      "strict_progress_count": 0,
+      "transition_count": 0
+    },
+    "requirement_graph": {
+      "leaf_count": 59,
+      "objective_requirement_ids": [],
+      "participated": false,
+      "partition_count": 37,
+      "requirements_improved": []
+    }
+  },
+  "duration_seconds": 276.6361804152839,
+  "execution_backend": {
+    "image": "swebench/sweb.eval.x86_64.scikit-learn_1776_scikit-learn-14092:latest",
+    "kind": "DEPENDENCY_IMAGE"
+  },
+  "final_checkpoint_id": "checkpoint-684f9338ba29e90747f99c56",
+  "final_patch_hash": "b470927eba4710f4fd42d1ae93030698829693f6d2b9e54de58d23b0f8027616",
+  "final_patch_path": "/home/slt/ReachPatch/Code/experiments/reachavoid_51_20260823c/runs/scikit-learn__scikit-learn-14092.attempt-1-1787458831982516487/final.patch",
+  "final_patch_sha256": "d80e94ee2b4bdf1822d2f5b22a1ce979217b4da3a41bcdca750f682fcf8ee429",
+  "implementation_hash": "b233fab54ae79032b0c29baf1e2c6f5c50ea7d4120a3a96553cd8ca94f33811c",
+  "instance_id": "scikit-learn__scikit-learn-14092",
+  "p0_patch_hash": "b470927eba4710f4fd42d1ae93030698829693f6d2b9e54de58d23b0f8027616",
+  "p0_patch_path": "/home/slt/ReachPatch/Code/experiments/reachavoid_51_20260823c/runs/scikit-learn__scikit-learn-14092.attempt-1-1787458831982516487/p0.patch",
+  "p0_patch_sha256": "d80e94ee2b4bdf1822d2f5b22a1ce979217b4da3a41bcdca750f682fcf8ee429",
+  "public_dataset_sha256": "516415e9fadba54cf94239ef5c29b1233f214427d8250b4323058e311db228e3",
+  "run_root": "/home/slt/ReachPatch/Code/experiments/reachavoid_51_20260823c/runs/scikit-learn__scikit-learn-14092.attempt-1-1787458831982516487",
+  "schema": "reachpatch-51-reach-avoid-v2",
+  "status": "BEST_EFFORT_FRONTIER_EXHAUSTED"
+}

@@ -233,6 +233,8 @@ def _leaf(
     requirement_id = stable_id(
         "requirement", kind, sentence, authority, evidence_ids, preservation,
     )
+    contract = _contract(sentence, kind)
+    executable = contract.normalized_comparator != "RELATION_HOLDS" or authority in {"A", "B"}
     return RequirementLeaf(
         requirement_id=requirement_id,
         kind=kind,
@@ -247,7 +249,7 @@ def _leaf(
             match.group(1) or match.group(2)
             for match in _IDENTIFIER.finditer(sentence)
         ), "public operation"),
-        expected_observation=_contract(sentence, kind),
+        expected_observation=contract,
         exception_contract=exception,
         preservation=preservation,
         authority=authority,
@@ -255,6 +257,11 @@ def _leaf(
         witness_ids=witness_ids,
         status=OutcomeStatus.UNKNOWN if authority in {"A", "B", "C"} else OutcomeStatus.PROVISIONAL,
         hard=hard and authority in {"A", "B"},
+        domain_partitions=tuple(
+            f"{name}:public-domain" for name in variables
+        ) or ("default",),
+        executable=executable,
+        issue_evidence_spans=tuple({"evidence_id": item} for item in evidence_ids),
     )
 
 

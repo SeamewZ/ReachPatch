@@ -1,0 +1,122 @@
+{
+  "completed_at": "2026-08-23T03:02:21.533769+00:00",
+  "component_evidence": {
+    "binding_graph": {
+      "gap_count": 2,
+      "objective_binding_ids": [],
+      "participated": true,
+      "terminal_execution_confirmed_binding_ids": [
+        "binding-712956489f3fedded50f319d",
+        "binding-97ab018aa9bef09d02559b7d",
+        "binding-cdec23de8eac0a43400142ff",
+        "binding-de2850d9b78b2cf28714d247",
+        "binding-f2c286afe434834dc8f14ba3",
+        "binding-fafed9b3a2253eeadf07b6d4"
+      ],
+      "transition_confirmed_binding_ids": [
+        "binding-712956489f3fedded50f319d",
+        "binding-97ab018aa9bef09d02559b7d",
+        "binding-cdec23de8eac0a43400142ff",
+        "binding-de2850d9b78b2cf28714d247",
+        "binding-f2c286afe434834dc8f14ba3",
+        "binding-fafed9b3a2253eeadf07b6d4"
+      ],
+      "unit_count": 6
+    },
+    "challenge_graph": {
+      "cell_count": 6,
+      "counterexamples_closed": [],
+      "counterexamples_opened": [
+        "counterexample-41ab87af0f70f78556982d0b",
+        "counterexample-90b901687d7a8b394d0caf1a",
+        "counterexample-a6e3e1efcc8e3348246b29da",
+        "counterexample-c2ab791acba0aac0abcf9b73",
+        "counterexample-d10e4a6da87295e913b9ef05",
+        "counterexample-f868e49dd805933ee21d514e"
+      ],
+      "executed_challenge_ids": [
+        "challenge-2d6e4cd355f3c244ddd52a27",
+        "challenge-552ebc20496c0dbd564da4e1",
+        "challenge-5ad46b2726fc6638b061ac45",
+        "challenge-c4c42cda9ae40b298ccbe475",
+        "challenge-f6164ba2b0e01e7878da0595",
+        "challenge-fe08d93ab8d4be2e2977b183"
+      ],
+      "execution_bundle_count": 6,
+      "participated": true,
+      "selected_challenge_ids": [
+        "challenge-2d6e4cd355f3c244ddd52a27",
+        "challenge-552ebc20496c0dbd564da4e1",
+        "challenge-5ad46b2726fc6638b061ac45",
+        "challenge-c4c42cda9ae40b298ccbe475",
+        "challenge-f6164ba2b0e01e7878da0595",
+        "challenge-fe08d93ab8d4be2e2977b183"
+      ],
+      "terminal_status_counts": {
+        "FAIL": 6
+      }
+    },
+    "program_graph": {
+      "causal_cut_count": 6,
+      "dynamic_edge_count": 354,
+      "edge_count": 2888,
+      "impact_risk_count": 12,
+      "node_count": 1500,
+      "objective_causal_cut_ids": [],
+      "participated": true,
+      "path_class_count": 128
+    },
+    "reach_avoid": {
+      "causal_progress_count": 0,
+      "commit_count": 0,
+      "decision_counts": {
+        "ROLLBACK": 1
+      },
+      "frontier_count": 17,
+      "frontier_kind_counts": {
+        "IMPACT_RISK": 2,
+        "MECHANICAL_FAILURE": 1,
+        "PRESERVATION_REGRESSION": 6,
+        "REPRODUCTION_GAP": 6,
+        "REQUIREMENT_COVERAGE_GAP": 2
+      },
+      "frontier_status_counts": {
+        "ACTIONABLE": 12,
+        "CLOSED": 5
+      },
+      "participated": true,
+      "provisional_count": 0,
+      "rollback_count": 1,
+      "strict_progress_count": 0,
+      "transition_count": 1
+    },
+    "requirement_graph": {
+      "leaf_count": 8,
+      "objective_requirement_ids": [
+        "requirement-4602e21c4d80fb62d512404d",
+        "requirement-693df243bd3d5d187849a685"
+      ],
+      "participated": true,
+      "partition_count": 0,
+      "requirements_improved": []
+    }
+  },
+  "duration_seconds": 1039.2519961115904,
+  "execution_backend": {
+    "image": "swebench/sweb.eval.x86_64.pytest-dev_1776_pytest-5413:latest",
+    "kind": "DEPENDENCY_IMAGE"
+  },
+  "final_checkpoint_id": "checkpoint-8c279429625c1960aa32631a",
+  "final_patch_hash": "284b94f05c07e1b3724946216104136a415432ec9eca81ee6c4c3a727b32f518",
+  "final_patch_path": "/home/slt/ReachPatch/Code/experiments/reachavoid_51_20260823c/runs/pytest-dev__pytest-5413/final.patch",
+  "final_patch_sha256": "250711d511e71707089317294255753097c248b5588aaa7956dc2c8b000713cf",
+  "implementation_hash": "b233fab54ae79032b0c29baf1e2c6f5c50ea7d4120a3a96553cd8ca94f33811c",
+  "instance_id": "pytest-dev__pytest-5413",
+  "p0_patch_hash": "284b94f05c07e1b3724946216104136a415432ec9eca81ee6c4c3a727b32f518",
+  "p0_patch_path": "/home/slt/ReachPatch/Code/experiments/reachavoid_51_20260823c/runs/pytest-dev__pytest-5413/p0.patch",
+  "p0_patch_sha256": "250711d511e71707089317294255753097c248b5588aaa7956dc2c8b000713cf",
+  "public_dataset_sha256": "516415e9fadba54cf94239ef5c29b1233f214427d8250b4323058e311db228e3",
+  "run_root": "/home/slt/ReachPatch/Code/experiments/reachavoid_51_20260823c/runs/pytest-dev__pytest-5413",
+  "schema": "reachpatch-51-reach-avoid-v2",
+  "status": "BEST_EFFORT_FRONTIER_EXHAUSTED"
+}

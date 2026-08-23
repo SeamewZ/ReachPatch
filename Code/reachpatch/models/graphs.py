@@ -51,6 +51,9 @@ class RequirementLeaf(SerializableRecord):
     witness_ids: tuple[str, ...]
     status: OutcomeStatus
     hard: bool = True
+    domain_partitions: tuple[str, ...] = ()
+    executable: bool = True
+    issue_evidence_spans: tuple[dict[str, Any], ...] = ()
 
 
 @dataclass(slots=True)
@@ -288,6 +291,15 @@ class BindingGap(SerializableRecord):
     hard: bool
     attempted_symbols: tuple[str, ...]
     next_recovery_actions: tuple[BindingRecoveryAction, ...]
+    gap_id: str | None = None
+
+    def __post_init__(self) -> None:
+        from .base import stable_id
+        if self.gap_id is None:
+            object.__setattr__(self, "gap_id", stable_id(
+                "binding-gap", self.requirement_id, self.gap_type,
+                tuple(self.attempted_symbols), tuple(self.next_recovery_actions),
+            ))
 
 
 @dataclass(slots=True)
@@ -350,6 +362,7 @@ class ChallengeStatus(StrEnum):
     UNSUPPORTED = "UNSUPPORTED"
     UNREACHABLE = "UNREACHABLE"
     EXPLORATION_ONLY = "EXPLORATION_ONLY"
+    INVALID_RECIPE = "INVALID_RECIPE"
     STALE = "STALE"
 
 

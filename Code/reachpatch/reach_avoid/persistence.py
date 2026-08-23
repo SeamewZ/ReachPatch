@@ -97,6 +97,9 @@ def apply_transition_decision(
     if state.graph_stack.graph_hashes() != source.graph_hashes:
         raise RuntimeError("working GraphStack does not match the transition source checkpoint")
     _record_trial_evidence(state, trial)
+    state.transition_counts[trial.decision.value] = (
+        state.transition_counts.get(trial.decision.value, 0) + 1
+    )
     if trial.decision in {Decision.COMMIT_WORKING, Decision.KEEP_PROVISIONAL}:
         closed_failure_ids = set(trial.evidence.confirmed_failures_closed)
         if closed_failure_ids:

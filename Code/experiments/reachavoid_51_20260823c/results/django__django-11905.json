@@ -1,0 +1,95 @@
+{
+  "completed_at": "2026-08-22T20:24:28.625032+00:00",
+  "component_evidence": {
+    "binding_graph": {
+      "gap_count": 4,
+      "objective_binding_ids": [],
+      "participated": true,
+      "terminal_execution_confirmed_binding_ids": [
+        "binding-214dc1282b78fa646465c3ad",
+        "binding-69c1b3886e8786c5bb1297f0",
+        "binding-a0f0860b83d35b2e468f8d69",
+        "binding-bfef04c5edf940a5b7f8d09c"
+      ],
+      "transition_confirmed_binding_ids": [],
+      "unit_count": 4
+    },
+    "challenge_graph": {
+      "cell_count": 4,
+      "counterexamples_closed": [],
+      "counterexamples_opened": [],
+      "executed_challenge_ids": [
+        "challenge-0b9f9f380aebf71f682ca05d",
+        "challenge-147c24cc814e4deb844f606c",
+        "challenge-4201508b2672f80765fdcdc0",
+        "challenge-70cb72f9dacf6abec85019c1"
+      ],
+      "execution_bundle_count": 4,
+      "participated": true,
+      "selected_challenge_ids": [
+        "challenge-0b9f9f380aebf71f682ca05d",
+        "challenge-147c24cc814e4deb844f606c",
+        "challenge-4201508b2672f80765fdcdc0",
+        "challenge-70cb72f9dacf6abec85019c1"
+      ],
+      "terminal_status_counts": {
+        "PASS": 4
+      }
+    },
+    "program_graph": {
+      "causal_cut_count": 0,
+      "dynamic_edge_count": 574,
+      "edge_count": 3476,
+      "impact_risk_count": 17,
+      "node_count": 1500,
+      "objective_causal_cut_ids": [],
+      "participated": true,
+      "path_class_count": 99
+    },
+    "reach_avoid": {
+      "causal_progress_count": 0,
+      "commit_count": 0,
+      "decision_counts": {},
+      "frontier_count": 8,
+      "frontier_kind_counts": {
+        "IMPACT_RISK": 2,
+        "REPRODUCTION_GAP": 4,
+        "REQUIREMENT_COVERAGE_GAP": 2
+      },
+      "frontier_status_counts": {
+        "ACTIONABLE": 6,
+        "CLOSED": 2
+      },
+      "participated": true,
+      "provisional_count": 0,
+      "rollback_count": 0,
+      "strict_progress_count": 0,
+      "transition_count": 0
+    },
+    "requirement_graph": {
+      "leaf_count": 8,
+      "objective_requirement_ids": [],
+      "participated": false,
+      "partition_count": 72,
+      "requirements_improved": []
+    }
+  },
+  "duration_seconds": 1127.2766542476602,
+  "execution_backend": {
+    "image": "swebench/sweb.eval.x86_64.django_1776_django-11905:latest",
+    "kind": "DEPENDENCY_IMAGE"
+  },
+  "final_checkpoint_id": "checkpoint-48ade9f4f56a2821c75f4205",
+  "final_patch_hash": "87fdc0e1fc28991b5c40ac864ec694d55c2cdf3cc3554655c9fefcff16ce58af",
+  "final_patch_path": "/home/slt/ReachPatch/Code/experiments/reachavoid_51_20260823c/runs/django__django-11905/final.patch",
+  "final_patch_sha256": "c0e34d0e36e078fb74af85c8c72920841827f72aae31b09a1f9e041d41960700",
+  "implementation_hash": "b233fab54ae79032b0c29baf1e2c6f5c50ea7d4120a3a96553cd8ca94f33811c",
+  "instance_id": "django__django-11905",
+  "p0_patch_hash": "87fdc0e1fc28991b5c40ac864ec694d55c2cdf3cc3554655c9fefcff16ce58af",
+  "p0_patch_path": "/home/slt/ReachPatch/Code/experiments/reachavoid_51_20260823c/runs/django__django-11905/p0.patch",
+  "p0_patch_sha256": "c0e34d0e36e078fb74af85c8c72920841827f72aae31b09a1f9e041d41960700",
+  "public_dataset_sha256": "516415e9fadba54cf94239ef5c29b1233f214427d8250b4323058e311db228e3",
+  "run_root": "/home/slt/ReachPatch/Code/experiments/reachavoid_51_20260823c/runs/django__django-11905",
+  "schema": "reachpatch-51-reach-avoid-v2",
+  "status": "BEST_EFFORT_FRONTIER_EXHAUSTED"
+}

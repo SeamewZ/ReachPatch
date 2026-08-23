@@ -13,6 +13,7 @@ from typing import Any
 from reachpatch.execution.worktree import (
     apply_patch_action, apply_unified_diff, diff_between,
 )
+from reachpatch.execution.trace import run_trace
 from reachpatch.models.base import stable_id
 from reachpatch.models.graphs import ProgramEdgeKind
 from reachpatch.models.reach_avoid import ReachAvoidState, RepairObjective
@@ -31,7 +32,9 @@ class RepairToolExecutor:
         self.objective = objective
         self.finished = False
         self.finish_summary = ""
-        self.allowed_commands = set(objective.reproduction_commands)
+        self.allowed_commands = set(objective.reproduction_commands) | {
+            tuple(item.command) for item in objective.validation_obligations
+        }
         self._indexed_source_nodes: dict[str, dict[str, Any]] = {}
         self._read_intervals: dict[str, list[tuple[int, int]]] = {}
         self._repository_index: RepositoryIndex | None = None
@@ -46,6 +49,15 @@ class RepairToolExecutor:
             rendered = value.to_dict()
             return dict(rendered) if isinstance(rendered, dict) else {}
         return {}
+
+    @staticmethod
+    def _stable_observation(value: Any) -> dict[str, Any]:
+        rendered = RepairToolExecutor._observation_dict(value)
+        return {
+            key: rendered[key] for key in
+            ("status", "return_code", "stdout", "stderr", "exception", "value")
+            if key in rendered
+        }
 
     @staticmethod
     def _observations_match(expected: Any, current: dict[str, Any]) -> bool | None:
@@ -78,7 +90,7 @@ class RepairToolExecutor:
             for packet in self.objective.counterexamples:
                 if packet.oracle_authority not in {"A", "B", "C"}:
                     continue
-                expected = self._observation_dict(packet.baseline_observation)
+                expected = self._stable_observation(packet.baseline_observation)
                 if self._observations_match(expected, expected) is None:
                     continue
                 command = tuple(map(str, packet.reproduction_command))
@@ -102,7 +114,7 @@ class RepairToolExecutor:
             cell = self.state.graph_stack.challenge_graph.cells.get(challenge_id)
             if cell is None or cell.patch_hash != self.state.graph_stack.patch_hash:
                 continue
-            expected = self._observation_dict(evidence.get("actual"))
+            expected = self._stable_observation(evidence.get("actual"))
             if self._observations_match(expected, expected) is None:
                 continue
             command = tuple(map(str, cell.execution_scenario.command))
@@ -116,6 +128,23 @@ class RepairToolExecutor:
                 "oracle_id": str(evidence.get("oracle_id", "")),
                 "oracle_authority": str(evidence.get("oracle_authority", "")),
                 "expected_relation": str(evidence.get("expected", "")),
+                "expected_observation": expected,
+            })
+        for obligation in self.objective.validation_obligations:
+            if obligation.authority not in {"A", "B", "C"}:
+                continue
+            command = tuple(map(str, obligation.command))
+            if command not in self.allowed_commands:
+                self.allowed_commands.add(command)
+            expected = self._stable_observation(obligation.expected_observation)
+            specs.setdefault(command, []).append({
+                "validation_id": obligation.validation_id,
+                "evidence_kind": obligation.role,
+                "evidence_id": obligation.validation_id,
+                "requirement_id": obligation.requirement_id,
+                "oracle_id": obligation.oracle_id,
+                "oracle_authority": obligation.authority,
+                "expected_relation": obligation.expected_relation,
                 "expected_observation": expected,
             })
         return {
@@ -443,6 +472,78 @@ class RepairToolExecutor:
             Path(self.state.working_checkpoint.snapshot_tree), self.tree,
         ).to_dict()
 
+    def inspect_frontier(self, frontier_id: str) -> dict[str, Any]:
+        frontier = self.state.repair_frontiers.get(frontier_id)
+        if frontier is None and self.objective.selected_frontier is not None:
+            if self.objective.selected_frontier.frontier_id == frontier_id:
+                frontier = self.objective.selected_frontier
+        if frontier is None:
+            raise KeyError(frontier_id)
+        return frontier.to_dict()
+
+    def inspect_requirement(self, requirement_id: str) -> dict[str, Any]:
+        leaf = self.state.graph_stack.requirement_graph.leaves.get(requirement_id)
+        if leaf is None:
+            raise KeyError(requirement_id)
+        return leaf.to_dict()
+
+    def inspect_binding(self, binding_id: str) -> dict[str, Any]:
+        binding = self.state.graph_stack.binding_graph.units.get(binding_id)
+        if binding is None:
+            raise KeyError(binding_id)
+        return binding.to_dict()
+
+    def inspect_program_slice(self, slice_id: str) -> dict[str, Any]:
+        graph = self.state.graph_stack.program_graph
+        node = graph.nodes.get(slice_id)
+        if node is not None:
+            return node.to_dict()
+        cut = graph.causal_cuts.get(slice_id)
+        if cut is not None:
+            return cut.to_dict()
+        for item in self.objective.editable_source_slices:
+            if item.get("path") == slice_id or item.get("slice_id") == slice_id:
+                return item
+        raise KeyError(slice_id)
+
+    def write_probe(self, name: str, source: str) -> dict[str, Any]:
+        """Write an isolated, AST-checked probe; never project source."""
+        if not re.fullmatch(r"[A-Za-z0-9_.-]+", name):
+            raise ValueError("invalid probe name")
+        probe_root = self.state.run_root / "probes"
+        probe_root.mkdir(parents=True, exist_ok=True)
+        path = (probe_root / name).with_suffix(".py")
+        tree = ast.parse(source, filename=str(path))
+        forbidden = {ast.Import, ast.ImportFrom}
+        for node in ast.walk(tree):
+            if isinstance(node, forbidden):
+                modules = [alias.name.split(".", 1)[0] for alias in node.names]
+                if any(module in {"os", "subprocess", "shutil", "socket", "pathlib"} for module in modules):
+                    raise ValueError("probe imports a forbidden module")
+            if isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id in {"eval", "exec", "open", "__import__"}:
+                raise ValueError("probe contains a forbidden call")
+        path.write_text(source, encoding="utf-8")
+        return {"probe_id": stable_id("probe", name, source), "path": str(path), "validated": True}
+
+    def run_probe(self, command: tuple[str, ...] | list[str], *, cwd: str = ".", timeout_seconds: float = 60.0, tree: str = "working") -> dict[str, Any]:
+        normalized = tuple(map(str, command))
+        selected_tree = self.state.base_repository if tree == "baseline" else self.tree
+        trace = run_trace(selected_tree, normalized, cwd=cwd, timeout_seconds=timeout_seconds)
+        return trace.to_dict()
+
+    def register_observation_contract(self, contract: dict[str, Any]) -> dict[str, Any]:
+        contract_id = stable_id("observation-contract", contract)
+        destination = self.state.run_root / "observation_contracts.jsonl"
+        with destination.open("a", encoding="utf-8") as handle:
+            handle.write(json.dumps({"contract_id": contract_id, **contract}, sort_keys=True, default=str) + "\n")
+        return {"contract_id": contract_id, "contract": contract}
+
+    def run_validation(self, validation_id: str) -> dict[str, Any]:
+        obligation = next((item for item in self.objective.validation_obligations if item.validation_id == validation_id), None)
+        if obligation is None:
+            raise KeyError(validation_id)
+        return self.run_allowed_public_check(obligation.command)
+
     def _failed_patch_context(self, patch: str) -> str:
         contexts: list[str] = []
         current_path: str | None = None
@@ -595,34 +696,36 @@ class RepairToolExecutor:
         normalized = tuple(map(str, command))
         if normalized not in self.allowed_commands:
             raise ValueError("command is not grounded in the RepairObjective")
-        try:
-            patch_hash = diff_between(self.state.base_repository, self.tree).patch_hash
-            environment = os.environ.copy()
-            environment["PYTHONPYCACHEPREFIX"] = str(
-                self.state.run_root / "repair_bytecode_cache" / patch_hash
-            )
-            result = subprocess.run(
-                normalized, cwd=self.tree, text=True, stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE, timeout=120, check=False,
-                env=environment,
-            )
-            current = {
-                "status": "PASS" if result.returncode == 0 else "FAIL",
-                "return_code": result.returncode,
-                "stdout": result.stdout,
-                "stderr": result.stderr,
-                "exception": None,
-                "value": None,
-            }
-        except subprocess.TimeoutExpired as exc:
-            current = {
-                "status": "UNKNOWN",
-                "return_code": None,
-                "stdout": (exc.stdout or "") if isinstance(exc.stdout, str) else "",
-                "stderr": (exc.stderr or "") if isinstance(exc.stderr, str) else "",
-                "exception": "TIMEOUT",
-                "value": None,
-            }
+        spec = next((
+            item for item in self.objective.validation_obligations
+            if tuple(item.command) == normalized
+        ), None)
+        cwd = spec.cwd if spec is not None else "."
+        patch_hash = diff_between(self.state.base_repository, self.tree).patch_hash
+        env_values = dict(spec.environment) if spec is not None else {}
+        env_values["PYTHONPYCACHEPREFIX"] = str(
+            self.state.run_root / "repair_bytecode_cache" / patch_hash
+        )
+        environment = tuple(env_values.items())
+        timeout = float(spec.timeout_seconds) if spec is not None else 120.0
+        trace = run_trace(
+            self.tree, normalized, cwd=cwd, environment=environment,
+            timeout_seconds=timeout, trace_enabled=True,
+        )
+        current = {
+            "status": trace.observation.status.value,
+            "return_code": trace.observation.return_code,
+            "stdout": trace.observation.stdout,
+            "stderr": trace.observation.stderr,
+            "exception": trace.observation.exception,
+            "value": trace.observation.value,
+            "first_project_frame": trace.first_project_frame,
+            "executed_path_ids": trace.executed_path_ids,
+            "backend": "shared-executor",
+            "cwd": cwd,
+            "environment": environment,
+            "timeout_seconds": timeout,
+        }
         validations = []
         for spec in self._validation_specs().get(normalized, ()):
             matched = self._observations_match(
@@ -689,6 +792,17 @@ class RepairToolExecutor:
                 "previously rolled back from this working parent; apply a materially "
                 "different causal edit before finishing"
             )
+        validation_tree = self.state.run_root / "revision_validation_tree"
+        if validation_tree.exists():
+            shutil.rmtree(validation_tree)
+        from reachpatch.execution.worktree import copy_source_tree
+        copy_source_tree(self.state.base_repository, validation_tree)
+        try:
+            apply_unified_diff(validation_tree, cumulative.canonical_diff)
+        except RuntimeError as exc:
+            shutil.rmtree(validation_tree, ignore_errors=True)
+            raise RuntimeError("finish_revision rejects a cumulative patch that cannot apply: " + str(exc)) from exc
+        shutil.rmtree(validation_tree, ignore_errors=True)
         validation = self.validation_status()
         if validation["pending_count"]:
             raise RuntimeError(
@@ -728,9 +842,18 @@ class RepairToolExecutor:
             "search_symbol": self.search_symbol,
             "inspect_callers": self.inspect_callers,
             "inspect_trace": self.inspect_trace,
+            "inspect_frontier": self.inspect_frontier,
+            "inspect_requirement": self.inspect_requirement,
+            "inspect_binding": self.inspect_binding,
+            "inspect_program_slice": self.inspect_program_slice,
             "inspect_diff": self.inspect_diff,
+            "inspect_incremental_diff": self.inspect_incremental_diff,
             "apply_patch": self.apply_patch,
             "run_allowed_public_check": self.run_allowed_public_check,
+            "write_probe": self.write_probe,
+            "run_probe": self.run_probe,
+            "register_observation_contract": self.register_observation_contract,
+            "run_validation": self.run_validation,
             "finish_revision": self.finish_revision,
         }
         if name not in functions:
@@ -749,8 +872,17 @@ TOOL_SCHEMAS = (
     {"type": "function", "function": {"name": "search_symbol", "parameters": {"type": "object", "properties": {"symbol": {"type": "string"}}, "required": ["symbol"]}}},
     {"type": "function", "function": {"name": "inspect_callers", "parameters": {"type": "object", "properties": {"symbol_id": {"type": "string"}}, "required": ["symbol_id"]}}},
     {"type": "function", "function": {"name": "inspect_trace", "parameters": {"type": "object", "properties": {"trace_bundle_id": {"type": "string"}}, "required": ["trace_bundle_id"]}}},
+    {"type": "function", "function": {"name": "inspect_frontier", "parameters": {"type": "object", "properties": {"frontier_id": {"type": "string"}}, "required": ["frontier_id"]}}},
+    {"type": "function", "function": {"name": "inspect_requirement", "parameters": {"type": "object", "properties": {"requirement_id": {"type": "string"}}, "required": ["requirement_id"]}}},
+    {"type": "function", "function": {"name": "inspect_binding", "parameters": {"type": "object", "properties": {"binding_id": {"type": "string"}}, "required": ["binding_id"]}}},
+    {"type": "function", "function": {"name": "inspect_program_slice", "parameters": {"type": "object", "properties": {"slice_id": {"type": "string"}}, "required": ["slice_id"]}}},
     {"type": "function", "function": {"name": "inspect_diff", "parameters": {"type": "object", "properties": {}}}},
+    {"type": "function", "function": {"name": "inspect_incremental_diff", "parameters": {"type": "object", "properties": {}}}},
     {"type": "function", "function": {"name": "apply_patch", "parameters": {"type": "object", "properties": {"patch": {"type": "string"}}, "required": ["patch"]}}},
     {"type": "function", "function": {"name": "run_allowed_public_check", "parameters": {"type": "object", "properties": {"command": {"type": "array", "items": {"type": "string"}}}, "required": ["command"]}}},
+    {"type": "function", "function": {"name": "write_probe", "parameters": {"type": "object", "properties": {"name": {"type": "string"}, "source": {"type": "string"}}, "required": ["name", "source"]}}},
+    {"type": "function", "function": {"name": "run_probe", "parameters": {"type": "object", "properties": {"command": {"type": "array", "items": {"type": "string"}}, "cwd": {"type": "string"}, "timeout_seconds": {"type": "number"}, "tree": {"type": "string"}}, "required": ["command"]}}},
+    {"type": "function", "function": {"name": "register_observation_contract", "parameters": {"type": "object", "properties": {"contract": {"type": "object"}}, "required": ["contract"]}}},
+    {"type": "function", "function": {"name": "run_validation", "parameters": {"type": "object", "properties": {"validation_id": {"type": "string"}}, "required": ["validation_id"]}}},
     {"type": "function", "function": {"name": "finish_revision", "parameters": {"type": "object", "properties": {"summary": {"type": "string"}, "mechanism": {"type": "string"}}, "required": ["summary"]}}},
 )

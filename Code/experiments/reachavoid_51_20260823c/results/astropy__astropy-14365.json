@@ -1,0 +1,71 @@
+{
+  "completed_at": "2026-08-23T04:55:30.906013+00:00",
+  "component_evidence": {
+    "binding_graph": {
+      "gap_count": 20,
+      "objective_binding_ids": [],
+      "participated": false,
+      "terminal_execution_confirmed_binding_ids": [],
+      "transition_confirmed_binding_ids": [],
+      "unit_count": 0
+    },
+    "challenge_graph": {
+      "cell_count": 0,
+      "counterexamples_closed": [],
+      "counterexamples_opened": [],
+      "executed_challenge_ids": [],
+      "execution_bundle_count": 0,
+      "participated": false,
+      "selected_challenge_ids": [],
+      "terminal_status_counts": {}
+    },
+    "program_graph": {
+      "causal_cut_count": 0,
+      "dynamic_edge_count": 0,
+      "edge_count": 1997,
+      "impact_risk_count": 5,
+      "node_count": 1121,
+      "objective_causal_cut_ids": [],
+      "participated": false,
+      "path_class_count": 118
+    },
+    "reach_avoid": {
+      "causal_progress_count": 0,
+      "commit_count": 0,
+      "decision_counts": {},
+      "frontier_count": 0,
+      "frontier_kind_counts": {},
+      "frontier_status_counts": {},
+      "participated": false,
+      "provisional_count": 0,
+      "rollback_count": 0,
+      "strict_progress_count": 0,
+      "transition_count": 0
+    },
+    "requirement_graph": {
+      "leaf_count": 20,
+      "objective_requirement_ids": [],
+      "participated": false,
+      "partition_count": 96,
+      "requirements_improved": []
+    }
+  },
+  "duration_seconds": 395.88793830387294,
+  "execution_backend": {
+    "image": "swebench/sweb.eval.x86_64.astropy_1776_astropy-14365:latest",
+    "kind": "DEPENDENCY_IMAGE"
+  },
+  "final_checkpoint_id": "checkpoint-35075cd1ebd9fd6db6470d3f",
+  "final_patch_hash": "4b637ba01f22825d5da92e018fd0a37b24d546ac423d63b465aa77d74f598ec4",
+  "final_patch_path": "/home/slt/ReachPatch/Code/experiments/reachavoid_51_20260823c/runs/astropy__astropy-14365/final.patch",
+  "final_patch_sha256": "15f6826ba9ab328f40c75caaf49d22eeb28dd8fefc87b45a0719eecccdd515a7",
+  "implementation_hash": "b233fab54ae79032b0c29baf1e2c6f5c50ea7d4120a3a96553cd8ca94f33811c",
+  "instance_id": "astropy__astropy-14365",
+  "p0_patch_hash": "4b637ba01f22825d5da92e018fd0a37b24d546ac423d63b465aa77d74f598ec4",
+  "p0_patch_path": "/home/slt/ReachPatch/Code/experiments/reachavoid_51_20260823c/runs/astropy__astropy-14365/p0.patch",
+  "p0_patch_sha256": "15f6826ba9ab328f40c75caaf49d22eeb28dd8fefc87b45a0719eecccdd515a7",
+  "public_dataset_sha256": "516415e9fadba54cf94239ef5c29b1233f214427d8250b4323058e311db228e3",
+  "run_root": "/home/slt/ReachPatch/Code/experiments/reachavoid_51_20260823c/runs/astropy__astropy-14365",
+  "schema": "reachpatch-51-reach-avoid-v2",
+  "status": "BEST_EFFORT_FRONTIER_EXHAUSTED"
+}

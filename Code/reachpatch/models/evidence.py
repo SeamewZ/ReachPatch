@@ -39,6 +39,77 @@ class ObservationContract(SerializableRecord):
     observable: str = "return"
     comparator: str = "equals"
 
+    _COMPARATORS = {
+        "EXIT_ZERO", "EQUALS", "NOT_EQUALS", "RAISES",
+        "NOT_RAISES", "TYPE_IS", "CONTAINS", "ORDER_EQUALS",
+        "LENGTH_EQUALS", "HAS_ATTR", "STATE_DELTA_EQUALS",
+        "RELATION_HOLDS",
+    }
+
+    @property
+    def normalized_comparator(self) -> str:
+        value = (self.comparator or "EQUALS").replace("-", "_").replace(" ", "_").upper()
+        aliases = {"EQUAL": "EQUALS", "EXIT0": "EXIT_ZERO", "NOT_EQUAL": "NOT_EQUALS"}
+        return aliases.get(value, value if value in self._COMPARATORS else "RELATION_HOLDS")
+
+    @property
+    def contract_id(self) -> str:
+        return content_hash(self.normalized())
+
+    def normalized(self) -> dict[str, Any]:
+        relation = " ".join((self.relation or "").split()).casefold()
+        return {
+            "comparator": self.normalized_comparator,
+            "relation": relation,
+            "observable": " ".join((self.observable or "return").split()).casefold(),
+            "expected": _normalize_observation_value(self.expected),
+        }
+
+    def matches(self, observation: Any) -> bool:
+        """Compare a concrete observation without free-text equality."""
+        value = observation
+        if isinstance(observation, RunObservation):
+            value = observation.value if observation.value is not None else observation.to_dict()
+            if self.normalized_comparator == "EXIT_ZERO":
+                return observation.return_code == 0 and observation.status is OutcomeStatus.PASS
+            if self.normalized_comparator in {"RAISES", "NOT_RAISES"}:
+                raised = bool(observation.exception) or observation.status is OutcomeStatus.FAIL
+                return raised if self.normalized_comparator == "RAISES" else not raised
+        comparator = self.normalized_comparator
+        expected = self.expected
+        if comparator in {"EQUALS", "ORDER_EQUALS", "STATE_DELTA_EQUALS"}:
+            return _normalize_observation_value(value) == _normalize_observation_value(expected)
+        if comparator == "NOT_EQUALS":
+            return _normalize_observation_value(value) != _normalize_observation_value(expected)
+        if comparator == "TYPE_IS":
+            return type(value).__name__ == str(expected) or type(value).__qualname__ == str(expected)
+        if comparator == "CONTAINS":
+            try:
+                return expected in value
+            except TypeError:
+                return False
+        if comparator == "LENGTH_EQUALS":
+            try:
+                return len(value) == int(expected)
+            except (TypeError, ValueError):
+                return False
+        if comparator == "HAS_ATTR":
+            return hasattr(value, str(expected))
+        # RELATION_HOLDS is intentionally conservative.  A relation supplied
+        # by an authority is executable only when the caller provides a
+        # boolean observation; text is never treated as proof.
+        return value is True
+
+
+def _normalize_observation_value(value: Any) -> Any:
+    if isinstance(value, dict):
+        return {str(k): _normalize_observation_value(v) for k, v in sorted(value.items(), key=lambda item: str(item[0]))}
+    if isinstance(value, (list, tuple)):
+        return [_normalize_observation_value(item) for item in value]
+    if isinstance(value, str):
+        return " ".join(value.split()).casefold()
+    return value
+
 
 @dataclass(frozen=True, slots=True)
 class ExceptionContract(SerializableRecord):
@@ -925,6 +996,23 @@ class CounterexamplePacket(SerializableRecord):
     protected_target_ids: tuple[str, ...]
     protected_preservation_ids: tuple[str, ...]
     suggested_action_families: tuple[str, ...]
+    # Structured execution evidence used by RepairFrontier and DeepSeek.
+    frontier_kind: str | None = None
+    frontier_id: str | None = None
+    observation_projection: Any = None
+    command_cwd: str = "."
+    environment: tuple[tuple[str, str], ...] = ()
+    backend: str = "shared-executor"
+    stdout: str = ""
+    stderr: str = ""
+    first_project_frame: str | None = None
+    binding_path_hit: bool = False
+    changed_hunk_hit: bool = False
+    changed_hunks: tuple[dict[str, Any], ...] = ()
+    causal_cuts: tuple[dict[str, Any], ...] = ()
+    protected_behavior: tuple[str, ...] = ()
+    failure_kind: str | None = None
+    stability_evidence: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass(frozen=True, slots=True)

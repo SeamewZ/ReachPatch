@@ -10,7 +10,8 @@ from .evidence import (
     ActualDiff, ConfirmedFailure, CounterexamplePacket, FailureHistory,
     LockedCheckSet, ObservationBundle, PairedTraceBundle,
 )
-from .graphs import GraphStack
+from .graphs import GraphBudget, GraphStack
+from reachpatch.reach_avoid.frontier import RepairFrontier
 
 
 class Decision(StrEnum):
@@ -122,6 +123,33 @@ class RepairObjective(SerializableRecord):
     forbidden_mechanisms: tuple[dict[str, Any], ...]
     editable_source_slices: tuple[dict[str, Any], ...]
     expected_next_effects: tuple[str, ...]
+    # Atomic validation records replace the retired parallel command/input/oracle
+    # arrays.  The legacy fields above remain readable for old checkpoints, but
+    # the controller and DeepSeek tools consume this tuple exclusively.
+    validation_obligations: tuple["ValidationObligation", ...] = ()
+    selected_frontier: RepairFrontier | None = None
+    working_patch_hash: str = ""
+    graph_revision: int = 0
+
+
+@dataclass(frozen=True, slots=True)
+class ValidationObligation(SerializableRecord):
+    validation_id: str
+    role: str
+    authority: str
+    command: tuple[str, ...]
+    cwd: str
+    environment: dict[str, str]
+    timeout_seconds: int
+    backend: str
+    concrete_input: Any
+    input_derivation: str
+    oracle_id: str | None
+    expected_relation: str | None
+    expected_observation: Any
+    requirement_id: str
+    binding_id: str | None = None
+    challenge_id: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -335,6 +363,11 @@ class ReachAvoidState(SerializableRecord):
     termination_status: str | None
     execution_budget_seconds: float
     remaining_wall_seconds: float
+    repair_frontiers: dict[str, RepairFrontier] = field(default_factory=dict)
+    graph_budget: GraphBudget = field(default_factory=GraphBudget)
+    challenge_attempts: dict[str, int] = field(default_factory=dict)
+    transition_counts: dict[str, int] = field(default_factory=dict)
+    last_mechanical_result: MechanicalResult | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -378,3 +411,6 @@ class CheckpointRuntimeState(SerializableRecord):
     termination_status: str | None
     execution_budget_seconds: float
     remaining_wall_seconds: float
+    repair_frontiers: dict[str, RepairFrontier] = field(default_factory=dict)
+    challenge_attempts: dict[str, int] = field(default_factory=dict)
+    transition_counts: dict[str, int] = field(default_factory=dict)

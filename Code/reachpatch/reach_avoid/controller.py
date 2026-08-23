@@ -26,16 +26,18 @@ from reachpatch.models.evidence import (
 from reachpatch.models.graphs import ContextRequest, GraphBudget, empty_graph_stack
 from reachpatch.models.reach_avoid import (
     CheckpointEvidence, GeneratorSession, PerformanceRecord, ReachAvoidPhase,
-    ReachAvoidState, RepairObjective, StateCheckpoint, TerminalResult,
+    ReachAvoidState, RepairObjective, StateCheckpoint, TerminalResult, ChallengeSelection,
+)
+from reachpatch.reach_avoid.frontier import (
+    FrontierStatus, NextActionKind, RepairFrontierKind, derive_repair_frontiers,
+    select_next_action,
 )
 from reachpatch.repair.objective import compile_repair_objective
 from reachpatch.requirement_graph.builder import build_requirement_graph
 from reachpatch.program_graph import RepositoryIndex, clear_program_graph_caches
 
-from .challenge_player import select_challenge_batch
 from .checkpoint import (
     CheckpointStore, capture_current_graph_checkpoint, capture_initial_checkpoint,
-    restore_checkpoint, select_best_checkpoint,
 )
 from .gates import evaluate_reach
 from .graph_stack import (
@@ -54,7 +56,9 @@ class ReachAvoidConfig:
     max_challenge_rounds: int = 24
     max_challenge_batch: int = 6
     execution_budget_seconds: float = 3600.0
-    graph_budget: GraphBudget = field(default_factory=GraphBudget)
+    graph_budget: GraphBudget = field(default_factory=lambda: GraphBudget(
+        max_files=8, max_nodes=1500, max_edges=6000, direct_caller_depth=1,
+    ))
 
     def __post_init__(self) -> None:
         if not 1 <= self.max_real_patch_revisions <= 8:
@@ -65,8 +69,8 @@ class ReachAvoidConfig:
             raise ValueError("max_challenge_attempts_per_frontier must be 3")
         if not 1 <= self.max_challenge_batch <= 6:
             raise ValueError("max_challenge_batch must be between 1 and 6")
-        if self.max_challenge_rounds != 24:
-            raise ValueError("max_challenge_rounds must be 24")
+        if not 1 <= self.max_challenge_rounds <= 24:
+            raise ValueError("max_challenge_rounds must be between 1 and 24")
 
 
 @dataclass(slots=True)
@@ -165,6 +169,7 @@ class ReachAvoidController:
             termination_status=None,
             execution_budget_seconds=self.config.execution_budget_seconds,
             remaining_wall_seconds=self.config.execution_budget_seconds,
+            graph_budget=self.config.graph_budget,
         )
         store = CheckpointStore(root)
         self._contexts[run_id] = _RunContext(instance, public, requirement, store)
@@ -461,6 +466,7 @@ class ReachAvoidController:
             revision=0,
         )
         mechanical = context.initial_mechanical
+        state.last_mechanical_result = mechanical
         cells = stack.challenge_graph.active_cells()
         evidence = CheckpointEvidence(
             mechanical_pass=mechanical.passed,
@@ -492,6 +498,7 @@ class ReachAvoidController:
         context.initial_tree = None
         discard_bootstrap_tree(state.run_root / "initial_working", state.run_root)
         discard_bootstrap_tree(state.run_root / "bootstrap_working", state.run_root)
+        self._refresh_repair_frontiers(state)
 
     def _refresh_confirmed_failures(self, state: ReachAvoidState) -> None:
         cells = state.graph_stack.challenge_graph.cells
@@ -512,16 +519,6 @@ class ReachAvoidController:
             history = state.failure_history.get(failure.failure_signature)
             if history is not None:
                 history.closed = not failure.open
-
-    def _select_failure(self, state: ReachAvoidState):
-        values = [
-            item for item in state.confirmed_failures
-            if item.open and item.patch_hash == state.graph_stack.patch_hash
-        ]
-        return min(values, key=lambda item: (
-            not item.hard, item.priority, item.requirement_id,
-            item.causal_component_id, item.failure_id,
-        )) if values else None
 
     def _apply_challenge_result(self, state: ReachAvoidState, result) -> None:
         state.graph_stack = result.updated_graph_stack
@@ -559,12 +556,41 @@ class ReachAvoidController:
         state.checkpoint_history[checkpoint.checkpoint_id] = checkpoint
         if checkpoint.evidence.rank() > state.best_checkpoint.evidence.rank():
             state.best_checkpoint = checkpoint
+        self._refresh_repair_frontiers(state)
+
+    def _refresh_repair_frontiers(self, state: ReachAvoidState) -> None:
+        """Synchronize RepairFrontier state after every evidence/graph event."""
+        context = self._contexts[state.run_id]
+        previous = state.repair_frontiers
+        mechanical = state.last_mechanical_result
+        derived = derive_repair_frontiers(
+            state, state.graph_stack.requirement_graph, state.graph_stack.program_graph,
+            state.graph_stack.binding_graph, state.graph_stack.challenge_graph,
+            state.observations, mechanical,
+        )
+        # Preserve closure/exhaustion evidence across incremental graph rebuilds.
+        for frontier_id, old in previous.items():
+            current = derived.get(frontier_id)
+            if current is None:
+                if old.patch_hash == state.graph_stack.patch_hash:
+                    derived[frontier_id] = replace(old, status=FrontierStatus.CLOSED,
+                                                   closure_evidence=old.closure_evidence + ({"event": "evidence-change"},))
+            elif old.status in {FrontierStatus.CLOSED, FrontierStatus.EXHAUSTED, FrontierStatus.SUPERSEDED}:
+                derived[frontier_id] = replace(current, status=old.status,
+                                               closure_evidence=old.closure_evidence)
+        state.repair_frontiers = derived
+
+    def _action_selection(self, state: ReachAvoidState):
+        self._refresh_repair_frontiers(state)
+        return select_next_action(
+            state, max_challenge_rounds=self.config.max_challenge_rounds,
+        )
 
     def _expand_binding_frontier(self, state: ReachAvoidState, selection) -> None:
         requests = []
-        gaps = {gap.requirement_id: gap for gap in state.graph_stack.binding_graph.gaps}
+        gaps = {gap.gap_id: gap for gap in state.graph_stack.binding_graph.gaps}
         for requirement_id, action in selection.recovery_actions:
-            gap = gaps.get(requirement_id)
+            gap = next((item for item in gaps.values() if item.requirement_id == requirement_id), None)
             symbols = gap.attempted_symbols if gap else ()
             for symbol in symbols[:3] or (requirement_id,):
                 requests.append(ContextRequest(
@@ -607,22 +633,27 @@ class ReachAvoidController:
         initial: bool,
         duration_seconds: float,
     ) -> None:
+        event = {
+            "attempt_id": stable_id("generator-attempt", state.run_id, state.generator_attempt_count, result.result_id),
+            "initial": initial,
+            "objective_kind": objective_kind,
+            "result_id": result.result_id,
+            "result_kind": "PENDING_TRANSITION" if not initial else "INITIAL",
+            "source_patch_hash": state.graph_stack.patch_hash,
+            "changed_files": tuple(),
+            "has_new_nonempty_diff": result.has_new_nonempty_diff,
+            "incremental_diff_hash": stable_id("generator-incremental-diff", result.incremental_diff),
+            "mechanism": result.mechanism,
+            "summary": result.summary[-4000:],
+            "error_kind": result.error_kind,
+            "structure_recovery_attempted": result.structure_recovery_attempted,
+            "duration_seconds": duration_seconds,
+        }
+        state.generator_session.attempt_history.append(event)
         path = state.run_root / "generator_attempts.jsonl"
         with path.open("a", encoding="utf-8") as handle:
-            handle.write(canonical_json({
+            handle.write(canonical_json(event | {
                 "attempt": state.generator_attempt_count,
-                "initial": initial,
-                "objective_kind": objective_kind,
-                "result_id": result.result_id,
-                "has_new_nonempty_diff": result.has_new_nonempty_diff,
-                "incremental_diff_hash": stable_id(
-                    "generator-incremental-diff", result.incremental_diff,
-                ),
-                "mechanism": result.mechanism,
-                "summary": result.summary[-4000:],
-                "error_kind": result.error_kind,
-                "structure_recovery_attempted": result.structure_recovery_attempted,
-                "duration_seconds": duration_seconds,
             }) + "\n")
 
     @staticmethod
@@ -642,6 +673,8 @@ class ReachAvoidController:
         ), None)
         if pending is None:
             return
+        failure_id = getattr(failure, "failure_id", getattr(failure, "frontier_id", ""))
+        failure_signature = getattr(failure, "failure_signature", failure_id)
         pending.update({
             "trial_patch_hash": trial.cumulative_diff.patch_hash,
             "cumulative_diff_hash": stable_id(
@@ -663,8 +696,8 @@ class ReachAvoidController:
                 if trial.decision.value == "ROLLBACK" else ()
             ),
             "remaining_failure_signature": (
-                None if failure.failure_id in trial.evidence.confirmed_failures_closed
-                else failure.failure_signature
+                None if failure_id in trial.evidence.confirmed_failures_closed
+                else failure_signature
             ),
             "result_kind": (
                 "REJECTED_BY_TRANSITION"
@@ -677,7 +710,7 @@ class ReachAvoidController:
         if trial.decision.value != "ROLLBACK":
             return
         history = state.failure_history.setdefault(
-            failure.failure_signature, FailureHistory(failure.failure_signature),
+            failure_signature, FailureHistory(failure_signature),
         )
         mechanism_record = {
             key: pending.get(key)
@@ -793,14 +826,22 @@ class ReachAvoidController:
                 context.initial_result = None
                 context.initial_tree = None
                 context.initial_mechanical = None
+                # A missing/empty p0 is not a terminal case.  Keep the same
+                # bootstrap tree and retry the DeepSeek call; no final patch
+                # may be emitted before a non-empty candidate exists.
+                if state.no_progress_generator_attempts >= self.config.max_no_progress_generator_attempts:
+                    # Exhausting the bounded initial-generation recovery budget
+                    # is an external generator failure.  Seal the unchanged
+                    # bootstrap snapshot without making a third model call.
+                    # The bootstrap tree is deliberately retained for audit
+                    # and for the terminal result's single current patch.
+                    return self._output_single_patch(
+                        state, state.working_checkpoint,
+                        "GENERATOR_BLOCKED_EXTERNAL",
+                    )
                 discard_bootstrap_tree(
                     state.run_root / "initial_working", state.run_root,
                 )
-                if (
-                    state.no_progress_generator_attempts
-                    >= self.config.max_no_progress_generator_attempts
-                ):
-                    return self._seal_current(state, "GENERATOR_BLOCKED_EXTERNAL")
                 continue
             initial_deepseek += time.monotonic() - deepseek_started
             state.no_progress_generator_attempts = 0
@@ -819,8 +860,8 @@ class ReachAvoidController:
             files_reparsed=state.graph_stack.program_graph.files_reparsed,
             symbols_expanded=state.graph_stack.program_graph.symbols_expanded,
         ))
-        if not state.working_checkpoint.evidence.mechanical_pass:
-            return self._seal_current(state, "MECHANICAL_BLOCKED")
+        # Mechanical failures are a first-class RepairFrontier.  They must
+        # stay in the active loop so DeepSeek can repair the current patch.
 
         while state.repair_revision_count < self.config.max_real_patch_revisions:
             state.remaining_wall_seconds = max(
@@ -832,14 +873,12 @@ class ReachAvoidController:
             if reach.reached:
                 return self.seal_reached(state)
             self._refresh_confirmed_failures(state)
-            failure = self._select_failure(state)
-            if state.challenge_round_count >= self.config.max_challenge_rounds:
+            action = self._action_selection(state)
+            if action.kind is NextActionKind.SEAL:
                 return self.seal_best_effort(state, "FRONTIER_EXHAUSTED")
-            if failure is None:
+            if action.kind is NextActionKind.RUN_CHALLENGE:
                 state.phase = ReachAvoidPhase.CHALLENGE
-                selection = select_challenge_batch(state, self.config.max_challenge_batch)
-                if selection.exhausted:
-                    return self.seal_best_effort(state, "FRONTIER_EXHAUSTED")
+                selection = ChallengeSelection((action.challenge_id,), ())
                 state.challenge_round_count += 1
                 if selection.challenge_ids:
                     result = execute_challenge_round(
@@ -867,9 +906,24 @@ class ReachAvoidController:
                     symbols_expanded=state.graph_stack.program_graph.symbols_expanded,
                 ))
                 continue
+            if action.kind is NextActionKind.RECOVER_EVIDENCE:
+                state.phase = ReachAvoidPhase.CHALLENGE
+                frontier = state.repair_frontiers.get(action.frontier_id or "")
+                if frontier is not None:
+                    requirement_id = next(iter(frontier.requirement_ids), "")
+                    selection = ChallengeSelection(
+                        (), ((requirement_id, "EXPAND_DIRECT_CALLER"),),
+                    )
+                    self._expand_binding_frontier(state, selection)
+                    state.challenge_round_count += 1
+                    continue
+                continue
 
             state.phase = ReachAvoidPhase.REPAIR
-            objective = compile_repair_objective(state, failure)
+            frontier = state.repair_frontiers.get(action.frontier_id or "")
+            if frontier is None:
+                continue
+            objective = compile_repair_objective(state, frontier)
             state.current_repair_objective = objective
             self._record_repair_objective(state, objective)
             deepseek_started = time.monotonic()
@@ -903,8 +957,12 @@ class ReachAvoidController:
                 state.challenge_round_count += 1
             state.no_progress_generator_attempts = 0
             state.repair_revision_count += 1
-            self._finalize_generator_attempt(state, failure, trial)
+            self._finalize_generator_attempt(state, frontier, trial)
             apply_transition_decision(state, trial, self._contexts[state.run_id].store)
+            state.last_mechanical_result = (
+                None if trial.decision.value == "ROLLBACK" else trial.evidence.mechanical
+            )
+            self._refresh_repair_frontiers(state)
             trial_program = trial.graph_stack.program_graph
             self._performance(state, PerformanceRecord(
                 revision=state.repair_revision_count,
@@ -930,12 +988,9 @@ class ReachAvoidController:
         return self.seal_best_effort(state, "REVISION_LIMIT")
 
     def _seal_current(self, state: ReachAvoidState, status: str) -> TerminalResult:
-        if state.checkpoint_history:
-            checkpoint = select_best_checkpoint(state.checkpoint_history.values())
-            if checkpoint.checkpoint_id != state.working_checkpoint.checkpoint_id:
-                restore_checkpoint(state, checkpoint, self._contexts[state.run_id].store)
-        else:
-            checkpoint = state.working_checkpoint
+        # Final output is always the single currently accepted working patch.
+        # Historical checkpoints are audit/recovery artifacts, never a selector.
+        checkpoint = state.working_checkpoint
         state.termination_status = status
         return self._output_single_patch(state, checkpoint, status)
 
@@ -947,27 +1002,7 @@ class ReachAvoidController:
         return self._output_single_patch(state, state.working_checkpoint, "REACHED")
 
     def seal_best_effort(self, state: ReachAvoidState, reason: str) -> TerminalResult:
-        checkpoint = select_best_checkpoint(state.checkpoint_history.values())
-        # Checkpoints describe a patch and its four synchronized graphs. The
-        # controller counters describe the run that led here, so selecting an
-        # older best patch must not erase attempts that actually occurred.
-        runtime_counters = (
-            state.repair_revision_count,
-            state.generator_attempt_count,
-            state.challenge_round_count,
-            state.no_progress_generator_attempts,
-            dict(state.frontier_attempts),
-            state.remaining_wall_seconds,
-        )
-        restore_checkpoint(state, checkpoint, self._contexts[state.run_id].store)
-        (
-            state.repair_revision_count,
-            state.generator_attempt_count,
-            state.challenge_round_count,
-            state.no_progress_generator_attempts,
-            state.frontier_attempts,
-            state.remaining_wall_seconds,
-        ) = runtime_counters
+        checkpoint = state.working_checkpoint
         status = f"BEST_EFFORT_{reason}"
         state.termination_status = status
         return self._output_single_patch(state, checkpoint, status)

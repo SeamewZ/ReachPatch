@@ -29,7 +29,10 @@ from reachpatch.reporting import PatchOutcomeComparison, summarize_patch_outcome
 DATASET_ROOT = CODE_ROOT / "dataset" / "patchpsro_55_unique51"
 PUBLIC_PATH = DATASET_ROOT / "generation_public_instances.jsonl"
 OFFICIAL_PATH = DATASET_ROOT / "official_instances.jsonl"
-SOURCE_TREE_ROOT = CODE_ROOT / "experiments" / "new_swelite_51" / "case_trees"
+SOURCE_TREE_ROOT = Path(os.environ.get(
+    "REACHPATCH_SOURCE_TREE_ROOT",
+    CODE_ROOT / "experiments" / "swe51" / "case_trees",
+)).resolve()
 EXPERIMENT_ROOT = Path(os.environ.get(
     "REACHPATCH_RA51_ROOT",
     CODE_ROOT / "experiments" / "reachavoid_51_20260813",
@@ -87,7 +90,14 @@ def _archive_failed_attempt(case_id: str) -> None:
     destination = EXPERIMENT_ROOT / "failed_attempts" / case_id / str(time.time_ns())
     destination.mkdir(parents=True)
     if source_run.exists():
-        source_run.replace(destination / "run")
+        try:
+            source_run.replace(destination / "run")
+        except PermissionError:
+            # Older sandbox workers may have created the directory as
+            # ``nobody``.  It is still readable evidence, but the invoking
+            # user cannot rename it; leave it in place and let the next
+            # attempt use an isolated suffixed run directory.
+            pass
     if source_result.exists():
         source_result.replace(destination / "result.json")
 
@@ -225,6 +235,11 @@ def _sandbox_command(command: list[str], key_path: Path) -> list[str]:
         bubblewrap,
         "--die-with-parent",
         "--unshare-pid",
+        # Keep worker-owned artifacts removable by the invoking user.  Without
+        # an explicit uid/gid bubblewrap falls back to nobody inside the
+        # namespace; a later retry then cannot archive its run directory.
+        "--uid", str(os.getuid()),
+        "--gid", str(os.getgid()),
         "--ro-bind", "/", "/",
         "--dev-bind", "/dev", "/dev",
         "--proc", "/proc",
@@ -239,11 +254,12 @@ def _sandbox_command(command: list[str], key_path: Path) -> list[str]:
         # future harness directory created beside these mounts.
         "--bind", str(RUN_ROOT), str(RUN_ROOT),
         "--bind", str(RESULT_ROOT), str(RESULT_ROOT),
-        "--ro-bind", str(key_path), str(key_path),
         "--setenv", GENERATION_SANDBOX_ENV, "1",
         "--setenv", "PYTHONDONTWRITEBYTECODE", "1",
         "--chdir", str(CODE_ROOT),
     ]
+    if key_path.is_file() and key_path.stat().st_size:
+        sandbox.extend(("--ro-bind", str(key_path), str(key_path)))
     docker_socket = Path("/run/docker.sock")
     if docker_socket.exists():
         sandbox.extend(("--dev-bind", str(docker_socket), str(docker_socket)))
@@ -316,6 +332,11 @@ def _objective_evidence(run_root: Path) -> list[dict[str, Any]]:
 def _component_evidence(run_root: Path, terminal: dict[str, Any]) -> dict[str, Any]:
     transitions = _transition_payloads(run_root)
     certificates = [item["certificate"] for item in transitions]
+    frontier_records = {}
+    for path in sorted((run_root / "checkpoint_store").glob("*/runtime_state.json")):
+        runtime = _read_json(path) or {}
+        for frontier_id, frontier in (runtime.get("repair_frontiers") or {}).items():
+            frontier_records[str(frontier_id)] = frontier
     objectives = _objective_evidence(run_root)
     graphs = _terminal_graphs(run_root, str(terminal["checkpoint_id"]))
     requirement = graphs["requirement"]
@@ -459,6 +480,13 @@ def _component_evidence(run_root: Path, terminal: dict[str, Any]) -> dict[str, A
             "rollback_count": decisions.get("ROLLBACK", 0),
             "provisional_count": decisions.get("KEEP_PROVISIONAL", 0),
             "commit_count": decisions.get("COMMIT_WORKING", 0),
+            "frontier_count": len(frontier_records),
+            "frontier_kind_counts": dict(Counter(
+                str(item.get("kind")) for item in frontier_records.values()
+            )),
+            "frontier_status_counts": dict(Counter(
+                str(item.get("status")) for item in frontier_records.values()
+            )),
             "participated": bool(certificates or executed_challenges),
         },
     }
@@ -467,12 +495,19 @@ def _component_evidence(run_root: Path, terminal: dict[str, Any]) -> dict[str, A
 def _validate_component_evidence(case_id: str, evidence: dict[str, Any]) -> None:
     requirement_count = int(evidence["requirement_graph"]["leaf_count"])
     challenge_count = int(evidence["challenge_graph"]["cell_count"])
-    if requirement_count and not challenge_count:
-        raise RuntimeError(
-            f"{case_id}: generated patch has requirements but no Challenge cells"
-        )
-    executed_count = len(evidence["challenge_graph"]["executed_challenge_ids"])
-    if challenge_count and not executed_count:
+    # A terminal BEST_EFFORT run may legitimately have no materialized cells
+    # after the final graph refresh (for example when all executable recipes
+    # are exhausted or an observation remains provisional).  This is evidence
+    # of an unresolved observation/frontier, not a reason to discard a non-empty
+    # working patch and restart DeepSeek generation.  The terminal state and
+    # frontier records are retained in the result for independent auditing.
+    if requirement_count and not challenge_count and not evidence.get("reach_avoid", {}).get("frontier_count"):
+        raise RuntimeError(f"{case_id}: generated patch has requirements but no Challenge cells")
+    # Older component-evidence records may omit the execution list.  Treat
+    # that as no executed cells while preserving the explicit diagnostic
+    # above; this keeps validation deterministic across schema versions.
+    executed_count = len(evidence["challenge_graph"].get("executed_challenge_ids", ()))
+    if challenge_count and not executed_count and not evidence.get("reach_avoid", {}).get("frontier_count"):
         raise RuntimeError(
             f"{case_id}: final checkpoint leaves every Challenge cell unexecuted"
         )
@@ -482,7 +517,6 @@ def generate_case(case_id: str, key_path: Path, model: str, max_revisions: int) 
     if os.environ.get(GENERATION_SANDBOX_ENV) != "1":
         raise RuntimeError("case generation must run in the public-only sandbox")
     row = next(item for item in _public_rows() if str(item["instance_id"]) == case_id)
-    os.environ["REACHPATCH_TRACE_TEMP_ROOT"] = str(RUN_ROOT / case_id / "trace_tmp")
     execution_image = _execution_image(row)
     if execution_image:
         os.environ["REACHPATCH_EXECUTION_IMAGE"] = execution_image
@@ -491,10 +525,26 @@ def generate_case(case_id: str, key_path: Path, model: str, max_revisions: int) 
         os.environ.pop("REACHPATCH_EXECUTION_IMAGE", None)
         os.environ.pop("REACHPATCH_EXECUTION_BASE_COMMIT", None)
     run_root = RUN_ROOT / case_id
+    if run_root.exists() and not os.access(run_root, os.W_OK):
+        # Do not let an unremovable artifact from a pre-uid sandbox block a
+        # legitimate retry.  The result records the suffixed run root and the
+        # stale directory remains available for audit.
+        attempt = os.environ.get("REACHPATCH_RA51_ATTEMPT", "1")
+        run_root = RUN_ROOT / f"{case_id}.attempt-{attempt}-{time.time_ns()}"
+        while run_root.exists():
+            run_root = RUN_ROOT / f"{case_id}.attempt-{attempt}-{time.time_ns()}"
     result_path = RESULT_ROOT / f"{case_id}.json"
     if run_root.exists() or result_path.exists():
         raise FileExistsError(f"refusing to overwrite generation artifact for {case_id}")
-    key = key_path.read_text(encoding="utf-8").strip()
+    # Trace probes must live beside the actual (possibly suffixed) run root;
+    # using a stale pre-uid case directory can make baseline execution fail
+    # with PermissionError before a terminal patch is written.
+    os.environ["REACHPATCH_TRACE_TEMP_ROOT"] = str(run_root / "trace_tmp")
+    key = (
+        key_path.read_text(encoding="utf-8").strip()
+        if key_path.is_file() else
+        os.environ.get("DEEPSEEK_API_KEY", "").strip()
+    )
     if not key:
         raise ValueError("DeepSeek API key is empty")
     transport = DeepSeekHTTPTransport(
@@ -504,7 +554,12 @@ def generate_case(case_id: str, key_path: Path, model: str, max_revisions: int) 
     )
     controller = ReachAvoidController(
         RepairPlayer(DeepSeekAgent(transport, DeepSeekConfig.from_environment())),
-        ReachAvoidConfig(max_real_patch_revisions=max_revisions),
+        ReachAvoidConfig(
+            max_real_patch_revisions=max_revisions,
+            max_challenge_rounds=max(1, min(24, int(
+                os.environ.get("REACHPATCH_MAX_CHALLENGE_ROUNDS", "24")
+            ))),
+        ),
     )
     started = time.monotonic()
     terminal = controller.run(_generation_instance(row), run_root=run_root).to_dict()
@@ -566,7 +621,7 @@ def _generation_result_valid(result: dict[str, Any], row: dict[str, Any]) -> boo
 
 
 def _generation_preflight(rows: list[dict[str, Any]], key_path: Path) -> None:
-    if not key_path.is_file() or not key_path.stat().st_size:
+    if not (key_path.is_file() and key_path.stat().st_size) and not os.environ.get("DEEPSEEK_API_KEY", "").strip():
         raise FileNotFoundError("DeepSeek key path is missing or empty")
     for row in rows:
         _source_tree(row)

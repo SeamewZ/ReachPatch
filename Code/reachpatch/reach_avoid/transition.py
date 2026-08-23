@@ -14,7 +14,7 @@ from reachpatch.models.base import stable_id
 from reachpatch.models.evidence import (
     ExecutableCheck, PairClassification, PublicEvidence,
 )
-from reachpatch.models.graphs import ChallengeStatus, GraphBudget
+from reachpatch.models.graphs import ChallengeStatus
 from reachpatch.models.reach_avoid import (
     AvoidEvaluation, AvoidKind, ChallengeSelection, CheckpointEvidence, Decision,
     GeneratorResult, ProgressEvaluation, ReachAvoidState, ReachEvaluation,
@@ -643,7 +643,7 @@ def evaluate_trial_transition(
     public_evidence = _public_evidence_from_stack(state)
     trial_stack = update_graph_stack_after_diff(
         state.graph_stack, cumulative, trial_tree, state.base_repository, "",
-        public_evidence, GraphBudget(),
+        public_evidence, state.graph_budget,
     )
     diff_graph_metrics = latest_graph_metrics()
     diff_program = trial_stack.program_graph

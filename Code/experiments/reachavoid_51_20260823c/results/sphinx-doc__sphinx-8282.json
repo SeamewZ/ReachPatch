@@ -1,0 +1,88 @@
+{
+  "completed_at": "2026-08-22T19:26:14.983983+00:00",
+  "component_evidence": {
+    "binding_graph": {
+      "gap_count": 4,
+      "objective_binding_ids": [],
+      "participated": false,
+      "terminal_execution_confirmed_binding_ids": [],
+      "transition_confirmed_binding_ids": [],
+      "unit_count": 3
+    },
+    "challenge_graph": {
+      "cell_count": 3,
+      "counterexamples_closed": [],
+      "counterexamples_opened": [],
+      "executed_challenge_ids": [
+        "challenge-1328a7acb7c558b0d1951e97",
+        "challenge-160f3d79dac8dc62ee811080",
+        "challenge-815cf5dd3d3e3a38e8dcc14e"
+      ],
+      "execution_bundle_count": 3,
+      "participated": true,
+      "selected_challenge_ids": [
+        "challenge-1328a7acb7c558b0d1951e97",
+        "challenge-160f3d79dac8dc62ee811080",
+        "challenge-815cf5dd3d3e3a38e8dcc14e"
+      ],
+      "terminal_status_counts": {
+        "UNKNOWN": 3
+      }
+    },
+    "program_graph": {
+      "causal_cut_count": 0,
+      "dynamic_edge_count": 3,
+      "edge_count": 2289,
+      "impact_risk_count": 12,
+      "node_count": 1294,
+      "objective_causal_cut_ids": [],
+      "participated": true,
+      "path_class_count": 126
+    },
+    "reach_avoid": {
+      "causal_progress_count": 0,
+      "commit_count": 0,
+      "decision_counts": {},
+      "frontier_count": 8,
+      "frontier_kind_counts": {
+        "IMPACT_RISK": 1,
+        "PRESERVATION_REGRESSION": 3,
+        "REPRODUCTION_GAP": 3,
+        "REQUIREMENT_COVERAGE_GAP": 1
+      },
+      "frontier_status_counts": {
+        "ACTIONABLE": 5,
+        "CLOSED": 3
+      },
+      "participated": true,
+      "provisional_count": 0,
+      "rollback_count": 0,
+      "strict_progress_count": 0,
+      "transition_count": 0
+    },
+    "requirement_graph": {
+      "leaf_count": 7,
+      "objective_requirement_ids": [],
+      "participated": false,
+      "partition_count": 24,
+      "requirements_improved": []
+    }
+  },
+  "duration_seconds": 328.158058474306,
+  "execution_backend": {
+    "kind": "HOST"
+  },
+  "final_checkpoint_id": "checkpoint-f2aff5cee682bdcad14ea776",
+  "final_patch_hash": "5b586b07c56669a398c1675fc4224941ff40cb474d23b061681c3492da1892b5",
+  "final_patch_path": "/home/slt/ReachPatch/Code/experiments/reachavoid_51_20260823c/runs/sphinx-doc__sphinx-8282/final.patch",
+  "final_patch_sha256": "f5d016d23dc15c11bca6b650f550f8356979e06afb65391647ecf9ee6d4b6e4d",
+  "implementation_hash": "b233fab54ae79032b0c29baf1e2c6f5c50ea7d4120a3a96553cd8ca94f33811c",
+  "instance_id": "sphinx-doc__sphinx-8282",
+  "p0_patch_hash": "5b586b07c56669a398c1675fc4224941ff40cb474d23b061681c3492da1892b5",
+  "p0_patch_path": "/home/slt/ReachPatch/Code/experiments/reachavoid_51_20260823c/runs/sphinx-doc__sphinx-8282/p0.patch",
+  "p0_patch_sha256": "f5d016d23dc15c11bca6b650f550f8356979e06afb65391647ecf9ee6d4b6e4d",
+  "public_dataset_sha256": "516415e9fadba54cf94239ef5c29b1233f214427d8250b4323058e311db228e3",
+  "run_root": "/home/slt/ReachPatch/Code/experiments/reachavoid_51_20260823c/runs/sphinx-doc__sphinx-8282",
+  "schema": "reachpatch-51-reach-avoid-v2",
+  "status": "BEST_EFFORT_FRONTIER_EXHAUSTED"
+}

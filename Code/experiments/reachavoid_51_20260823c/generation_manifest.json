@@ -1,0 +1,9 @@
+{
+  "case_retries": 6,
+  "implementation_hash": "b233fab54ae79032b0c29baf1e2c6f5c50ea7d4120a3a96553cd8ca94f33811c",
+  "max_revisions": 8,
+  "model": "deepseek-chat",
+  "public_dataset_sha256": "516415e9fadba54cf94239ef5c29b1233f214427d8250b4323058e311db228e3",
+  "schema": "reachpatch-51-reach-avoid-v2",
+  "started_at": "2026-08-22T17:27:25.316925+00:00"
+}

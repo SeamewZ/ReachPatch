@@ -18,10 +18,13 @@ from .tools import RepairToolExecutor, TOOL_SCHEMAS
 @dataclass(frozen=True, slots=True)
 class DeepSeekConfig:
     initial_generator_max_turns: int = 20
+    # Kept at the historical public field value for checkpoint/config
+    # deserialization; the active limit is `revision_generator_turn_limit`.
     revision_generator_max_turns: int = 12
-    root_recovery_max_turns: int = 16
+    revision_generator_turn_limit: int = 20
+    root_recovery_max_turns: int = 24
     initial_generator_wall_time_s: float = 600.0
-    revision_generator_wall_time_s: float = 480.0
+    revision_generator_wall_time_s: float = 900.0
     initial_generator_token_budget: int = 32768
     revision_generator_token_budget: int = 32768
 
@@ -189,6 +192,17 @@ class DeepSeekAgent:
         return {
             "objective_id": objective.objective_id,
             "objective_kind": objective.objective_kind,
+            "selected_frontier": cls._compact(
+                objective.selected_frontier.to_dict()
+                if objective.selected_frontier is not None else None,
+                string_limit=3200,
+            ),
+            "validation_obligations": cls._compact(
+                tuple(item.to_dict() for item in objective.validation_obligations),
+                string_limit=5000,
+            ),
+            "working_patch_hash": objective.working_patch_hash,
+            "graph_revision": objective.graph_revision,
             "primary_requirement": cls._compact({
                 key: primary.get(key) for key in (
                     "requirement_id", "kind", "quantifier", "operation",
@@ -340,7 +354,11 @@ class DeepSeekAgent:
         ]
         max_turns = (
             self.config.initial_generator_max_turns if initial
-            else self.config.revision_generator_max_turns
+            else (
+                self.config.revision_generator_turn_limit
+                if self.config.revision_generator_max_turns == 12
+                else self.config.revision_generator_max_turns
+            )
         )
         timeout = (
             self.config.initial_generator_wall_time_s if initial
@@ -362,6 +380,8 @@ class DeepSeekAgent:
         no_op_rejection_count = 0
         rejected_finished_revision = False
         source_contexts: dict[str, dict[str, Any]] = {}
+        last_tool_signature: str | None = None
+        repeated_tool_streak = 0
         force_patch_next = False
         turn = 0
         turn_limit = max_turns
@@ -564,6 +584,19 @@ class DeepSeekAgent:
                 executed_call = True
                 try:
                     arguments = json.loads(function.get("arguments") or "{}")
+                    signature = canonical_json({"name": name, "arguments": arguments})
+                    if signature == last_tool_signature:
+                        repeated_tool_streak += 1
+                    else:
+                        last_tool_signature = signature
+                        repeated_tool_streak = 1
+                    if repeated_tool_streak >= 3 and name not in {"apply_patch", "finish_revision"}:
+                        force_patch_next = True
+                        followup = (
+                            "The same diagnostic tool call has been repeated three times. "
+                            "Stop searching and apply the smallest causal patch now; "
+                            "the next turn must use apply_patch on the current source."
+                        )
                     if name not in allowed_tool_names:
                         raise ValueError(
                             f"{name or '<empty>'} is not allowed in this tool phase; "

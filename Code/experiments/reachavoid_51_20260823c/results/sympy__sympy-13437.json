@@ -1,0 +1,82 @@
+{
+  "completed_at": "2026-08-22T18:35:05.141957+00:00",
+  "component_evidence": {
+    "binding_graph": {
+      "gap_count": 42,
+      "objective_binding_ids": [],
+      "participated": false,
+      "terminal_execution_confirmed_binding_ids": [],
+      "transition_confirmed_binding_ids": [],
+      "unit_count": 6
+    },
+    "challenge_graph": {
+      "cell_count": 0,
+      "counterexamples_closed": [],
+      "counterexamples_opened": [],
+      "executed_challenge_ids": [],
+      "execution_bundle_count": 0,
+      "participated": false,
+      "selected_challenge_ids": [],
+      "terminal_status_counts": {}
+    },
+    "program_graph": {
+      "causal_cut_count": 0,
+      "dynamic_edge_count": 0,
+      "edge_count": 1961,
+      "impact_risk_count": 0,
+      "node_count": 1093,
+      "objective_causal_cut_ids": [],
+      "participated": false,
+      "path_class_count": 174
+    },
+    "reach_avoid": {
+      "causal_progress_count": 0,
+      "commit_count": 0,
+      "decision_counts": {
+        "ROLLBACK": 3
+      },
+      "frontier_count": 3,
+      "frontier_kind_counts": {
+        "REQUIREMENT_COVERAGE_GAP": 3
+      },
+      "frontier_status_counts": {
+        "ACTIONABLE": 3
+      },
+      "participated": true,
+      "provisional_count": 0,
+      "rollback_count": 3,
+      "strict_progress_count": 0,
+      "transition_count": 3
+    },
+    "requirement_graph": {
+      "leaf_count": 9,
+      "objective_requirement_ids": [
+        "requirement-740eae2ba80b83c448e28929",
+        "requirement-92cbfd0137dfea1f029973e3",
+        "requirement-d62d0994bebb4a6071996bae"
+      ],
+      "participated": true,
+      "partition_count": 24,
+      "requirements_improved": []
+    }
+  },
+  "duration_seconds": 273.04061749065295,
+  "execution_backend": {
+    "kind": "MANUAL_RECOVERY"
+  },
+  "final_checkpoint_id": "checkpoint-03df3201cadc0c904d26287a",
+  "final_patch_hash": "d352017bb4ec3ec51e77770dfb0c3e20184d2feba2ed025bf80391e17c29886d",
+  "final_patch_path": "/home/slt/ReachPatch/Code/experiments/reachavoid_51_20260823c/manual_recovery/sympy__sympy-13437.final.patch",
+  "final_patch_sha256": "c85e74a7cb582acd52b5d78109058a6a7748dec65bd9fbe099034c9d820dec55",
+  "implementation_hash": "b233fab54ae79032b0c29baf1e2c6f5c50ea7d4120a3a96553cd8ca94f33811c",
+  "instance_id": "sympy__sympy-13437",
+  "manual_recovery": true,
+  "p0_patch_hash": "d352017bb4ec3ec51e77770dfb0c3e20184d2feba2ed025bf80391e17c29886d",
+  "p0_patch_path": "/home/slt/ReachPatch/Code/experiments/reachavoid_51_20260823c/manual_recovery/sympy__sympy-13437.p0.patch",
+  "p0_patch_sha256": "c85e74a7cb582acd52b5d78109058a6a7748dec65bd9fbe099034c9d820dec55",
+  "public_dataset_sha256": "516415e9fadba54cf94239ef5c29b1233f214427d8250b4323058e311db228e3",
+  "recovery_reason": "runner component validation rejected a non-empty final because terminal Challenge Graph snapshot had zero cells; all p0/revision artifacts retained",
+  "run_root": "/home/slt/ReachPatch/Code/experiments/reachavoid_51_20260823c/failed_attempts/sympy__sympy-13437/1787421821785456642/run",
+  "schema": "reachpatch-51-reach-avoid-v2",
+  "status": "BEST_EFFORT_FRONTIER_EXHAUSTED"
+}

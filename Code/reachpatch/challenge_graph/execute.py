@@ -12,7 +12,6 @@ from reachpatch.models.evidence import (
     failure_signature,
 )
 from reachpatch.models.graphs import ChallengeStatus, GraphStack
-from reachpatch.models.graphs import GraphBudget
 from reachpatch.models.reach_avoid import ChallengeRoundResult, ChallengeSelection, ReachAvoidState
 from reachpatch.program_graph import (
     materialize_execution_path_class, update_program_graph_after_diff,
@@ -135,6 +134,11 @@ def execute_challenge_round(
             ChallengeStatus.UNREACHABLE, ChallengeStatus.STALE,
         }:
             continue
+        retry_key = "|".join((
+            challenge_id, state.graph_stack.patch_hash, cell.input_recipe.recipe_id,
+            cell.oracle.oracle_id, str(state.graph_stack.revision),
+        ))
+        state.challenge_attempts[retry_key] = state.challenge_attempts.get(retry_key, 0) + 1
         if not cell.execution_scenario.command:
             cells[challenge_id] = replace(
                 cell, terminal_status=ChallengeStatus.UNSUPPORTED,
@@ -210,7 +214,7 @@ def execute_challenge_round(
         cumulative_diff,
         tuple(execution.patched for execution in executions),
         (),
-        GraphBudget(),
+        getattr(state, "graph_budget", None),
     )
     graph = program_delta.graph
     public_check_paths = {
@@ -303,14 +307,7 @@ def execute_challenge_round(
         changed_hunk_hit = bool(
             changed_hunk_paths.intersection(_executed_source_paths(paired.patched))
         )
-        if not binding_path_hit and not changed_hunk_hit:
-            # A failure before both the bound path and the changed source is an
-            # executable frontier. A stable failure while importing/executing
-            # a changed hunk is directly caused by the candidate patch.
-            cells[paired.challenge_id] = replace(
-                cell, terminal_status=ChallengeStatus.UNKNOWN,
-            )
-            continue
+        localization_failure = not binding_path_hit and not changed_hunk_hit
         causal_trace = replace(
             paired.patched,
             executed_path_ids=tuple(dict.fromkeys(executed_node_ids)),
@@ -359,6 +356,23 @@ def execute_challenge_round(
             protected_target_ids=tuple(sorted(state.locked_checks.target_ids)),
             protected_preservation_ids=tuple(sorted(state.locked_checks.preservation_ids)),
             suggested_action_families=("EDIT_CAUSAL_CUT", "REPLAY_IMPACT_CONSUMERS"),
+            frontier_kind=("LOCALIZATION_FAILURE" if localization_failure else
+                           "PRESERVATION_REGRESSION" if cell.kind == "PRESERVATION" else
+                           "BEHAVIOR_FAILURE"),
+            observation_projection=paired.patched.observation.to_dict(),
+            command_cwd=cell.execution_scenario.cwd,
+            environment=cell.execution_scenario.environment,
+            backend="shared-executor",
+            stdout=paired.patched.observation.stdout,
+            stderr=paired.patched.observation.stderr,
+            first_project_frame=paired.patched.first_project_frame,
+            binding_path_hit=binding_path_hit,
+            changed_hunk_hit=changed_hunk_hit,
+            changed_hunks=tuple(hunk.to_dict() for hunk in cumulative_diff.hunks
+                                if hunk.hunk_id in cell.changed_hunk_ids),
+            protected_behavior=tuple(sorted(state.locked_checks.target_ids | state.locked_checks.preservation_ids)),
+            failure_kind=("LOCALIZATION_FAILURE" if localization_failure else "BEHAVIOR_FAILURE"),
+            stability_evidence={"stable_runs": paired.stable_runs, "oracle": paired.oracle_authority},
         )
         counterexamples.append(packet)
         failures.append(ConfirmedFailure(

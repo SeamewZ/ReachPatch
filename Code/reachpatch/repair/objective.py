@@ -6,7 +6,10 @@ from reachpatch.execution.worktree import diff_between
 from reachpatch.models.base import stable_id
 from reachpatch.models.evidence import ConfirmedFailure, PairClassification
 from reachpatch.models.graphs import ChallengeStatus, ProgramNodeKind
-from reachpatch.models.reach_avoid import ReachAvoidState, RepairObjective
+from reachpatch.models.reach_avoid import (
+    ReachAvoidState, RepairObjective, ValidationObligation,
+)
+from reachpatch.reach_avoid.frontier import RepairFrontier, RepairFrontierKind
 
 
 _REPAIR_NODE_KIND_PRIORITY = {
@@ -294,9 +297,40 @@ def _bounded_source_slices(
 
 def compile_repair_objective(
     state: ReachAvoidState,
-    failure: ConfirmedFailure,
+    failure: ConfirmedFailure | RepairFrontier,
 ) -> RepairObjective:
     graph = state.graph_stack
+    frontier = failure if isinstance(failure, RepairFrontier) else None
+    if frontier is not None:
+        requirement_id = next(iter(frontier.requirement_ids), None)
+        if frontier.kind is RepairFrontierKind.PRESERVATION_REGRESSION:
+            preservation_id = next((
+                item.requirement_id for item in graph.requirement_graph.leaves.values()
+                if item.preservation
+            ), None)
+            if preservation_id is not None:
+                requirement_id = preservation_id
+        if requirement_id not in graph.requirement_graph.leaves:
+            requirement_id = next(iter(graph.requirement_graph.leaves), None)
+        req_id = requirement_id
+        # Keep the rest of the objective compiler shared with legacy failure
+        # packets while making the frontier the source of truth for action.
+        class _FailureView:
+            failure_id = frontier.frontier_id
+            requirement_id = req_id
+            binding_id = next(iter(frontier.binding_ids), "")
+            challenge_id = next(iter(frontier.challenge_ids), "")
+            counterexample_id = ""
+            patch_hash = frontier.patch_hash
+            failure_signature = frontier.frontier_id
+            causal_component_id = next(iter(frontier.causal_cut_ids or frontier.path_class_ids), "")
+            first_divergence = frontier.failure_location
+            hard = frontier.hard
+            priority = frontier.priority
+            open = True
+        failure = _FailureView()  # type: ignore[assignment]
+    else:
+        requirement_id = failure.requirement_id
     requirement = graph.requirement_graph.leaves[failure.requirement_id]
     related_failures = tuple(
         item for item in state.confirmed_failures
@@ -314,6 +348,7 @@ def compile_repair_objective(
             packet.counterexample_id in related_counterexample_ids
             or packet.requirement_id == failure.requirement_id
             or failure.causal_component_id in packet.causal_cut_ids
+            or (frontier is not None and packet.challenge_id in frontier.challenge_ids)
         )
     )
     target_requirement_ids = {
@@ -572,7 +607,10 @@ def compile_repair_objective(
         for event in reversed(state.generator_session.conversation)
         if event.get("patch_hash") == graph.patch_hash
         and event.get("pending_objective_kind")
-    ), "CONFIRMED_FAILURE")
+    ), (
+        "CONFIRMED_FAILURE" if frontier is not None and frontier.kind is RepairFrontierKind.BEHAVIOR_FAILURE
+        else frontier.kind.value if frontier is not None else "CONFIRMED_FAILURE"
+    ))
     if requirement.preservation:
         pending_kind = "PRESERVATION_REGRESSION"
     causal_direction = []
@@ -619,6 +657,34 @@ def compile_repair_objective(
         "causal_cut_symbols": cut_summaries,
         "direction": tuple(causal_direction),
     }
+    obligations: list[ValidationObligation] = []
+    for index, packet in enumerate(packets):
+        if packet.requirement_id in target_requirement_ids:
+            # A target FAIL packet is evidence for the frontier, not a
+            # preservation lock.  Its old baseline observation must not be
+            # treated as the desired post-repair result.
+            continue
+        obligations.append(ValidationObligation(
+            validation_id=stable_id("validation", graph.patch_hash, packet.counterexample_id),
+            role="TARGET" if packet.requirement_id in target_requirement_ids else "PRESERVATION",
+            authority=packet.oracle_authority, command=tuple(packet.reproduction_command),
+            cwd=".", environment={}, timeout_seconds=120, backend="shared-executor",
+            concrete_input=packet.concrete_input, input_derivation="; ".join(packet.input_derivation),
+            oracle_id=packet.oracle_id, expected_relation=packet.expected_relation,
+            expected_observation=packet.baseline_observation, requirement_id=packet.requirement_id,
+            binding_id=packet.binding_id, challenge_id=packet.challenge_id,
+        ))
+    for cell, unit, execution in target_executions:
+        obligations.append(ValidationObligation(
+            validation_id=stable_id("validation", graph.patch_hash, cell.challenge_id, execution.oracle_id),
+            role="TARGET", authority=execution.oracle_authority,
+            command=tuple(cell.execution_scenario.command), cwd=cell.execution_scenario.cwd,
+            environment=dict(cell.execution_scenario.environment), timeout_seconds=int(cell.execution_scenario.timeout_seconds),
+            backend="shared-executor", concrete_input=cell.input_recipe.concrete_input,
+            input_derivation="; ".join(cell.input_recipe.derivation), oracle_id=execution.oracle_id,
+            expected_relation=execution.expected_relation, expected_observation=execution.patched.observation.to_dict(),
+            requirement_id=cell.requirement_id, binding_id=unit.binding_id, challenge_id=cell.challenge_id,
+        ))
     return RepairObjective(
         objective_id=stable_id(
             "repair-objective", graph.patch_hash, failure.failure_id,
@@ -721,4 +787,8 @@ def compile_repair_objective(
             )
             + tuple(causal_direction)
         )),
+        validation_obligations=tuple(dict((item.validation_id, item) for item in obligations).values()),
+        selected_frontier=frontier,
+        working_patch_hash=graph.patch_hash,
+        graph_revision=graph.revision,
     )
