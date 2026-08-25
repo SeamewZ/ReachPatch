@@ -253,6 +253,7 @@ def materialize_trial_challenges(
     trial_graph_stack: GraphStack,
     regression_plan: RegressionPlan,
     *,
+    selected_frontier=None,
     max_batch: int = 6,
 ) -> ChallengeSelection:
     _materialize_required_replays(state, trial_graph_stack, regression_plan)
@@ -296,6 +297,19 @@ def materialize_trial_challenges(
     ]
     locked_ids = state.locked_checks.target_ids | state.locked_checks.preservation_ids
 
+    selected_requirement_ids = set(getattr(selected_frontier, "requirement_ids", ()))
+    selected_binding_ids = set(getattr(selected_frontier, "binding_ids", ()))
+    selected_path_ids = set(getattr(selected_frontier, "path_class_ids", ()))
+
+    def selected_match(cell) -> bool:
+        binding = trial_graph_stack.binding_graph.units.get(cell.binding_id)
+        return bool(
+            cell.requirement_id in selected_requirement_ids
+            or cell.binding_id in selected_binding_ids
+            or cell.path_class_id in selected_path_ids
+            or (binding is not None and binding.path_class_id in selected_path_ids)
+        )
+
     def priority(cell):
         binding = trial_graph_stack.binding_graph.units.get(cell.binding_id)
         locked_replay = bool(
@@ -311,6 +325,7 @@ def materialize_trial_challenges(
             for failure in state.confirmed_failures
         )
         return (
+            not selected_match(cell),
             not cell.hard,
             not (cell.oracle.trusted and cell.oracle.executable),
             not known_failure,

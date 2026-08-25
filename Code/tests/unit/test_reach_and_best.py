@@ -5,7 +5,6 @@ from dataclasses import replace
 from reachpatch.models.evidence import CounterexamplePacket, ExecutableOracle
 from reachpatch.models.graphs import ChallengePartition, ChallengeStatus, ImpactCone
 from reachpatch.challenge_graph.models import open_high_challenge_ids
-from reachpatch.reach_avoid.checkpoint import select_best_checkpoint
 from reachpatch.reach_avoid.gates import evaluate_reach
 
 
@@ -142,34 +141,3 @@ def test_distinct_pending_input_still_blocks_reach(state_factory):
     assert open_high_challenge_ids(
         state.graph_stack.challenge_graph.active_cells()
     ) == (distinct.challenge_id,)
-
-
-def test_best_checkpoint_selected_at_limit(state_factory):
-    state = state_factory()
-    low = state.working_checkpoint
-    high = replace(
-        low,
-        checkpoint_id="better",
-        evidence=replace(
-            low.evidence,
-            confirmed_target_pass_count=1,
-            execution_confirmed_binding_count=1,
-        ),
-        revision=99,
-    )
-    assert select_best_checkpoint((low, high)) is high
-
-
-def test_best_checkpoint_does_not_hide_executed_challenges(state_factory):
-    state = state_factory()
-    executed = replace(
-        state.working_checkpoint,
-        checkpoint_id="executed",
-        evidence=replace(
-            state.working_checkpoint.evidence,
-            no_known_preservation_regression=False,
-            execution_confirmed_requirement_count=1,
-            execution_confirmed_binding_count=1,
-        ),
-    )
-    assert select_best_checkpoint((state.working_checkpoint, executed)) is executed

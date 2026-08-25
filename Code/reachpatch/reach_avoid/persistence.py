@@ -12,6 +12,7 @@ from reachpatch.models.graphs import ChallengeStatus, GraphStack
 from reachpatch.models.reach_avoid import (
     Decision, ReachAvoidState, TransitionCertificate, TrialTransition,
 )
+from reachpatch.reach_avoid.frontier import FrontierStatus
 
 from .certificates import build_transition_certificate, verify_transition_certificate
 from .checkpoint import (
@@ -92,6 +93,7 @@ def apply_transition_decision(
     store: CheckpointStore,
 ) -> TransitionCertificate:
     source = state.working_checkpoint
+    controller_state_before = state.to_dict()
     if trial.source_checkpoint_id != source.checkpoint_id:
         raise RuntimeError("transition source is not the current working checkpoint")
     if state.graph_stack.graph_hashes() != source.graph_hashes:
@@ -122,6 +124,11 @@ def apply_transition_decision(
                 "pending_objective_kind": trial.transition_decision.next_objective_kind,
             })
         state.observations.retain_patch(trial.graph_stack.patch_hash)
+        state.last_mechanical_result = trial.evidence.mechanical
+        state.atomic_obligations = {
+            obligation.key: obligation for obligation in trial.atomic_obligations
+        }
+        state.atomic_evidence = dict(trial.evidence.atomic_after)
         checkpoint = capture_checkpoint(
             state, trial, store,
             "WORKING" if trial.decision is Decision.COMMIT_WORKING else "PROVISIONAL",
@@ -131,11 +138,22 @@ def apply_transition_decision(
         state.graph_stack = trial.graph_stack
         if trial.decision is Decision.COMMIT_WORKING:
             state.certified_checkpoint = checkpoint
-        state.checkpoint_history[checkpoint.checkpoint_id] = checkpoint
-        if trial.transition_decision.promote_to_best and (
-            checkpoint.evidence.rank() > state.best_checkpoint.evidence.rank()
+            state.consecutive_provisional_without_progress = 0
+        if (
+            trial.selected_frontier is not None
+            and trial.evidence.frontier_delta is not None
+            and trial.evidence.frontier_delta.verified_closed
         ):
-            state.best_checkpoint = checkpoint
+            old = trial.selected_frontier
+            state.repair_frontiers[old.frontier_id] = replace(
+                old, status=FrontierStatus.CLOSED,
+                closure_evidence=old.closure_evidence + ({
+                    "transition": trial.cumulative_diff.patch_hash,
+                    "atomic_fail_to_pass": trial.evidence.atomic_fail_to_pass,
+                    "progress": trial.evidence.verified_progress,
+                },),
+            )
+        state.checkpoint_history[checkpoint.checkpoint_id] = checkpoint
         result = checkpoint
     else:
         # Rollback restores the source patch and graph stack while retaining
@@ -143,6 +161,11 @@ def apply_transition_decision(
         # content-addressed evidence checkpoint.
         state.graph_stack = store.graph_stack(source)
         state.observations.retain_patch(source.patch_hash)
+        runtime = store.runtime_state(source.checkpoint_id)
+        state.last_mechanical_result = runtime.last_mechanical_result
+        state.atomic_obligations = dict(runtime.atomic_obligations)
+        state.atomic_evidence = dict(runtime.atomic_evidence)
+        state.probe_registrations = dict(runtime.probe_registrations)
         state.generator_session.conversation.append({
             "role": "system",
             "patch_hash": source.patch_hash,
@@ -156,7 +179,10 @@ def apply_transition_decision(
         state.working_checkpoint = result
         state.checkpoint_history[result.checkpoint_id] = result
     trial.certificate = certificate
-    persist_transition(state, trial, certificate, store)
+    persist_transition(
+        state, trial, certificate, store,
+        controller_state_before=controller_state_before,
+    )
     verify_transition_certificate(certificate, store)
     return certificate
 
@@ -166,6 +192,8 @@ def persist_transition(
     trial: TrialTransition,
     certificate: TransitionCertificate,
     store: CheckpointStore,
+    *,
+    controller_state_before: dict | None = None,
 ) -> Path:
     transitions = state.run_root / "transitions"
     transitions.mkdir(parents=True, exist_ok=True)
@@ -191,4 +219,74 @@ def persist_transition(
     }
     temporary.write_text(canonical_json(payload) + "\n", encoding="utf-8")
     temporary.replace(path)
+    # Every evaluated nonempty trial has an independently inspectable evidence
+    # directory. The aggregate certificate above remains the restart-safe
+    # index, while this layout is deliberately convenient for sealed audit.
+    audit_root = transitions / certificate.transition_id
+    audit_root.mkdir(parents=True, exist_ok=True)
+    incumbent_patch_hash = store.load(certificate.source_checkpoint_id).patch_hash
+
+    def write_json(name: str, value) -> None:
+        destination = audit_root / name
+        temporary = destination.with_suffix(destination.suffix + ".tmp")
+        temporary.write_text(canonical_json(value) + "\n", encoding="utf-8")
+        temporary.replace(destination)
+
+    (audit_root / "incremental.patch").write_text(
+        trial.incremental_diff.canonical_diff, encoding="utf-8",
+    )
+    (audit_root / "cumulative.patch").write_text(
+        trial.cumulative_diff.canonical_diff, encoding="utf-8",
+    )
+    write_json("generator_objective.json", (
+        state.current_repair_objective.to_dict()
+        if state.current_repair_objective is not None else {}
+    ))
+    events = list(state.generator_session.attempt_history[-1:])
+    (audit_root / "generator_events.jsonl").write_text(
+        "".join(canonical_json(item) + "\n" for item in events), encoding="utf-8",
+    )
+    write_json("selected_frontier_before.json", (
+        trial.selected_frontier.to_dict() if trial.selected_frontier is not None else {}
+    ))
+    selected_after = next((
+        frontier for frontier in state.repair_frontiers.values()
+        if trial.selected_frontier is not None
+        and frontier.semantic_key == trial.selected_frontier.semantic_key
+    ), None)
+    write_json("selected_frontier_after.json", (
+        selected_after.to_dict() if selected_after is not None else {}
+    ))
+    write_json("atomic_evidence_before.json", {
+        key: value.to_dict() for key, value in trial.evidence.atomic_before.items()
+    })
+    write_json("atomic_evidence_after.json", {
+        key: value.to_dict() for key, value in trial.evidence.atomic_after.items()
+    })
+    write_json("challenge_results.json", {
+        "selection": (trial.challenge_result.selected_challenge_ids if trial.challenge_result else ()),
+        "executions": [item.to_dict() for item in (
+            trial.challenge_result.executions if trial.challenge_result else ()
+        )],
+        "counterexamples": [item.to_dict() for item in (
+            trial.challenge_result.counterexamples if trial.challenge_result else ()
+        )],
+    })
+    write_json("transition_evidence.json", trial.evidence.to_dict())
+    write_json("transition_decision.json", {
+        "decision": trial.decision.value,
+        "selected_frontier_key": trial.evidence.selected_frontier_key,
+        "selected_frontier_kind": trial.evidence.selected_frontier_kind,
+        "verified_progress": list(trial.evidence.verified_progress),
+        "material_progress": list(trial.evidence.material_progress),
+        "trusted_regressions": list(trial.evidence.trusted_regressions),
+        "hard_avoid_violations": list(trial.evidence.hard_avoid_violations),
+        "rollback_reasons": list(trial.transition_decision.reasons if trial.decision is Decision.ROLLBACK else ()),
+        "incumbent_patch_sha": incumbent_patch_hash,
+        "trial_patch_sha": trial.cumulative_diff.patch_hash,
+        "resulting_working_patch_sha": state.working_checkpoint.patch_hash,
+        "artifact_directory": str(audit_root.relative_to(state.run_root)),
+    })
+    write_json("controller_state_before.json", controller_state_before or {})
+    write_json("controller_state_after.json", state.to_dict())
     return path

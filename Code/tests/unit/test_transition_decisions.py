@@ -5,7 +5,7 @@ import copy
 
 from reachpatch.models.evidence import ConfirmedFailure, CounterexamplePacket
 from reachpatch.models.reach_avoid import (
-    ChallengeRoundResult, Decision, MechanicalResult, RegressionItem,
+    AtomicEvidence, ChallengeRoundResult, Decision, FrontierDelta, FrontierMeasure, MechanicalResult, RegressionItem,
     RegressionPlan, TransitionEvidence,
 )
 from reachpatch.models.graphs import (
@@ -50,17 +50,40 @@ def test_transition_is_not_unconditionally_committed(state_factory):
 
 
 def test_target_progress_commits_working(state_factory):
-    result = decide(state_factory(), evidence(target_pass_ids_after=("req",)))
+    result = decide(state_factory(), evidence(
+        atomic_fail_to_pass=("target",),
+        atomic_after={"target": AtomicEvidence("target", "PASS", role="TARGET", authority="A", stability_runs=2)},
+    ))
     assert result.decision is Decision.COMMIT_WORKING
-    assert result.promote_to_best
+    assert result.promote_to_working
+
+
+def test_provisional_behavior_observation_cannot_close_or_commit_frontier(state_factory):
+    before = FrontierMeasure(
+        "frontier", "BEHAVIOR_FAILURE", failed_atomic_keys=frozenset({"target"}),
+    )
+    after = FrontierMeasure(
+        "frontier", "BEHAVIOR_FAILURE", passed_atomic_keys=frozenset({"target"}),
+    )
+    result = decide(state_factory(), evidence(
+        atomic_before={"target": AtomicEvidence("target", "FAIL", role="TARGET", authority="PROVISIONAL", stability_runs=2)},
+        atomic_after={"target": AtomicEvidence("target", "PASS", role="TARGET", authority="PROVISIONAL", stability_runs=2)},
+        frontier_delta=FrontierDelta(
+            "frontier", "BEHAVIOR_FAILURE", before, after,
+            verified_closed=False, material_progress=False,
+        ),
+    ))
+    assert result.decision is Decision.ROLLBACK
 
 
 def test_target_fixed_with_regression_keeps_provisional(state_factory):
     result = decide(state_factory(), evidence(
-        target_pass_ids_after=("req",), preservation_regressions=("challenge",),
+        atomic_fail_to_pass=("target",),
+        atomic_after={"target": AtomicEvidence("target", "PASS", role="TARGET", authority="A", stability_runs=2)},
+        preservation_regressions=("challenge",),
     ))
     assert result.decision is Decision.KEEP_PROVISIONAL
-    assert result.promote_to_working and not result.promote_to_best
+    assert result.promote_to_working
     assert result.next_objective_kind == "PRESERVATION_REGRESSION"
 
 
@@ -76,7 +99,7 @@ def test_preservation_hard_pass_without_target_progress_cannot_commit(state_fact
         hard_pass_ids_after=("preservation-requirement",),
     ))
     assert result.decision is Decision.ROLLBACK
-    assert not result.promote_to_best
+    assert not result.promote_to_working
 
 
 def test_no_progress_preservation_regression_is_not_hard_avoid(state_factory):
@@ -85,15 +108,15 @@ def test_no_progress_preservation_regression_is_not_hard_avoid(state_factory):
     ))
     assert result.decision is Decision.ROLLBACK
     assert not result.hard_avoid
-    assert result.repairable_regression
+    assert not result.repairable_regression
 
 
-def test_causal_progress_keeps_provisional(state_factory):
+def test_graph_only_change_does_not_keep_provisional(state_factory):
     result = decide(state_factory(), evidence(
         causal_progress_reasons=("original BindingUnit passes",),
     ))
-    assert result.decision is Decision.KEEP_PROVISIONAL
-    assert result.causal_progress
+    assert result.decision is Decision.ROLLBACK
+    assert not result.causal_progress
 
 
 def test_locked_target_loss_rolls_back(state_factory):
@@ -103,14 +126,14 @@ def test_locked_target_loss_rolls_back(state_factory):
     assert result.decision is Decision.ROLLBACK
 
 
-def test_target_tradeoff_keeps_same_working_patch_provisional(state_factory):
+def test_requirement_level_target_tradeoff_without_atomic_evidence_rolls_back(state_factory):
     result = decide(state_factory(), evidence(
         target_pass_ids_before=("old-target",),
         target_pass_ids_after=("new-target",),
         target_regressions=("old-target-challenge",),
     ))
-    assert result.decision is Decision.KEEP_PROVISIONAL
-    assert result.next_objective_kind == "TARGET_REGRESSION"
+    assert result.decision is Decision.ROLLBACK
+    assert result.next_objective_kind is None
 
 
 def test_pure_target_regression_rolls_back(state_factory):
@@ -122,24 +145,24 @@ def test_pure_target_regression_rolls_back(state_factory):
     assert result.decision is Decision.ROLLBACK
 
 
-def test_closed_failure_with_target_regression_keeps_provisional(state_factory):
+def test_legacy_closed_failure_without_atomic_evidence_rolls_back(state_factory):
     result = decide(state_factory(), evidence(
         confirmed_failures_closed=("closed-failure",),
         target_regressions=("regressed-target",),
     ))
-    assert result.decision is Decision.KEEP_PROVISIONAL
-    assert result.next_objective_kind == "TARGET_REGRESSION"
+    assert result.decision is Decision.ROLLBACK
+    assert result.next_objective_kind is None
 
 
-def test_unexecuted_previous_target_is_frontier_not_regression(state_factory):
+def test_unexecuted_previous_target_without_trial_evidence_rolls_back(state_factory):
     result = decide(state_factory(), evidence(
         target_pass_ids_before=("old-target",),
         target_pass_ids_after=(),
         environment_unknown=True,
         new_executable_frontier=True,
     ))
-    assert result.decision is Decision.KEEP_PROVISIONAL
-    assert result.next_objective_kind == "EXECUTABLE_FRONTIER"
+    assert result.decision is Decision.ROLLBACK
+    assert result.next_objective_kind is None
 
 
 def test_retargeted_recipe_keeps_stable_executable_obligation_identity(state_factory):
@@ -369,7 +392,7 @@ def test_missing_preservation_obligation_is_retargeted_across_all_four_graphs(
     trial.validate()
 
 
-def test_retargeted_c_preservation_pass_closes_failure_and_commits(state_factory):
+def test_legacy_retargeted_pass_without_triplet_atomic_evidence_does_not_commit(state_factory):
     state, trial, plan, packet, failure = _trial_without_old_preservation_obligation(
         state_factory,
     )
@@ -404,4 +427,4 @@ def test_retargeted_c_preservation_pass_closes_failure_and_commits(state_factory
 
     assert transition_evidence.confirmed_failures_closed == (failure.failure_id,)
     assert transition_evidence.counterexamples_closed == (packet.counterexample_id,)
-    assert decision.decision is Decision.COMMIT_WORKING
+    assert decision.decision is Decision.ROLLBACK

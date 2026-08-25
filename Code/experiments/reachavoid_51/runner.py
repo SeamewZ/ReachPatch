@@ -258,6 +258,16 @@ def _sandbox_command(command: list[str], key_path: Path) -> list[str]:
         "--setenv", "PYTHONDONTWRITEBYTECODE", "1",
         "--chdir", str(CODE_ROOT),
     ]
+    # bubblewrap does not guarantee that the caller's ad-hoc environment is
+    # visible inside the worker namespace.  Explicitly carry the ReachPatch
+    # experiment/configuration variables into the public-only child.  In
+    # particular this keeps REACHPATCH_MAX_CHALLENGE_ROUNDS and the selected
+    # experiment root identical between the coordinator and case worker; a
+    # silent fallback to the controller default would otherwise make the
+    # sealed timing/transition evidence non-reproducible.
+    for name, value in sorted(os.environ.items()):
+        if name.startswith("REACHPATCH_"):
+            sandbox.extend(("--setenv", name, value))
     if key_path.is_file() and key_path.stat().st_size:
         sandbox.extend(("--ro-bind", str(key_path), str(key_path)))
     docker_socket = Path("/run/docker.sock")

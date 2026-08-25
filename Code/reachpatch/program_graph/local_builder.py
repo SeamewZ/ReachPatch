@@ -726,10 +726,15 @@ def _seed_files(
     checks: tuple[ExecutableCheck, ...],
     index: RepositoryIndex,
     budget: GraphBudget,
+    relevant_symbols: tuple[str, ...] = (),
 ) -> tuple[str, ...]:
     result = list(initial_diff.changed_files)
     identifiers = _issue_identifiers(issue) + tuple(
         symbol for check in checks for symbol in check.symbol_references
+    ) + tuple(
+        symbol.rsplit(".", 1)[-1]
+        for symbol in relevant_symbols
+        if re.fullmatch(r"[A-Za-z_]\w*(?:\.[A-Za-z_]\w*)*", symbol)
     )
     for identifier in identifiers:
         result.extend(index.symbol_files.get(identifier, ()))
@@ -808,14 +813,23 @@ def build_initial_program_graph(
     budget: GraphBudget,
     *,
     base_commit: str = "UNKNOWN",
+    relevant_symbols: tuple[str, ...] = (),
 ) -> ProgramGraph:
     """Build a precise local graph around diff, issue, checks and depth-1 callers."""
 
-    identifiers = _issue_identifiers(issue) + tuple(
+    requirement_identifiers = tuple(
+        symbol.rsplit(".", 1)[-1]
+        for symbol in relevant_symbols
+        if re.fullmatch(r"[A-Za-z_]\w*(?:\.[A-Za-z_]\w*)*", symbol)
+    )
+    identifiers = _issue_identifiers(issue) + requirement_identifiers + tuple(
         symbol for check in public_checks for symbol in check.symbol_references
     )
     index = RepositoryIndex.build(repository, base_commit, identifiers, budget.max_files)
-    seeds = list(_seed_files(repository, issue, initial_diff, public_checks, index, budget))
+    seeds = list(_seed_files(
+        repository, issue, initial_diff, public_checks, index, budget,
+        relevant_symbols,
+    ))
     diff_focus = _diff_focus(initial_diff)
     nodes: dict[str, ProgramNode] = {}
     edges: dict[str, ProgramEdge] = {}

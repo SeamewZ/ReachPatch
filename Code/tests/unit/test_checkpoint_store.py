@@ -37,7 +37,6 @@ def _consistent_state(state):
     )
     state.graph_stack = stack
     state.working_checkpoint = checkpoint
-    state.best_checkpoint = checkpoint
     return state
 
 
@@ -362,7 +361,6 @@ def test_rollback_transition_restores_source_and_verifies_certificate(state_fact
         state=state,
     )
     state.working_checkpoint = source
-    state.best_checkpoint = source
     state.checkpoint_history = {source.checkpoint_id: source}
     result = GeneratorResult(
         "generator-result",
@@ -419,7 +417,6 @@ def test_rollback_does_not_close_incumbent_failure(state_factory, tmp_path):
         state=state,
     )
     state.working_checkpoint = source
-    state.best_checkpoint = source
     state.checkpoint_history = {source.checkpoint_id: source}
     result = GeneratorResult(
         "generator-result",

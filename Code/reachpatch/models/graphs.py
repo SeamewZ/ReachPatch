@@ -282,6 +282,10 @@ class BindingUnit(SerializableRecord):
     authority: str
     status: BindingStatus
     evidence_ids: tuple[str, ...]
+    # Requirement-to-path binding is independent of the current patch.  The
+    # overlay records whether this particular working diff touches its causal
+    # route, so an incorrect edit remains visible as DISJOINT evidence.
+    alignment_status: str = "UNKNOWN"
 
 
 @dataclass(frozen=True, slots=True)

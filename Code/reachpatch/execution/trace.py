@@ -109,6 +109,7 @@ def run_trace(
         try:
             image = env.pop("REACHPATCH_EXECUTION_IMAGE", "").strip()
             base_commit = env.pop("REACHPATCH_EXECUTION_BASE_COMMIT", "").strip()
+            backend = image or "HOST"
             if image and shutil.which("docker"):
                 if not re.fullmatch(r"[0-9a-f]{40}", base_commit):
                     raise OSError(
@@ -274,4 +275,7 @@ def run_trace(
         executed_path_ids=tuple(lines),
         executed_line_ids=tuple(lines),
         first_project_frame=first_frame,
+        cwd=cwd,
+        environment=tuple(sorted((str(key), str(value)) for key, value in environment)),
+        backend=backend,
     )

@@ -194,6 +194,9 @@ def test_challenge_failure_becomes_confirmed_failure(state_factory, monkeypatch)
     assert packet.reproduction_command
     assert packet.failure_signature
     assert packet.binding_id == "binding-target"
+    assert packet.expected_observation is not None
+    assert packet.trial_observation == packet.patched_observation
+    assert packet.comparator
 
 
 def test_changed_hunk_import_regression_becomes_counterexample(

@@ -286,6 +286,23 @@ def evaluate_reach(state: ReachAvoidState) -> ReachEvaluation:
         for equivalent_cells in hard_obligations.values()
     ):
         reasons.append("diff closure is not backed by current Challenge executions")
+
+    # Graph-backed ChallengeCells remain the complete coverage model, while
+    # probes and transition triplets register additional atomic obligations.
+    # A trusted hard atomic result can never be ignored merely because it was
+    # produced through the probe path rather than an existing public cell.
+    for obligation_key, obligation in state.atomic_obligations.items():
+        if not obligation.hard or obligation.authority not in {"A", "B", "C"}:
+            continue
+        evidence = state.atomic_evidence.get(obligation_key)
+        if evidence is None:
+            reasons.append(f"trusted atomic obligation was not executed: {obligation_key}")
+            continue
+        if evidence.authority not in {"A", "B", "C"}:
+            reasons.append(f"trusted atomic obligation lost authority: {obligation_key}")
+            continue
+        if evidence.stability_runs < 2 or evidence.status != "PASS":
+            reasons.append(f"trusted atomic obligation is not stably passing: {obligation_key}")
     return ReachEvaluation(
         reached=not reasons,
         reasons=tuple(dict.fromkeys(reasons)),

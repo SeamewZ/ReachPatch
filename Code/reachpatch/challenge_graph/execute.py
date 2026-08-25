@@ -5,7 +5,7 @@ from dataclasses import replace
 from pathlib import Path
 
 from reachpatch.execution.paired import execute_paired
-from reachpatch.models.base import stable_id
+from reachpatch.models.base import content_hash, stable_id
 from reachpatch.models.evidence import (
     ConfirmedFailure, CounterexamplePacket, ExecutableOracle,
     PairClassification,
@@ -135,7 +135,8 @@ def execute_challenge_round(
         }:
             continue
         retry_key = "|".join((
-            challenge_id, state.graph_stack.patch_hash, cell.input_recipe.recipe_id,
+            challenge_id, state.graph_stack.patch_hash,
+            content_hash(cell.input_recipe.to_dict()),
             cell.oracle.oracle_id, str(state.graph_stack.revision),
         ))
         state.challenge_attempts[retry_key] = state.challenge_attempts.get(retry_key, 0) + 1
@@ -160,6 +161,7 @@ def execute_challenge_round(
             challenge_id=challenge_id,
             patch_hash=state.graph_stack.patch_hash,
             role=role,
+            observation_contract=cell.observation_contract,
             stability_runs=2,
             cache_dir=state.run_root / "execution_cache",
         )
@@ -373,6 +375,14 @@ def execute_challenge_round(
             protected_behavior=tuple(sorted(state.locked_checks.target_ids | state.locked_checks.preservation_ids)),
             failure_kind=("LOCALIZATION_FAILURE" if localization_failure else "BEHAVIOR_FAILURE"),
             stability_evidence={"stable_runs": paired.stable_runs, "oracle": paired.oracle_authority},
+            expected_observation=cell.oracle.expected,
+            incumbent_observation=(
+                paired.previous.observation.to_dict()
+                if paired.previous is not None
+                else paired.baseline.observation.to_dict()
+            ),
+            trial_observation=paired.patched.observation.to_dict(),
+            comparator=cell.observation_contract.normalized_comparator,
         )
         counterexamples.append(packet)
         failures.append(ConfirmedFailure(

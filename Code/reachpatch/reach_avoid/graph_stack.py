@@ -60,6 +60,9 @@ def build_graph_stack(
     program = build_initial_program_graph(
         repository, issue, actual_diff, public_evidence.checks, budget,
         base_commit=base_commit,
+        relevant_symbols=tuple(
+            leaf.operation for leaf in requirement_graph.leaves.values()
+        ),
     )
     _LAST_UPDATE_METRICS["program_update_seconds"] = time.monotonic() - program_started
     requirement_delta = promote_diff_partitions(requirement_graph, program, actual_diff)

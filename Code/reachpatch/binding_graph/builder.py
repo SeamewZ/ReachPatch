@@ -231,16 +231,13 @@ def build_binding_graph(
         symbols = _matching_symbols(
             requirement.operation, program_graph, touched_node_ids,
         )
+        # Build Requirement -> candidate Path before considering the current
+        # diff.  A wrong-file patch must retain its semantic binding as a
+        # DISJOINT unit so recovery can localize or complete it; dropping the
+        # unit here used to make an active requirement disappear entirely.
         path_classes = tuple(
             path for path in program_graph.path_classes.values()
             if set(path.node_ids).intersection(symbols)
-            and (
-                set(path.node_ids).intersection(touched_hunks)
-                or any(
-                    node_id in connected_to_touched
-                    for node_id in path.node_ids
-                )
-            )
         )
         if not path_classes and symbols:
             path_classes = tuple(
@@ -288,14 +285,13 @@ def build_binding_graph(
                 hunk_id for symbol_id in all_symbols
                 for hunk_id in touched_hunks.get(symbol_id, ())
             ))
-            if not matched_path_symbols or not hunks:
+            if not matched_path_symbols:
                 continue
             partitions = tuple(
                 item.partition_id
                 for item in requirement_graph.challenge_partitions.values()
                 if item.requirement_id == requirement.requirement_id
                 and item.path_class_id == path.path_class_id
-                and item.source_hunk_id in hunks
             )
             target_checks, preservation_checks = _checks_for(
                 requirement, all_symbols, program_graph, public_checks,
@@ -321,6 +317,7 @@ def build_binding_graph(
                 authority=requirement.authority,
                 status=BindingStatus.STATIC_ACTIONABLE,
                 evidence_ids=requirement.evidence_ids,
+                alignment_status=("ALIGNED" if hunks else "DISJOINT"),
             )
             if not target_checks and not preservation_checks:
                 gaps.append(BindingGap(
@@ -330,16 +327,33 @@ def build_binding_graph(
                     all_symbols,
                     _recovery_actions(program_graph, all_symbols),
                 ))
-        if not any(
-            unit.requirement_id == requirement.requirement_id
-            for unit in units.values()
-        ):
+        requirement_units = [
+            unit for unit in units.values()
+            if unit.requirement_id == requirement.requirement_id
+        ]
+        if not requirement_units:
             gaps.append(BindingGap(
                 requirement.requirement_id,
-                "NO_DIFF_REFERENCED_PATH",
+                "NO_CANDIDATE_PATH",
                 requirement.hard,
                 symbols,
                 _recovery_actions(program_graph, symbols),
+            ))
+        elif not any(
+            unit.alignment_status == "ALIGNED" for unit in requirement_units
+        ):
+            gaps.append(BindingGap(
+                requirement.requirement_id,
+                "DIFF_DISJOINT",
+                requirement.hard,
+                tuple(dict.fromkeys(
+                    symbol for unit in requirement_units
+                    for symbol in unit.program_symbol_ids
+                )),
+                _recovery_actions(program_graph, tuple(dict.fromkeys(
+                    symbol for unit in requirement_units
+                    for symbol in unit.program_symbol_ids
+                ))),
             ))
     return BindingGraph(
         patch_hash=actual_diff.patch_hash,

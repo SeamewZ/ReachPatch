@@ -1,12 +1,12 @@
 from __future__ import annotations
 
 import ast
-import subprocess
-import time
 from pathlib import Path
 
 from reachpatch.models.evidence import ActualDiff
+from reachpatch.models.graphs import ExecutableScenario
 from reachpatch.models.reach_avoid import MechanicalResult
+from reachpatch.execution.trace import run_trace
 
 
 _FORBIDDEN_ROOTS = ("tests/", "test/", "artifacts/", ".git/", "generated/")
@@ -16,6 +16,7 @@ def run_mechanical_checks(
     trial_tree: Path,
     cumulative_diff: ActualDiff,
     commands: tuple[tuple[str, ...], ...] = (),
+    command_scenarios: tuple[ExecutableScenario, ...] = (),
     oracle_paths: tuple[str, ...] = (),
     source_tree: Path | None = None,
 ) -> MechanicalResult:
@@ -61,24 +62,45 @@ def run_mechanical_checks(
                         f"no executable AST change in {relative}; the patch is "
                         "comments/formatting or an unchanged source excerpt"
                     )
-    for command in commands:
-        started = time.monotonic()
-        try:
-            result = subprocess.run(
-                command, cwd=trial_tree, text=True, stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE, timeout=120, check=False,
+    scenarios = tuple(command_scenarios) + tuple(
+        ExecutableScenario(
+            scenario_id=f"mechanical:{index}", command=command, cwd=".",
+            environment=(), timeout_seconds=120.0,
+        )
+        for index, command in enumerate(commands)
+    )
+    for scenario in scenarios:
+        # Mechanical command execution shares the same backend as challenges,
+        # probes and generator validations.  In particular, cwd, environment
+        # and timeout are not silently replaced with host-process defaults.
+        trace = run_trace(
+            trial_tree, scenario.command, cwd=scenario.cwd,
+            environment=scenario.environment,
+            timeout_seconds=scenario.timeout_seconds, trace_enabled=False,
+        )
+        observation = trace.observation
+        backend = (
+            "CONTAINER"
+            if dict(scenario.environment).get("REACHPATCH_EXECUTION_IMAGE")
+            else "HOST"
+        )
+        results.append({
+            "command": scenario.command,
+            "cwd": scenario.cwd,
+            "environment": scenario.environment,
+            "timeout_seconds": scenario.timeout_seconds,
+            "backend": backend,
+            "return_code": observation.return_code,
+            "stdout": observation.stdout[-4000:],
+            "stderr": observation.stderr[-4000:],
+            "duration_seconds": observation.duration_seconds,
+            "timeout": observation.exception == "TIMEOUT",
+            "first_project_frame": trace.first_project_frame,
+        })
+        if observation.return_code != 0:
+            reasons.append(
+                f"mechanical command failed: {' '.join(scenario.command)}"
             )
-            results.append({
-                "command": command,
-                "return_code": result.returncode,
-                "stdout": result.stdout[-4000:],
-                "stderr": result.stderr[-4000:],
-                "duration_seconds": time.monotonic() - started,
-            })
-            if result.returncode != 0:
-                reasons.append(f"mechanical command failed: {' '.join(command)}")
-        except (OSError, subprocess.TimeoutExpired) as exc:
-            reasons.append(f"mechanical command unavailable: {' '.join(command)}: {exc}")
     removed_public = {
         line[1:].split("(", 1)[0].split(":", 1)[0].strip()
         for hunk in cumulative_diff.hunks for line in hunk.lines

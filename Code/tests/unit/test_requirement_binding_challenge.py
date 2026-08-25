@@ -155,6 +155,48 @@ def test_dotted_class_operation_binds_real_changed_class_and_method(tmp_path):
     assert {"FilePathField", "FilePathField.__init__"} <= bound_symbols
 
 
+def test_wrong_file_diff_retains_disjoint_requirement_path(tmp_path):
+    """A candidate route remains available when p0 edits an unrelated file.
+
+    The ProgramGraph receives the Requirement operation as a bounded lookup
+    seed.  It therefore parses the target file alongside the changed file,
+    rather than treating the absence of a diff overlap as absence of a route.
+    """
+    base = tmp_path / "base-disjoint"
+    working = tmp_path / "working-disjoint"
+    base.mkdir()
+    working.mkdir()
+    target = "def combine(left, right):\n    return left + right\n"
+    unrelated_before = "def unrelated(value):\n    return value\n"
+    unrelated_after = "def unrelated(value):\n    return str(value)\n"
+    for directory in (base, working):
+        (directory / "target.py").write_text(target, encoding="utf-8")
+    (base / "other.py").write_text(unrelated_before, encoding="utf-8")
+    (working / "other.py").write_text(unrelated_after, encoding="utf-8")
+
+    actual = diff_between(base, working)
+    leaf = RequirementLeaf(
+        "req-combine", "TARGET_BEHAVIOR", "FOR_ALL", (), (), (),
+        "combine", ObservationContract("equals 2", 2, comparator="equals"),
+        None, False, "B", ("issue",), (), OutcomeStatus.UNKNOWN, True,
+    )
+    requirement = RequirementGraph({leaf.requirement_id: leaf})
+    program = build_initial_program_graph(
+        working, "combine must return the sum.", actual, (),
+        GraphBudget(max_files=8, max_nodes=96),
+        relevant_symbols=(leaf.operation,),
+    )
+
+    binding = build_binding_graph(requirement, program, actual, ())
+
+    assert any(node.symbol == "combine" for node in program.nodes.values())
+    assert len(binding.units) == 1
+    unit = next(iter(binding.units.values()))
+    assert unit.changed_hunk_ids == ()
+    assert unit.alignment_status == "DISJOINT"
+    assert any(gap.gap_type == "DIFF_DISJOINT" for gap in binding.gaps)
+
+
 def test_changed_callable_predicate_materializes_executable_class_recipe(tmp_path):
     base = tmp_path / "base-callable-recipe"
     working = tmp_path / "working-callable-recipe"
@@ -680,10 +722,10 @@ The operation should produce the order first.js, middle.js, last.js. However, ac
     )
     state = ReachAvoidState(
         "instance", "run", base, "base", run_root, stack,
-        checkpoint, checkpoint, None, {checkpoint.checkpoint_id: checkpoint},
+        checkpoint, None, {checkpoint.checkpoint_id: checkpoint},
         ObservationBundle(), [], LockedCheckSet(), [], {},
         GeneratorSession("session"), None, 0, 0, 0, 0, {},
-        ReachAvoidPhase.CHALLENGE, None, 60, 60,
+        ReachAvoidPhase.CHALLENGE, None, 60, 60, GraphBudget(max_files=10),
     )
     before_hashes = stack.graph_hashes()
     result = execute_challenge_round(
@@ -708,10 +750,11 @@ The operation should produce the order first.js, middle.js, last.js. However, ac
     assert objective.bindings[0]["binding_id"] == witness_challenge.binding_id
     assert objective.actual_hunks
     assert objective.causal_cuts
-    assert objective.reproduction_commands == (
-        witness_challenge.execution_scenario.command,
+    obligation = next(
+        item for item in objective.validation_obligations
+        if item.command == witness_challenge.execution_scenario.command
     )
-    structured = objective.concrete_inputs[0]["__reachpatch_issue_witness__"]
+    structured = obligation.concrete_input["__reachpatch_issue_witness__"]
     assert structured["target_expression"].startswith("Dependency.merge(")
     assert "direct_input" not in structured
 
@@ -900,7 +943,11 @@ def test_paired_trace_confirms_binding(tmp_path):
     execution = PairedTraceBundle(
         "pair", "check-calc", "challenge", "patch", before, after,
         PairClassification.TARGET_FIXED, "oracle", "A",
-        requirement.leaves["req"].expected_observation.relation, 2,
+        "the public executable contract completed successfully", 2,
+        oracle_contract_id=ObservationContract(
+            "the public executable contract completed successfully",
+            {"exit_code": 0}, observable="process", comparator="EQUALS",
+        ).contract_id,
     )
     delta = confirm_bindings_from_execution(binding, program, requirement, (execution,))
     assert delta.graph.units[unit.binding_id].status is BindingStatus.TARGET_PASSING

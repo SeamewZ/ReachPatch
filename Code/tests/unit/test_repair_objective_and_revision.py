@@ -12,13 +12,18 @@ from reachpatch.models.evidence import (
     ConfirmedFailure, CounterexamplePacket, PairedTraceBundle,
     PairClassification, RunObservation, TraceBundle, OutcomeStatus,
 )
-from reachpatch.models.reach_avoid import GeneratorResult, RepairObjective
+from reachpatch.models.reach_avoid import (
+    GeneratorResult, RepairObjective, ValidationObligation,
+)
 from reachpatch.models.graphs import (
-    CausalRepairCut, ChallengeStatus, ProgramNode, ProgramNodeKind,
+    CausalRepairCut, ChallengeStatus, ExecutableScenario, ProgramNode, ProgramNodeKind,
 )
 from reachpatch.reach_avoid.controller import ReachAvoidConfig
 from reachpatch.reach_avoid.controller import ReachAvoidController
 from reachpatch.reach_avoid.repair_player import RepairPlayer
+from reachpatch.reach_avoid.frontier import RepairFrontier, RepairFrontierKind
+from reachpatch.reach_avoid.transition import _materialize_registered_probes
+from reachpatch.reach_avoid.checkpoint import CheckpointStore, capture_current_graph_checkpoint
 from reachpatch.repair.deepseek_agent import DeepSeekConfig
 from reachpatch.repair.deepseek_agent import DeepSeekAgent
 from reachpatch.repair.objective import compile_repair_objective
@@ -82,6 +87,43 @@ def test_repair_objective_contains_locked_behaviors(state_factory):
     assert set(objective.locked_check_ids) == {"check-target", "check-preservation"}
     assert objective.cumulative_diff
     assert objective.observations[0]["actual"] == value.patched_observation
+
+
+def test_frontier_objective_has_explicit_mechanical_and_selected_validation(
+    state_factory,
+):
+    state = state_factory()
+    frontier = RepairFrontier.create(
+        kind=RepairFrontierKind.BEHAVIOR_FAILURE,
+        patch_hash=state.graph_stack.patch_hash, graph_revision=state.graph_stack.revision,
+        requirement_ids=("req-target",), binding_ids=("binding-target",),
+        challenge_ids=("challenge-target",), repair_slice_ids=("symbol-calc",),
+        expected_contract={"expected": 2}, failure_location={"path": "calc.py", "line": 2},
+        requirement_contract_id="target-contract", input_partition_id="target-input",
+        source_symbol="calc", failure_signature="calc-must-return-2",
+    )
+
+    objective = compile_repair_objective(state, frontier)
+
+    mechanical = [
+        item for item in objective.validation_obligations
+        if item.role == "MECHANICAL"
+    ]
+    selected = [
+        item for item in objective.validation_obligations
+        if item.challenge_id == "challenge-target"
+    ]
+    assert len(mechanical) == 1
+    assert mechanical[0].command[:4] == ("python", "-m", "compileall", "-q")
+    assert selected
+    assert len({item.key for item in objective.atomic_obligations}) == len(
+        objective.atomic_obligations
+    )
+    assert any(item.role == "MECHANICAL" for item in objective.atomic_obligations)
+    assert any(
+        item.input_partition_id == "challenge-target"
+        for item in objective.atomic_obligations
+    )
 
 
 def test_repair_objective_includes_all_locked_preservation_leaves(state_factory):
@@ -229,7 +271,10 @@ def test_preservation_objective_includes_real_passing_target_execution(state_fac
     assert target["actual"]["status"] == OutcomeStatus.PASS
     assert target["oracle_id"] == "oracle-target"
     assert target["oracle_authority"] == "A"
-    assert ("python", "check.py") in objective.reproduction_commands
+    assert any(
+        obligation.command == ("python", "check.py")
+        for obligation in objective.validation_obligations
+    )
     assert "challenge-target" in objective.protected_target_ids
     assert {item["binding_id"] for item in objective.bindings} >= {
         "binding-target", "binding-preservation",
@@ -352,6 +397,39 @@ def test_public_check_path_is_oracle_contamination(tmp_path):
     assert mechanical.oracle_contamination
 
 
+def test_mechanical_command_uses_shared_scenario_backend(tmp_path):
+    base = tmp_path / "base"
+    trial = tmp_path / "trial"
+    base.mkdir()
+    trial.mkdir()
+    (trial / "scenario-cwd").mkdir()
+    scenario = ExecutableScenario(
+        scenario_id="mechanical-scenario",
+        command=(
+            "python", "-c",
+            (
+                "import os, pathlib, sys; sys.exit(0 if "
+                "(os.environ['REACHPATCH_MECHANICAL_ENV'] == 'present' "
+                "and pathlib.Path.cwd().name == 'scenario-cwd') else 7)"
+            ),
+        ),
+        cwd="scenario-cwd",
+        environment=(("REACHPATCH_MECHANICAL_ENV", "present"),),
+        timeout_seconds=7.0,
+    )
+
+    result = run_mechanical_checks(
+        trial, diff_between(base, trial), command_scenarios=(scenario,),
+    )
+
+    assert result.passed
+    command = result.command_results[0]
+    assert command["cwd"] == "scenario-cwd"
+    assert command["environment"] == scenario.environment
+    assert command["timeout_seconds"] == 7.0
+    assert command["backend"] == "HOST"
+
+
 def _objective(state) -> RepairObjective:
     return RepairObjective(
         objective_id="objective",
@@ -362,10 +440,6 @@ def _objective(state) -> RepairObjective:
         related_failures=(),
         counterexamples=(),
         preservation_requirements=(),
-        reproduction_commands=(),
-        concrete_inputs=(),
-        input_derivations=(),
-        oracle_relations=(),
         observations=(),
         failure_signatures=(),
         first_divergences=(),
@@ -389,6 +463,89 @@ def _objective(state) -> RepairObjective:
     )
 
 
+def _validation(command, expected, requirement_id="req-preservation"):
+    return ValidationObligation(
+        validation_id=stable_id("test-validation", command, requirement_id, expected),
+        role="PRESERVATION", authority="A", command=command, cwd=".",
+        environment={}, timeout_seconds=60, backend="shared-executor",
+        concrete_input=None, input_derivation="test preservation replay",
+        oracle_id="oracle-preservation", expected_relation="preserve return value",
+        expected_observation=expected, requirement_id=requirement_id,
+        binding_id="binding-preservation", challenge_id="challenge-preservation",
+    )
+
+
+def test_run_validation_accepts_stable_pending_command_key(state_factory, monkeypatch):
+    state = state_factory()
+    state.run_root.mkdir()
+    command = ("python", "-c", "print(2)")
+    objective = replace(
+        _objective(state),
+        validation_obligations=(_validation(command, {"value": 2}),),
+    )
+    executor = RepairToolExecutor(
+        Path(state.working_checkpoint.snapshot_tree), state, objective,
+    )
+    seen = []
+    monkeypatch.setattr(
+        executor, "run_allowed_public_check",
+        lambda value: seen.append(tuple(value)) or {"ok": True},
+    )
+    key = stable_id("repair-validation-command", command)
+    assert executor.run_validation(key) == {"ok": True}
+    assert seen == [command]
+
+
+def test_registered_probe_enters_triplet_state_and_trial_graph(state_factory):
+    state = state_factory()
+    state.run_root.mkdir()
+    frontier = RepairFrontier.create(
+        kind=RepairFrontierKind.OBSERVATION_GAP,
+        patch_hash=state.graph_stack.patch_hash, graph_revision=0,
+        requirement_ids=("req-target",), binding_ids=("binding-target",),
+        expected_contract={"probe": "return-value"},
+        failure_location="calc",
+    )
+    state.repair_frontiers[frontier.frontier_id] = frontier
+    objective = replace(_objective(state), selected_frontier=frontier)
+    executor = RepairToolExecutor(
+        Path(state.working_checkpoint.snapshot_tree), state, objective,
+    )
+
+    written = executor.write_probe("observe_calc", "print(2)\n")
+    registered = executor.register_observation_contract(
+        {
+            "relation": "probe prints the observed return value",
+            "expected": 2, "comparator": "EQUALS",
+            "input_recipe": {
+                "command": ["python", written["path"]],
+                "requirement_id": "req-target",
+                "binding_id": "binding-target",
+            },
+        },
+        probe_id=written["probe_id"],
+    )
+    execution = executor.run_probe(probe_id=registered["probe_id"])
+
+    obligation_key = registered["obligation_key"]
+    assert execution["trial"]["status"] == "PASS"
+    assert obligation_key in state.atomic_obligations
+    assert state.atomic_evidence[obligation_key].stability_runs == 2
+    assert state.probe_registrations[registered["probe_id"]].authority == "PROVISIONAL"
+
+    trial_stack = _materialize_registered_probes(
+        state, state.graph_stack, frontier,
+    )
+    assert any(
+        cell.origin == "PROBE_REGISTRATION"
+        for cell in trial_stack.challenge_graph.cells.values()
+    )
+    store = CheckpointStore(state.run_root)
+    checkpoint = capture_current_graph_checkpoint(state, store, "PROBE_EVIDENCE")
+    restored = store.runtime_state(checkpoint.checkpoint_id)
+    assert restored.probe_registrations[registered["probe_id"]].execution_results["trial"].status == "PASS"
+
+
 def test_revision_modifies_current_working_tree(state_factory):
     state = state_factory()
     state.run_root.mkdir()
@@ -404,7 +561,7 @@ def test_revision_modifies_current_working_tree(state_factory):
     assert "+    return 3" in result.incremental_diff
 
 
-def test_revision_can_replace_cumulative_patch_through_empty_intermediate(state_factory):
+def test_revision_cannot_replace_cumulative_patch_through_empty_intermediate(state_factory):
     state = state_factory()
     state.run_root.mkdir()
     staging = state.run_root / "generator_staging" / "empty-revert"
@@ -416,16 +573,15 @@ def test_revision_can_replace_cumulative_patch_through_empty_intermediate(state_
         " def calc():\n-    return 2\n+    return 1\n"
     )
 
-    tools.apply_patch(revert)
+    with pytest.raises(RuntimeError, match="removes the complete cumulative diff"):
+        tools.apply_patch(revert)
     intermediate = diff_between(state.base_repository, staging)
-    assert intermediate.empty
-    with pytest.raises(RuntimeError, match="non-empty cumulative patch"):
-        tools.finish_revision("not finished while the replacement is absent")
+    assert "+    return 2" in intermediate.canonical_diff
 
     tools.apply_patch(
         "diff --git a/calc.py b/calc.py\n"
         "--- a/calc.py\n+++ b/calc.py\n@@ -1,2 +1,2 @@\n"
-        " def calc():\n-    return 1\n+    return 3\n"
+        " def calc():\n-    return 2\n+    return 3\n"
     )
     result = tools.finish_revision("replace the failed mechanism")
     replacement = diff_between(state.base_repository, staging)
@@ -488,7 +644,7 @@ def test_preservation_revision_requires_graph_grounded_execution(state_factory):
         objective_kind="PRESERVATION_REGRESSION",
         primary_requirement={"preservation": True},
         counterexamples=(value,),
-        reproduction_commands=(command,),
+        validation_obligations=(_validation(command, value.baseline_observation),),
     )
     staging = state.run_root / "generator_staging" / "grounded-validation"
     copy_source_tree(Path(state.working_checkpoint.snapshot_tree), staging)
@@ -538,7 +694,7 @@ def test_agent_executes_pending_graph_validations_without_model_guessing(state_f
         objective_kind="PRESERVATION_REGRESSION",
         primary_requirement={"preservation": True},
         counterexamples=(value,),
-        reproduction_commands=(command,),
+        validation_obligations=(_validation(command, value.baseline_observation),),
     )
     model_calls = []
 
@@ -649,7 +805,7 @@ def test_deepseek_continues_after_reverting_failed_working_mechanism(state_facto
     replacement = (
         "diff --git a/calc.py b/calc.py\n"
         "--- a/calc.py\n+++ b/calc.py\n@@ -1,2 +1,2 @@\n"
-        " def calc():\n-    return 1\n+    return 3\n"
+        " def calc():\n-    return 2\n+    return 3\n"
     )
 
     class Transport:
@@ -743,7 +899,7 @@ def test_deepseek_does_not_retain_base_only_revert_as_revision(state_factory):
     result = agent.revise(objective, tools)
 
     assert result["error_kind"] == "TURN_LIMIT"
-    assert not tools.inspect_diff()["canonical_diff"]
+    assert "+    return 2" in tools.inspect_diff()["canonical_diff"]
 
 
 def test_deepseek_executes_only_one_mutating_tool_call_per_turn(state_factory):
@@ -760,7 +916,11 @@ def test_deepseek_executes_only_one_mutating_tool_call_per_turn(state_factory):
         "--- a/calc.py\n+++ b/calc.py\n@@ -1,2 +1,2 @@\n"
         " def calc():\n-    return 1\n+    return 2\n"
     )
-    replacement = stale_reapply.replace("+    return 2", "+    return 3")
+    replacement = (
+        "diff --git a/calc.py b/calc.py\n"
+        "--- a/calc.py\n+++ b/calc.py\n@@ -1,2 +1,2 @@\n"
+        " def calc():\n-    return 2\n+    return 3\n"
+    )
 
     class Transport:
         def complete(
@@ -1388,6 +1548,33 @@ def test_apply_patch_rejects_removing_complete_cumulative_diff(state_factory):
     assert "-    return 2" in diff
 
 
+def test_revision_apply_patch_cannot_reset_incumbent_to_baseline(state_factory):
+    """A revision must preserve a non-empty incumbent cumulative patch."""
+    state = state_factory()
+    state.run_root.mkdir()
+    (state.base_repository / "calc.py").write_text(
+        "def calc():\n    return 2\n", encoding="utf-8",
+    )
+    staging = state.run_root / "generator_staging" / "prevent-revision-reset"
+    copy_source_tree(Path(state.working_checkpoint.snapshot_tree), staging)
+    tools = RepairToolExecutor(staging, state, _objective(state))
+    initial = (
+        "diff --git a/calc.py b/calc.py\n"
+        "--- a/calc.py\n+++ b/calc.py\n@@ -1,2 +1,2 @@\n"
+        " def calc():\n-    return 2\n+    return 3\n"
+    )
+    undo = (
+        "diff --git a/calc.py b/calc.py\n"
+        "--- a/calc.py\n+++ b/calc.py\n@@ -1,2 +1,2 @@\n"
+        " def calc():\n-    return 3\n+    return 2\n"
+    )
+
+    tools.apply_patch(initial)
+    with pytest.raises(RuntimeError, match="removes the complete cumulative diff"):
+        tools.apply_patch(undo)
+    assert "+    return 3" in tools.inspect_diff()["canonical_diff"]
+
+
 def test_apply_failure_forces_source_refresh_before_new_hunk(state_factory):
     state = state_factory()
     state.run_root.mkdir()
@@ -1828,7 +2015,19 @@ def test_revision_convergence_uses_incremental_not_cumulative_diff(state_factory
 
     staging = state.run_root / "generator_staging" / "revision"
     copy_source_tree(working, staging)
-    objective = _objective(state)
+    objective = replace(
+        _objective(state),
+        validation_obligations=(ValidationObligation(
+            validation_id="target-validation", role="TARGET", authority="A",
+            command=("python", "-c", "from calc import calc; assert calc() == 3"),
+            cwd=".", environment={}, timeout_seconds=60, backend="shared-executor",
+            concrete_input=None, input_derivation="test target replay",
+            oracle_id="target-oracle", expected_relation="calc returns 3",
+            expected_observation={"return_code": 0, "stdout": "", "stderr": "", "exception": None},
+            requirement_id="req-target", binding_id="binding-target",
+            challenge_id="challenge-target",
+        ),),
+    )
     tools = RepairToolExecutor(staging, state, objective)
     assert tools.tree != working.resolve()
     agent = DeepSeekAgent(Transport(), DeepSeekConfig(

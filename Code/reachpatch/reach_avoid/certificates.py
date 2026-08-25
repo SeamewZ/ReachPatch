@@ -101,6 +101,8 @@ def build_transition_certificate(
         generator_attempt_count=state.generator_attempt_count,
         challenge_round_count=state.challenge_round_count,
         recomputation_hash="",
+        selected_frontier_key=trial.evidence.selected_frontier_key,
+        selected_frontier_kind=trial.evidence.selected_frontier_kind,
     )
     executions = challenge.executions if challenge else ()
     trial_graphs = {

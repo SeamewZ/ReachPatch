@@ -9,7 +9,7 @@ import tempfile
 import types
 import typing
 from pathlib import Path
-from typing import Any, Iterable, TypeVar, get_args, get_origin, get_type_hints
+from typing import Any, TypeVar, get_args, get_origin, get_type_hints
 
 from reachpatch.challenge_graph.models import open_high_challenge_ids
 from reachpatch.execution.worktree import copy_source_tree, diff_between, tree_hash
@@ -248,6 +248,21 @@ def _runtime_state(state: ReachAvoidState | None) -> CheckpointRuntimeState:
         },
         "challenge_attempts": dict(state.challenge_attempts),
         "transition_counts": dict(state.transition_counts),
+        "last_mechanical_result": (
+            state.last_mechanical_result.to_dict()
+            if state.last_mechanical_result is not None else None
+        ),
+        "atomic_obligations": {
+            key: value.to_dict() for key, value in state.atomic_obligations.items()
+        },
+        "atomic_evidence": {
+            key: value.to_dict() for key, value in state.atomic_evidence.items()
+        },
+        "probe_registrations": {
+            key: value.to_dict()
+            for key, value in state.probe_registrations.items()
+        },
+        "consecutive_provisional_without_progress": state.consecutive_provisional_without_progress,
     })
 
 
@@ -546,25 +561,10 @@ def restore_checkpoint(
     state.repair_frontiers = runtime.repair_frontiers
     state.challenge_attempts = runtime.challenge_attempts
     state.transition_counts = runtime.transition_counts
-
-
-def select_best_checkpoint(
-    checkpoints: Iterable[StateCheckpoint],
-) -> StateCheckpoint:
-    values = tuple(checkpoints)
-    if not values:
-        raise ValueError("no checkpoints are available")
-    # A checkpoint that contains paired execution evidence is always a more
-    # truthful terminal record than an otherwise safer-looking checkpoint
-    # whose Challenge graph has never run.  Rank only within that set once
-    # any such evidence exists.
-    evidence_bearing = tuple(
-        item for item in values
-        if (
-            item.evidence.execution_confirmed_requirement_count
-            or item.evidence.execution_confirmed_binding_count
-            or item.evidence.confirmed_target_pass_count
-            or item.evidence.closed_confirmed_failure_count
-        )
+    state.last_mechanical_result = runtime.last_mechanical_result
+    state.atomic_obligations = dict(runtime.atomic_obligations)
+    state.atomic_evidence = dict(runtime.atomic_evidence)
+    state.probe_registrations = dict(runtime.probe_registrations)
+    state.consecutive_provisional_without_progress = (
+        runtime.consecutive_provisional_without_progress
     )
-    return max(evidence_bearing or values, key=lambda item: item.evidence.rank())

@@ -5,7 +5,7 @@ from pathlib import Path
 
 from reachpatch.models.core import Instance
 from reachpatch.models.reach_avoid import GeneratorResult
-from reachpatch.reach_avoid.controller import ReachAvoidController
+from reachpatch.reach_avoid.controller import ReachAvoidController, incremental_mechanism_hash
 from reachpatch.reach_avoid.controller import ReachAvoidConfig
 from reachpatch.reach_avoid.gates import evaluate_reach
 from reachpatch.models.graphs import ChallengeStatus
@@ -26,6 +26,10 @@ _PATCH = """diff --git a/calc.py b/calc.py
 class InitialGenerator:
     def revise(self, objective, tools, initial=False):
         tools.apply_patch(_PATCH)
+        while tools.validation_status()["pending_commands"]:
+            tools.run_allowed_public_check(
+                tools.validation_status()["pending_commands"][0]
+            )
         tools.finish_revision("initial")
         return {"summary": "initial", "mechanism": "return"}
 
@@ -50,6 +54,10 @@ class EmptyThenInitialGenerator:
                 "error_kind": "EMPTY_RESPONSE",
             }
         tools.apply_patch(_PATCH)
+        while tools.validation_status()["pending_commands"]:
+            tools.run_allowed_public_check(
+                tools.validation_status()["pending_commands"][0]
+            )
         tools.finish_revision("initial")
         return {"summary": "initial", "mechanism": "return"}
 
@@ -62,6 +70,10 @@ class InitialThenEmptyGenerator:
         self.calls += 1
         if initial:
             tools.apply_patch(_PATCH)
+            while tools.validation_status()["pending_commands"]:
+                tools.run_allowed_public_check(
+                    tools.validation_status()["pending_commands"][0]
+                )
             tools.finish_revision("initial partial patch")
             return {"summary": "initial partial patch", "mechanism": "return-two"}
         return {
@@ -116,6 +128,12 @@ def test_initial_objective_contains_bounded_non_normative_public_context(tmp_pat
     assert objective.public_context[1]["normative"] is False
     assert objective.public_context[1]["authority"] == "PROVISIONAL"
     assert len(objective.public_context[1]["content"]) == 16000
+    mechanical = [
+        item for item in objective.validation_obligations
+        if item.role == "MECHANICAL"
+    ]
+    assert len(mechanical) == 1
+    assert any(item.role == "MECHANICAL" for item in objective.atomic_obligations)
 
 
 def test_empty_response_does_not_consume_revision(state_factory):
@@ -222,6 +240,12 @@ def test_same_diff_does_not_consume_revision(state_factory):
     assert not transition.trial_patch_changed
     assert not transition.entered_evaluation
     assert state.repair_revision_count == 0
+
+
+def test_rejected_incremental_diff_uses_the_same_hash_as_repair_gate():
+    rejected = _PATCH
+    attempted = (incremental_mechanism_hash(rejected),)
+    assert incremental_mechanism_hash(rejected) in attempted
 
 
 def test_eight_real_revisions_is_maximum():

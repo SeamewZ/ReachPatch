@@ -5,18 +5,21 @@ import json
 import os
 import re
 import shutil
-import subprocess
 import time
 from pathlib import Path
 from typing import Any
 
+from reachpatch.execution import execute_transition_triplet
 from reachpatch.execution.worktree import (
     apply_patch_action, apply_unified_diff, diff_between,
 )
 from reachpatch.execution.trace import run_trace
 from reachpatch.models.base import stable_id
-from reachpatch.models.graphs import ProgramEdgeKind
-from reachpatch.models.reach_avoid import ReachAvoidState, RepairObjective
+from reachpatch.models.evidence import ObservationContract
+from reachpatch.models.graphs import InputRecipe, ProgramEdgeKind
+from reachpatch.models.reach_avoid import (
+    ProbeRegistration, ReachAvoidState, RepairObjective,
+)
 from reachpatch.program_graph import RepositoryIndex
 
 
@@ -32,9 +35,7 @@ class RepairToolExecutor:
         self.objective = objective
         self.finished = False
         self.finish_summary = ""
-        self.allowed_commands = set(objective.reproduction_commands) | {
-            tuple(item.command) for item in objective.validation_obligations
-        }
+        self.allowed_commands = {tuple(item.command) for item in objective.validation_obligations}
         self._indexed_source_nodes: dict[str, dict[str, Any]] = {}
         self._read_intervals: dict[str, list[tuple[int, int]]] = {}
         self._repository_index: RepositoryIndex | None = None
@@ -175,21 +176,23 @@ class RepairToolExecutor:
             str(item["validation_id"])
             for item in outcomes if item.get("outcome") == "SATISFIED"
         )
+        required_count = sum(len(items) for items in specs.values())
         return {
-            "required_count": sum(len(items) for items in specs.values()),
+            "required_count": required_count,
             "pending_count": sum(len(specs[item]) for item in pending_commands),
             "pending_commands": pending_commands,
             "failed_validation_ids": failed_ids,
             "unknown_validation_ids": unknown_ids,
             "satisfied_validation_ids": satisfied_ids,
-            "ready": not pending_commands and not failed_ids,
+            "outcomes": outcomes,
+            "ready": bool(required_count) and not pending_commands and not failed_ids,
         }
 
     def validation_summary(self) -> dict[str, Any]:
         status = self.validation_status()
         return {
             key: value for key, value in status.items()
-            if key != "pending_commands"
+            if key not in {"pending_commands", "outcomes"}
         } | {
             "pending_command_ids": tuple(
                 stable_id("repair-validation-command", command)
@@ -514,7 +517,7 @@ class RepairToolExecutor:
         probe_root.mkdir(parents=True, exist_ok=True)
         path = (probe_root / name).with_suffix(".py")
         tree = ast.parse(source, filename=str(path))
-        forbidden = {ast.Import, ast.ImportFrom}
+        forbidden = (ast.Import, ast.ImportFrom)
         for node in ast.walk(tree):
             if isinstance(node, forbidden):
                 modules = [alias.name.split(".", 1)[0] for alias in node.names]
@@ -523,23 +526,197 @@ class RepairToolExecutor:
             if isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id in {"eval", "exec", "open", "__import__"}:
                 raise ValueError("probe contains a forbidden call")
         path.write_text(source, encoding="utf-8")
-        return {"probe_id": stable_id("probe", name, source), "path": str(path), "validated": True}
+        probe_id = stable_id("probe", name, source)
+        metadata = {
+            "probe_id": probe_id, "source_path": str(path),
+            "path": str(path),
+            "name": name, "validated": True,
+        }
+        (probe_root / f"{probe_id}.json").write_text(
+            json.dumps(metadata, sort_keys=True) + "\n", encoding="utf-8",
+        )
+        self._record_tool_event("write_probe", {"name": name}, result=metadata)
+        return metadata
 
-    def run_probe(self, command: tuple[str, ...] | list[str], *, cwd: str = ".", timeout_seconds: float = 60.0, tree: str = "working") -> dict[str, Any]:
-        normalized = tuple(map(str, command))
-        selected_tree = self.state.base_repository if tree == "baseline" else self.tree
-        trace = run_trace(selected_tree, normalized, cwd=cwd, timeout_seconds=timeout_seconds)
-        return trace.to_dict()
+    def _probe_metadata(self, probe_id: str) -> dict[str, Any]:
+        path = self.state.run_root / "probes" / f"{probe_id}.json"
+        if not path.is_file():
+            raise KeyError(f"unknown probe_id: {probe_id}")
+        raw = json.loads(path.read_text(encoding="utf-8"))
+        source_path = Path(str(raw.get("source_path", ""))).resolve()
+        probe_root = (self.state.run_root / "probes").resolve()
+        if not source_path.is_relative_to(probe_root) or not source_path.is_file():
+            raise ValueError("probe source is missing or outside the isolated probe directory")
+        return raw
 
-    def register_observation_contract(self, contract: dict[str, Any]) -> dict[str, Any]:
-        contract_id = stable_id("observation-contract", contract)
-        destination = self.state.run_root / "observation_contracts.jsonl"
+    def register_observation_contract(
+        self,
+        contract: dict[str, Any],
+        *,
+        probe_id: str | None = None,
+        input_recipe: dict[str, Any] | None = None,
+        frontier_key: str | None = None,
+        authority: str | None = None,
+    ) -> dict[str, Any]:
+        """Register a validated probe contract in the live repair state.
+
+        A model-supplied contract is provisional unless it identifies existing
+        public A/B/C evidence.  The registration is later merged into the
+        trial Binding/Challenge graphs by the transition evaluator.
+        """
+        if not isinstance(contract, dict):
+            raise ValueError("observation contract must be an object")
+        if "expected" not in contract:
+            raise ValueError("observation contract requires an expected payload")
+        observation = ObservationContract(
+            relation=str(contract.get("relation", "probe observation")),
+            expected=contract["expected"],
+            observable=str(contract.get("observable", "stdout")),
+            comparator=str(contract.get("comparator", "EQUALS")),
+        )
+        if observation.normalized_comparator == "RELATION_HOLDS" and (
+            str(contract.get("comparator", "EQUALS")).upper()
+            not in {"RELATION_HOLDS", "RELATION HOLDS"}
+        ):
+            raise ValueError("unsupported observation comparator")
+        selected = self.objective.selected_frontier
+        linked_key = frontier_key or (selected.semantic_key if selected else "")
+        if not linked_key:
+            raise ValueError("probe must be linked to the selected RepairFrontier")
+        recipe_raw = dict(input_recipe or contract.get("input_recipe") or {})
+        command = tuple(map(str, recipe_raw.get("command", contract.get("command", ()))))
+        recipe = InputRecipe(
+            recipe_id=stable_id("probe-input", linked_key, command, recipe_raw.get("concrete_input")),
+            kind=str(recipe_raw.get("kind", "PROBE")),
+            concrete_input=recipe_raw.get("concrete_input"),
+            derivation=tuple(map(str, recipe_raw.get("derivation", ("registered probe",)))),
+            command=command,
+            environment=tuple(sorted(
+                (str(key), str(value))
+                for key, value in dict(recipe_raw.get("environment", {})).items()
+            )),
+            trace_symbols=tuple(map(str, recipe_raw.get("trace_symbols", ()))),
+            call_mode="PROBE",
+        )
+        requested_authority = authority or str(contract.get("authority", "PROVISIONAL"))
+        trusted = {
+            obligation.authority
+            for obligation in self.objective.validation_obligations
+            if obligation.authority in {"A", "B", "C"}
+            and observation.contract_id == stable_id(
+                "objective-contract", obligation.expected_relation, obligation.expected_observation,
+            )
+        }
+        effective_authority = requested_authority if requested_authority in trusted else "PROVISIONAL"
+        metadata = self._probe_metadata(probe_id) if probe_id else {
+            "probe_id": stable_id("registered-probe", linked_key, recipe, observation),
+            "source_path": "",
+        }
+        requirement_id = str(recipe_raw.get("requirement_id") or next(
+            iter(getattr(selected, "requirement_ids", ())), ""
+        ))
+        if not requirement_id:
+            raise ValueError("probe must identify a Requirement")
+        binding_id = recipe_raw.get("binding_id") or next(
+            iter(getattr(selected, "binding_ids", ())), None
+        )
+        registration = ProbeRegistration(
+            probe_id=str(metadata["probe_id"]), source_path=str(metadata.get("source_path", "")),
+            input_recipe=recipe, observation_contract=observation,
+            linked_frontier_key=linked_key, authority=effective_authority,
+            requirement_id=requirement_id, binding_id=str(binding_id) if binding_id else None,
+            path_class_id=(str(recipe_raw["path_class_id"]) if recipe_raw.get("path_class_id") else None),
+            cwd=str(recipe_raw.get("cwd", ".")),
+            environment=recipe.environment,
+            timeout_seconds=float(recipe_raw.get("timeout_seconds", 60.0)),
+            backend=str(recipe_raw.get("backend", "shared-executor")),
+        )
+        self.state.probe_registrations[registration.probe_id] = registration
+        destination = self.state.run_root / "probe_registrations.jsonl"
         with destination.open("a", encoding="utf-8") as handle:
-            handle.write(json.dumps({"contract_id": contract_id, **contract}, sort_keys=True, default=str) + "\n")
-        return {"contract_id": contract_id, "contract": contract}
+            handle.write(json.dumps(registration.to_dict(), sort_keys=True, default=str) + "\n")
+        self._record_tool_event(
+            "register_observation_contract", {"probe_id": registration.probe_id},
+            result={"probe_id": registration.probe_id, "authority": effective_authority,
+                    "obligation_key": registration.atomic_obligation.key},
+        )
+        return {
+            "probe_id": registration.probe_id, "contract_id": observation.contract_id,
+            "authority": effective_authority,
+            "obligation_key": registration.atomic_obligation.key,
+        }
+
+    def run_probe(
+        self, command: tuple[str, ...] | list[str] | None = None, *,
+        probe_id: str | None = None, cwd: str = ".",
+        timeout_seconds: float = 60.0, tree: str = "triplet",
+    ) -> dict[str, Any]:
+        """Run a registered probe on baseline, incumbent and trial trees."""
+        normalized = tuple(map(str, command or ()))
+        if probe_id is not None:
+            registration = self.state.probe_registrations.get(probe_id)
+        else:
+            registration = next((item for item in self.state.probe_registrations.values()
+                                 if not normalized or item.input_recipe.command == normalized), None)
+        if registration is None:
+            raise KeyError("register an observation contract before running a probe")
+        if normalized and normalized != registration.input_recipe.command:
+            raise ValueError("probe command differs from its registered InputRecipe")
+        if tree not in {"triplet", "baseline", "incumbent", "trial", "working"}:
+            raise ValueError("probe tree must identify baseline, incumbent, trial, or triplet")
+        obligation = registration.atomic_obligation
+        bundle = execute_transition_triplet(
+            self.state.base_repository, Path(self.state.working_checkpoint.snapshot_tree),
+            self.tree, (obligation,), {
+                "stability_runs": 2, "backend": registration.backend,
+                "timeout_seconds": registration.timeout_seconds,
+                "cwd": registration.cwd,
+                "environment": dict(registration.environment),
+            },
+        )
+        updated = ProbeRegistration(
+            probe_id=registration.probe_id, source_path=registration.source_path,
+            input_recipe=registration.input_recipe,
+            observation_contract=registration.observation_contract,
+            linked_frontier_key=registration.linked_frontier_key, authority=registration.authority,
+            requirement_id=registration.requirement_id, binding_id=registration.binding_id,
+            path_class_id=registration.path_class_id, cwd=registration.cwd,
+            environment=registration.environment, timeout_seconds=registration.timeout_seconds,
+            backend=registration.backend, execution_results={
+                "baseline": bundle.baseline[obligation.key],
+                "incumbent": bundle.incumbent[obligation.key],
+                "trial": bundle.trial[obligation.key],
+            },
+        )
+        self.state.probe_registrations[updated.probe_id] = updated
+        self.state.atomic_obligations[obligation.key] = obligation
+        self.state.atomic_evidence[obligation.key] = bundle.trial[obligation.key]
+        result = {
+            "probe_id": updated.probe_id,
+            "obligation_key": obligation.key,
+            "baseline": bundle.baseline[obligation.key].to_dict(),
+            "incumbent": bundle.incumbent[obligation.key].to_dict(),
+            "trial": bundle.trial[obligation.key].to_dict(),
+        }
+        self._record_tool_event("run_probe", {"probe_id": updated.probe_id}, result=result)
+        return result
 
     def run_validation(self, validation_id: str) -> dict[str, Any]:
         obligation = next((item for item in self.objective.validation_obligations if item.validation_id == validation_id), None)
+        if obligation is None:
+            # validation_summary exposes stable command keys so the model can
+            # execute a pending obligation without depending on an internal
+            # per-obligation id. Accept those keys here as well; previously a
+            # perfectly valid pending command caused a KeyError and trapped
+            # revision generation in a read/retry loop.
+            obligation = next(
+                (
+                    item for item in self.objective.validation_obligations
+                    if stable_id("repair-validation-command", tuple(item.command))
+                    == validation_id
+                ),
+                None,
+            )
         if obligation is None:
             raise KeyError(validation_id)
         return self.run_allowed_public_check(obligation.command)
@@ -652,11 +829,11 @@ class RepairToolExecutor:
                 raise RuntimeError(
                     "generator patch is a no-op against the current working tree"
                 )
-            if (
-                self.objective.objective_kind == "INITIAL_PATCH"
-                and before.canonical_diff.strip()
-                and not after.canonical_diff.strip()
-            ):
+            if before.canonical_diff.strip() and not after.canonical_diff.strip():
+                # A revision is an edit to the incumbent working patch, never
+                # a reset to the baseline. Allowing a model to erase the
+                # incumbent here silently converts a real revision attempt
+                # into an empty incremental diff.
                 raise RuntimeError(
                     "generator patch removes the complete cumulative diff; submit a "
                     "replacement edit that keeps a non-empty executable patch"
@@ -809,10 +986,35 @@ class RepairToolExecutor:
                 "finish_revision requires the graph-grounded reproduction commands "
                 "for every open preservation counterexample and protected target"
             )
-        if validation["failed_validation_ids"]:
+        failed_validations = tuple(
+            item for item in validation.get("outcomes", ())
+            if item.get("outcome") == "FAILED"
+        )
+        selected_kind = getattr(
+            getattr(self.objective, "selected_frontier", None), "kind", None,
+        )
+        selected_kind = getattr(selected_kind, "value", selected_kind)
+        deferred_preservation_only = (
+            selected_kind == "BEHAVIOR_FAILURE"
+            or (
+                selected_kind is None
+                and self.objective.objective_kind in {"CONFIRMED_FAILURE", "BEHAVIOR_FAILURE"}
+            )
+        ) and bool(failed_validations) and all(
+            item.get("evidence_kind") in {"PRESERVATION", "IMPACT"}
+            for item in failed_validations
+        ) and any(
+            item.get("outcome") == "SATISFIED"
+            and item.get("evidence_kind") == "TARGET"
+            for item in validation.get("outcomes", ())
+        )
+        if validation["failed_validation_ids"] and not deferred_preservation_only:
             raise RuntimeError(
                 "finish_revision rejects an edit that still fails graph-grounded "
-                "validation: " + ", ".join(validation["failed_validation_ids"])
+                "validation: " + ", ".join(
+                    f"{item['validation_id']}[{item.get('evidence_kind', 'UNKNOWN')}]"
+                    for item in failed_validations
+                )
             )
         self.finished = True
         self.finish_summary = summary
@@ -823,6 +1025,9 @@ class RepairToolExecutor:
             "incremental_patch_hash": current.patch_hash,
             "changed_files": current.changed_files,
             "validation_status": self.validation_summary(),
+            "deferred_preservation_validation_ids": tuple(
+                str(item["validation_id"]) for item in failed_validations
+            ) if deferred_preservation_only else (),
         }
 
     def cumulative_patch_rejected(self, patch_hash: str | None = None) -> bool:
@@ -881,8 +1086,8 @@ TOOL_SCHEMAS = (
     {"type": "function", "function": {"name": "apply_patch", "parameters": {"type": "object", "properties": {"patch": {"type": "string"}}, "required": ["patch"]}}},
     {"type": "function", "function": {"name": "run_allowed_public_check", "parameters": {"type": "object", "properties": {"command": {"type": "array", "items": {"type": "string"}}}, "required": ["command"]}}},
     {"type": "function", "function": {"name": "write_probe", "parameters": {"type": "object", "properties": {"name": {"type": "string"}, "source": {"type": "string"}}, "required": ["name", "source"]}}},
-    {"type": "function", "function": {"name": "run_probe", "parameters": {"type": "object", "properties": {"command": {"type": "array", "items": {"type": "string"}}, "cwd": {"type": "string"}, "timeout_seconds": {"type": "number"}, "tree": {"type": "string"}}, "required": ["command"]}}},
-    {"type": "function", "function": {"name": "register_observation_contract", "parameters": {"type": "object", "properties": {"contract": {"type": "object"}}, "required": ["contract"]}}},
+    {"type": "function", "function": {"name": "run_probe", "parameters": {"type": "object", "properties": {"probe_id": {"type": "string"}, "command": {"type": "array", "items": {"type": "string"}}, "cwd": {"type": "string"}, "timeout_seconds": {"type": "number"}, "tree": {"type": "string"}}, "required": ["probe_id"]}}},
+    {"type": "function", "function": {"name": "register_observation_contract", "parameters": {"type": "object", "properties": {"contract": {"type": "object"}, "probe_id": {"type": "string"}, "input_recipe": {"type": "object"}, "frontier_key": {"type": "string"}, "authority": {"type": "string"}}, "required": ["contract"]}}},
     {"type": "function", "function": {"name": "run_validation", "parameters": {"type": "object", "properties": {"validation_id": {"type": "string"}}, "required": ["validation_id"]}}},
     {"type": "function", "function": {"name": "finish_revision", "parameters": {"type": "object", "properties": {"summary": {"type": "string"}, "mechanism": {"type": "string"}}, "required": ["summary"]}}},
 )

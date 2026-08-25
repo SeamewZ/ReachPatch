@@ -13,7 +13,7 @@ from reachpatch.models.evidence import (
 )
 from reachpatch.models.graphs import (
     BindingGraph, BindingStatus, BindingUnit, ChallengeCell, ChallengeGraph,
-    ChallengeStatus, ExecutableScenario, GraphStack, InputRecipe, PathClass,
+    ChallengeStatus, ExecutableScenario, GraphBudget, GraphStack, InputRecipe, PathClass,
     ProgramGraph, ProgramNode, ProgramNodeKind, RequirementGraph,
     RequirementLeaf,
 )
@@ -122,10 +122,10 @@ def make_state(tmp_path: Path, **stack_options) -> ReachAvoidState:
     )
     return ReachAvoidState(
         "instance", "run", base, "base", tmp_path / "run", stack,
-        checkpoint, checkpoint, None, {checkpoint.checkpoint_id: checkpoint},
+        checkpoint, None, {checkpoint.checkpoint_id: checkpoint},
         ObservationBundle(), [], LockedCheckSet(), [], {},
         GeneratorSession("session"), None, 0, 0, 0, 0, {},
-        ReachAvoidPhase.CHALLENGE, None, 100, 100,
+        ReachAvoidPhase.CHALLENGE, None, 100, 100, GraphBudget(max_files=8, max_nodes=1500),
     )
 
 

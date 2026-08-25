@@ -1,5 +1,5 @@
 from .mechanical import run_mechanical_checks
-from .paired import clear_execution_hot_cache, execute_paired
+from .paired import clear_execution_hot_cache, execute_paired, execute_transition_triplet
 from .trace import run_trace
 from .worktree import (
     apply_generator_result, apply_patch_action, apply_unified_diff, copy_source_tree,

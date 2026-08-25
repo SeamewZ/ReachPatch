@@ -86,7 +86,13 @@ class DeepSeekHTTPTransport:
             raise urllib.error.HTTPError(
                 exc.url, exc.code, reason, exc.headers, None,
             ) from exc
-        return dict(raw["choices"][0]["message"])
+        choice = dict(raw["choices"][0])
+        message = dict(choice.get("message") or {})
+        # Preserve provider termination metadata.  In particular, a length
+        # truncated response must not be interpreted as an empty repair and
+        # must leave any already-applied working edit intact.
+        message["_finish_reason"] = choice.get("finish_reason")
+        return message
 
 
 class DeepSeekAgent:
@@ -143,24 +149,27 @@ class DeepSeekAgent:
             }
             for item in objective.related_requirements[:16]
         )
-        executions = tuple({
-            "command": command,
-            "input": cls._compact(
-                objective.concrete_inputs[index]
-                if index < len(objective.concrete_inputs) else None,
-                string_limit=900,
-            ),
-            "derivation": cls._compact(
-                objective.input_derivations[index]
-                if index < len(objective.input_derivations) else (),
-                string_limit=1400,
-            ),
-            "oracle": cls._compact(
-                objective.oracle_relations[index]
-                if index < len(objective.oracle_relations) else {},
-                string_limit=1400,
-            ),
-        } for index, command in enumerate(objective.reproduction_commands[:16]))
+        executions = tuple(
+            cls._compact({
+                "validation_id": obligation.validation_id,
+                "role": obligation.role,
+                "authority": obligation.authority,
+                "command": obligation.command,
+                "cwd": obligation.cwd,
+                "environment": obligation.environment,
+                "timeout_seconds": obligation.timeout_seconds,
+                "backend": obligation.backend,
+                "input": obligation.concrete_input,
+                "derivation": obligation.input_derivation,
+                "oracle_id": obligation.oracle_id,
+                "expected_relation": obligation.expected_relation,
+                "expected_observation": obligation.expected_observation,
+                "requirement_id": obligation.requirement_id,
+                "binding_id": obligation.binding_id,
+                "challenge_id": obligation.challenge_id,
+            }, string_limit=2200)
+            for obligation in objective.validation_obligations[:24]
+        )
         slices = []
         total = 0
         for item in objective.editable_source_slices:
@@ -199,6 +208,10 @@ class DeepSeekAgent:
             ),
             "validation_obligations": cls._compact(
                 tuple(item.to_dict() for item in objective.validation_obligations),
+                string_limit=5000,
+            ),
+            "atomic_obligations": cls._compact(
+                tuple(item.to_dict() for item in objective.atomic_obligations),
                 string_limit=5000,
             ),
             "working_patch_hash": objective.working_patch_hash,
@@ -520,7 +533,23 @@ class DeepSeekAgent:
                     })
                 continue
             force_patch_next = False
+            finish_reason = message.pop("_finish_reason", None)
             messages.append(message)
+            if finish_reason == "length":
+                # The tree is authoritative.  Keep a partial cumulative edit
+                # and give the same frontier one bounded context-compression
+                # recovery turn instead of clearing or sealing the patch.
+                recovery_used = True
+                turn_limit = max(turn_limit, self.config.root_recovery_max_turns)
+                messages.append({
+                    "role": "user",
+                    "content": (
+                        "The provider response was truncated. Preserve the current working "
+                        "patch, compress context to the selected frontier and continue "
+                        "with exactly one executable tool call."
+                    ),
+                })
+                continue
             tool_calls = message.get("tool_calls") or ()
             allowed_tool_names = {
                 schema["function"]["name"] for schema in available_tools
@@ -715,6 +744,19 @@ class DeepSeekAgent:
                 break
         final_incremental = tools.inspect_incremental_diff()
         final_cumulative = tools.inspect_diff()
+        # Validation is deterministic evidence collection, not an extra model
+        # turn.  A model can consume its final available turn by applying the
+        # edit, so drain the bounded, graph-grounded validation queue before
+        # deciding whether that edit may be retained for transition evaluation.
+        # This never treats an empty validation set as ready.
+        if (
+            final_incremental.get("canonical_diff", "").strip()
+            and final_cumulative.get("canonical_diff", "").strip()
+        ):
+            while tools.validation_status()["pending_commands"]:
+                tools.run_allowed_public_check(
+                    tools.validation_status()["pending_commands"][0]
+                )
         retained_edit = bool(
             final_incremental.get("canonical_diff", "").strip()
             and final_cumulative.get("canonical_diff", "").strip()

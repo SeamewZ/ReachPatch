@@ -117,6 +117,14 @@ class RepairPlayer:
             ),
             "objective_id": objective.objective_id,
             "objective_kind": objective.objective_kind,
+            "selected_frontier_key": (
+                objective.selected_frontier.semantic_key
+                if objective.selected_frontier is not None else None
+            ),
+            "selected_frontier_kind": (
+                objective.selected_frontier.kind.value
+                if objective.selected_frontier is not None else None
+            ),
             "source_patch_hash": state.graph_stack.patch_hash,
             "incremental_patch_hash": incremental.patch_hash,
             "incremental_diff_hash": content_hash(incremental.canonical_diff),

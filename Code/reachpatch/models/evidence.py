@@ -69,7 +69,19 @@ class ObservationContract(SerializableRecord):
         """Compare a concrete observation without free-text equality."""
         value = observation
         if isinstance(observation, RunObservation):
-            value = observation.value if observation.value is not None else observation.to_dict()
+            value = observation.value
+            if value is None:
+                output = observation.stdout.strip()
+                if output:
+                    last_line = output.splitlines()[-1]
+                    try:
+                        import json
+                        value = json.loads(last_line)
+                    except (json.JSONDecodeError, TypeError):
+                        try:
+                            value = ast.literal_eval(last_line)
+                        except (ValueError, SyntaxError):
+                            value = last_line
             if self.normalized_comparator == "EXIT_ZERO":
                 return observation.return_code == 0 and observation.status is OutcomeStatus.PASS
             if self.normalized_comparator in {"RAISES", "NOT_RAISES"}:
@@ -77,6 +89,17 @@ class ObservationContract(SerializableRecord):
                 return raised if self.normalized_comparator == "RAISES" else not raised
         comparator = self.normalized_comparator
         expected = self.expected
+        if isinstance(observation, RunObservation) and isinstance(expected, dict) and any(
+            key in expected for key in ("exit_code", "stdout", "stderr", "value", "exception")
+        ):
+            observed = {
+                "exit_code": observation.return_code,
+                "stdout": observation.stdout,
+                "stderr": observation.stderr,
+                "value": value,
+                "exception": observation.exception,
+            }
+            return all(observed.get(key) == expected_value for key, expected_value in expected.items())
         if comparator in {"EQUALS", "ORDER_EQUALS", "STATE_DELTA_EQUALS"}:
             return _normalize_observation_value(value) == _normalize_observation_value(expected)
         if comparator == "NOT_EQUALS":
@@ -929,6 +952,9 @@ class TraceBundle(SerializableRecord):
     first_project_frame: str | None = None
     stable_runs: int = 1
     comparable: bool = True
+    cwd: str = "."
+    environment: tuple[tuple[str, str], ...] = ()
+    backend: str = "shared-executor"
 
 
 @dataclass(frozen=True, slots=True)
@@ -945,6 +971,9 @@ class PairedTraceBundle(SerializableRecord):
     expected_relation: str
     stable_runs: int
     previous: TraceBundle | None = None
+    # The normalized observation-contract identity is execution evidence.
+    # ``expected_relation`` remains a human-readable diagnostic only.
+    oracle_contract_id: str = ""
 
     @property
     def comparable(self) -> bool:
@@ -1013,6 +1042,15 @@ class CounterexamplePacket(SerializableRecord):
     protected_behavior: tuple[str, ...] = ()
     failure_kind: str | None = None
     stability_evidence: dict[str, Any] = field(default_factory=dict)
+    # Structured observations are the executable contract for the next repair
+    # objective.  The legacy baseline/patched fields remain as raw trace
+    # payloads, while these aliases make incumbent-vs-trial comparisons
+    # explicit and prevent a free-text relation from being mistaken for an
+    # oracle value.
+    expected_observation: Any = None
+    incumbent_observation: Any = None
+    trial_observation: Any = None
+    comparator: str = "RELATION_HOLDS"
 
 
 @dataclass(frozen=True, slots=True)

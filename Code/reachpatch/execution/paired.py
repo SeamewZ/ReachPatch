@@ -10,10 +10,11 @@ import tempfile
 
 from reachpatch.models.base import canonical_json, content_hash, stable_id
 from reachpatch.models.evidence import (
-    ExecutableOracle, OutcomeStatus, PairClassification, PairedTraceBundle,
+    ExecutableOracle, ObservationContract, OutcomeStatus, PairClassification, PairedTraceBundle,
     RunObservation, TraceBundle,
 )
 from reachpatch.models.graphs import ExecutableScenario, InputRecipe
+from reachpatch.models.reach_avoid import AtomicEvidence, AtomicObligation, TransitionTraceBundle
 from reachpatch.oracle.observe import observe_oracle
 
 from .trace import run_trace
@@ -23,10 +24,12 @@ from .worktree import diff_between, tree_hash
 _CACHE_SCHEMA = "reachpatch-paired-execution-v2"
 _HOT_CACHE_LIMIT = 12
 _HOT_CACHE: OrderedDict[str, PairedTraceBundle] = OrderedDict()
+_TRIPLET_CACHE: OrderedDict[str, TransitionTraceBundle] = OrderedDict()
 
 
 def clear_execution_hot_cache() -> None:
     _HOT_CACHE.clear()
+    _TRIPLET_CACHE.clear()
 
 
 def _hot_get(cache_key: str) -> PairedTraceBundle | None:
@@ -70,6 +73,9 @@ def _trace_from_dict(raw: dict) -> TraceBundle:
         first_project_frame=raw.get("first_project_frame"),
         stable_runs=int(raw.get("stable_runs", 1)),
         comparable=bool(raw.get("comparable", True)),
+        cwd=str(raw.get("cwd", ".")),
+        environment=tuple(tuple(item) for item in raw.get("environment", ())),
+        backend=str(raw.get("backend", "shared-executor")),
     )
 
 
@@ -88,6 +94,7 @@ def _bundle_from_dict(raw: dict) -> PairedTraceBundle:
         expected_relation=str(raw["expected_relation"]),
         stable_runs=int(raw["stable_runs"]),
         previous=_trace_from_dict(previous) if previous is not None else None,
+        oracle_contract_id=str(raw.get("oracle_contract_id", "")),
     )
 
 
@@ -167,6 +174,7 @@ def execute_paired(
     challenge_id: str,
     patch_hash: str,
     role: str,
+    observation_contract: ObservationContract | None = None,
     previous_tree: Path | None = None,
     stability_runs: int = 2,
     cache_dir: Path | None = None,
@@ -187,6 +195,7 @@ def execute_paired(
         "challenge_id": challenge_id,
         "patch_hash": patch_hash,
         "role": role,
+        "observation_contract": observation_contract,
         "runs": stability_runs,
         "execution_backend": os.environ.get("REACHPATCH_EXECUTION_IMAGE", "HOST"),
     })
@@ -333,8 +342,127 @@ def execute_paired(
         expected_relation=effective_oracle.relation,
         stable_runs=min(baseline.stable_runs, patched.stable_runs),
         previous=previous,
+        oracle_contract_id=(
+            observation_contract.contract_id
+            if observation_contract is not None else ObservationContract(
+                effective_oracle.relation, effective_oracle.expected,
+                observable="process", comparator="EQUALS",
+            ).contract_id
+        ),
     )
     if cache_path is not None:
         _store_disk_cache(cache_path, cache_key, bundle)
     _hot_put(cache_key, bundle)
     return bundle, False
+
+
+def execute_transition_triplet(
+    baseline_tree: Path,
+    incumbent_tree: Path,
+    trial_tree: Path,
+    obligations: tuple[AtomicObligation, ...] | list[AtomicObligation],
+    execution_policy: dict | None = None,
+) -> TransitionTraceBundle:
+    """Execute the same atomic contracts on baseline/incumbent/trial.
+
+    This deliberately bypasses paired classification: transition decisions need
+    incumbent-to-trial evidence, while baseline is retained only as the original
+    bug/preservation reference.  All three trees use the same scenario policy.
+    """
+    policy = dict(execution_policy or {})
+    runs = max(2, int(policy.get("stability_runs", 2)))
+    timeout_default = float(policy.get("timeout_seconds", 120.0))
+    backend = str(policy.get("backend", os.environ.get("REACHPATCH_EXECUTION_IMAGE", "HOST")))
+    environment_default = tuple(sorted(
+        (str(k), str(v)) for k, v in dict(policy.get("environment", {})).items()
+    ))
+    cache_key = content_hash({
+        "schema": "reachpatch-transition-triplet-v1",
+        "baseline_tree": tree_hash(baseline_tree),
+        "incumbent_tree": tree_hash(incumbent_tree),
+        "trial_tree": tree_hash(trial_tree),
+        "obligations": tuple(item.to_dict() for item in obligations),
+        "policy": {**policy, "backend": backend},
+    })
+    cached = _TRIPLET_CACHE.get(cache_key)
+    if cached is not None:
+        _TRIPLET_CACHE.move_to_end(cache_key)
+        return cached
+
+    def execute_tree(tree: Path, obligation: AtomicObligation) -> AtomicEvidence:
+        recipe = obligation.input_recipe
+        if isinstance(recipe, dict):
+            command = tuple(recipe.get("command", ()) or policy.get("command", ()))
+            cwd = str(recipe.get("cwd", policy.get("cwd", ".")))
+            environment = tuple(recipe.get("environment", ()) or environment_default)
+            timeout = float(recipe.get("timeout_seconds", timeout_default))
+        else:
+            command = tuple(getattr(recipe, "command", ()) or policy.get("command", ()))
+            cwd = str(getattr(recipe, "cwd", policy.get("cwd", ".")))
+            environment = tuple(getattr(recipe, "environment", ()) or environment_default)
+            timeout = float(getattr(recipe, "timeout_seconds", timeout_default))
+        contract = obligation.oracle_contract
+        if not command or contract is None:
+            return AtomicEvidence(
+                obligation.key, "UNEXECUTABLE", requirement_id=obligation.requirement_id,
+                role=obligation.role, input_partition_id=obligation.input_partition_id,
+                authority=obligation.authority, command=command, cwd=cwd,
+                environment_fingerprint=content_hash({"backend": backend, "cwd": cwd, "environment": environment}),
+            )
+        scenario = ExecutableScenario(
+            scenario_id=stable_id("atomic-scenario", obligation.key, command, cwd, environment),
+            command=command, cwd=cwd, environment=environment, timeout_seconds=timeout,
+        )
+        overlay = diff_between(baseline_tree, tree).changed_files
+        traces = tuple(run_trace(
+            tree, scenario.command, cwd=scenario.cwd, environment=scenario.environment,
+            timeout_seconds=scenario.timeout_seconds, trace_enabled=index == 0, overlay_paths=overlay,
+        ) for index in range(runs))
+        def stable_signature(item):
+            observation = item.observation
+            return content_hash({
+                "status": observation.status,
+                "return_code": observation.return_code,
+                "stdout": observation.stdout,
+                "stderr": observation.stderr,
+                "value": observation.value,
+                "exception": observation.exception,
+            })
+        stable = len({stable_signature(item) for item in traces}) == 1
+        last = traces[-1]
+        observation = last.observation
+        status = "UNKNOWN"
+        if observation.status in {OutcomeStatus.BLOCKED, OutcomeStatus.UNSUPPORTED}:
+            status = "BLOCKED"
+        elif stable:
+            try:
+                matched = contract.matches(observation) if hasattr(contract, "matches") else False
+            except (TypeError, ValueError, AttributeError):
+                matched = False
+            status = "PASS" if matched else "FAIL"
+        entered = bool(last.first_project_frame or last.executed_symbol_ids or last.executed_path_ids)
+        return AtomicEvidence(
+            obligation_key=obligation.key, status=status,
+            requirement_id=obligation.requirement_id, role=obligation.role,
+            input_partition_id=obligation.input_partition_id,
+            observed_payload=observation.to_dict(),
+            expected_payload=getattr(contract, "expected", contract),
+            comparator=getattr(contract, "normalized_comparator", getattr(contract, "comparator", "RELATION_HOLDS")),
+            stability_runs=runs if stable else 1, entered_project_code=entered,
+            first_project_frame=last.first_project_frame,
+            trace_ids=tuple(item.trace_bundle_id for item in traces),
+            authority=obligation.authority, command=command, cwd=cwd,
+            environment_fingerprint=content_hash({"backend": backend, "cwd": cwd, "environment": environment}),
+            binding_alignment=str(policy.get("binding_alignment_by_key", {}).get(obligation.key, "UNKNOWN")),
+            backend=backend,
+        )
+    result = TransitionTraceBundle(
+        baseline={item.key: execute_tree(baseline_tree, item) for item in obligations},
+        incumbent={item.key: execute_tree(incumbent_tree, item) for item in obligations},
+        trial={item.key: execute_tree(trial_tree, item) for item in obligations},
+    )
+    _TRIPLET_CACHE[cache_key] = result
+    _TRIPLET_CACHE.move_to_end(cache_key)
+    while len(_TRIPLET_CACHE) > _HOT_CACHE_LIMIT:
+        _TRIPLET_CACHE.popitem(last=False)
+    return result

@@ -57,18 +57,16 @@ def confirm_bindings_from_execution(
                 hit_path = hit_path and bool(hit_nodes.intersection(path.node_ids))
             if not hit_path or execution.classification is PairClassification.UNKNOWN:
                 continue
-            relation_matches = (
-                execution.expected_relation == requirement.expected_observation.relation
-                or (
-                    requirement.preservation
-                    and execution.oracle_authority == "C"
-                    and execution.expected_relation.startswith(
-                        "patched observation preserves stable baseline"
-                    )
-                )
+            # A BindingUnit already records the Requirement -> executable
+            # check/challenge relation.  Confirmation requires that concrete
+            # binding plus a stable dynamic path hit; it must not compare
+            # free-text oracle prose.  Retain normalized contract identity as
+            # evidence so downstream transition/artifact code can compare
+            # semantic contracts without textual equality.
+            contract_id = (
+                execution.oracle_contract_id
+                or requirement.expected_observation.contract_id
             )
-            if not relation_matches:
-                continue
             if execution.classification is PairClassification.TARGET_FIXED or (
                 requirement.preservation
                 and execution.classification is PairClassification.PASS_PRESERVED
@@ -90,6 +88,7 @@ def confirm_bindings_from_execution(
                     unit.evidence_ids + (
                         execution.baseline.trace_bundle_id,
                         execution.patched.trace_bundle_id,
+                        f"observation-contract:{contract_id}",
                     )
                 )),
             )
