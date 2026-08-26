@@ -22,6 +22,7 @@ from reachpatch.reach_avoid.controller import ReachAvoidConfig
 from reachpatch.reach_avoid.controller import ReachAvoidController
 from reachpatch.reach_avoid.repair_player import RepairPlayer
 from reachpatch.reach_avoid.frontier import RepairFrontier, RepairFrontierKind
+from reachpatch.reach_avoid.semantics import input_partition_semantic_key
 from reachpatch.reach_avoid.transition import _materialize_registered_probes
 from reachpatch.reach_avoid.checkpoint import CheckpointStore, capture_current_graph_checkpoint
 from reachpatch.repair.deepseek_agent import DeepSeekConfig
@@ -121,7 +122,13 @@ def test_frontier_objective_has_explicit_mechanical_and_selected_validation(
     )
     assert any(item.role == "MECHANICAL" for item in objective.atomic_obligations)
     assert any(
-        item.input_partition_id == "challenge-target"
+        item.input_partition_id
+        == input_partition_semantic_key(item.input_recipe)
+        for item in objective.atomic_obligations
+        if item.role == "TARGET"
+    )
+    assert all(
+        item.input_partition_id != "challenge-target"
         for item in objective.atomic_obligations
     )
 
@@ -500,7 +507,7 @@ def test_registered_probe_enters_triplet_state_and_trial_graph(state_factory):
     state = state_factory()
     state.run_root.mkdir()
     frontier = RepairFrontier.create(
-        kind=RepairFrontierKind.OBSERVATION_GAP,
+        kind=RepairFrontierKind.BEHAVIOR_FAILURE,
         patch_hash=state.graph_stack.patch_hash, graph_revision=0,
         requirement_ids=("req-target",), binding_ids=("binding-target",),
         expected_contract={"probe": "return-value"},

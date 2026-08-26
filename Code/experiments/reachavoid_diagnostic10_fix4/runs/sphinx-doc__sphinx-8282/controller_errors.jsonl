@@ -1,0 +1,2 @@
+{"challenge_round_count":0,"error":"REPEATED_REJECTED_PATCH","error_kind":"RuntimeError","generator_attempt_count":1,"phase":"INITIAL_GENERATION","repair_revision_count":0,"stage":"INITIAL_GENERATION"}
+{"challenge_round_count":0,"error":"TURN_LIMIT","error_kind":"RuntimeError","generator_attempt_count":2,"phase":"INITIAL_GENERATION","repair_revision_count":0,"stage":"INITIAL_GENERATION"}

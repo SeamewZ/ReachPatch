@@ -5,6 +5,7 @@ from dataclasses import replace
 from reachpatch.models.evidence import CounterexamplePacket, ExecutableOracle
 from reachpatch.models.graphs import ChallengePartition, ChallengeStatus, ImpactCone
 from reachpatch.challenge_graph.models import open_high_challenge_ids
+from reachpatch.models.reach_avoid import AtomicEvidence, AtomicObligation
 from reachpatch.reach_avoid.gates import evaluate_reach
 
 
@@ -42,13 +43,13 @@ def test_reach_requires_no_open_counterexample(state_factory):
     assert not evaluate_reach(state).reached
 
 
-def test_reach_requires_diff_closure(state_factory):
+def test_static_diff_partition_does_not_block_reach(state_factory):
     state = state_factory(target_status=ChallengeStatus.PASS, stability_runs=2)
     state.graph_stack.requirement_graph.challenge_partitions["partition"] = ChallengePartition(
         "partition", "req-target", "BRANCH_FALSE", "x is false",
         "branch", "hunk-calc", "path-calc",
     )
-    assert not evaluate_reach(state).reached
+    assert evaluate_reach(state).reached
 
 
 def test_untrusted_oracle_cannot_reach(state_factory):
@@ -67,7 +68,7 @@ def test_reach_succeeds_for_closed_current_four_graph_stack(state_factory):
     assert evaluate_reach(state).reached
 
 
-def test_reach_requires_all_impact_consumer_and_public_check_replays(state_factory):
+def test_unexecuted_impact_consumers_are_validation_backlog_not_reach_gate(state_factory):
     state = state_factory(target_status=ChallengeStatus.PASS, stability_runs=2)
     state.graph_stack.program_graph.impact_cone = ImpactCone(
         "cone", ("hunk-calc",), (), (), (), (),
@@ -76,10 +77,7 @@ def test_reach_requires_all_impact_consumer_and_public_check_replays(state_facto
     state.graph_stack.binding_graph.program_hash = state.graph_stack.program_graph.graph_hash()
     state.graph_stack.challenge_graph.binding_hash = state.graph_stack.binding_graph.graph_hash()
     reach = evaluate_reach(state)
-    assert not reach.reached
-    assert "changed behavior consumer was not replayed: missing-reverse" in reach.reasons
-    assert "changed behavior consumer was not replayed: missing-renderer" in reach.reasons
-    assert "changed public check was not replayed: missing-public-check" in reach.reasons
+    assert reach.reached
 
 
 def test_proven_unreachable_partition_does_not_block_reach(state_factory):
@@ -121,7 +119,7 @@ def test_equivalent_pending_cell_does_not_hide_stable_reach_evidence(state_facto
     ) == ()
 
 
-def test_distinct_pending_input_still_blocks_reach(state_factory):
+def test_distinct_pending_input_is_validation_backlog_not_reach_gate(state_factory):
     state = state_factory(target_status=ChallengeStatus.PASS, stability_runs=2)
     cell = state.graph_stack.challenge_graph.cells["challenge-target"]
     distinct = replace(
@@ -137,7 +135,31 @@ def test_distinct_pending_input_still_blocks_reach(state_factory):
         terminal_status=ChallengeStatus.PENDING,
     )
     state.graph_stack.challenge_graph.cells[distinct.challenge_id] = distinct
-    assert not evaluate_reach(state).reached
+    assert evaluate_reach(state).reached
     assert open_high_challenge_ids(
         state.graph_stack.challenge_graph.active_cells()
     ) == (distinct.challenge_id,)
+
+
+def test_locked_target_survives_cell_rematerialization_via_atomic_evidence(state_factory):
+    state = state_factory(target_status=ChallengeStatus.PENDING)
+    cell = state.graph_stack.challenge_graph.cells["challenge-target"]
+    obligation = AtomicObligation(
+        key="atomic-target", requirement_id=cell.requirement_id,
+        requirement_contract_id=cell.observation_contract.contract_id,
+        role="TARGET", input_recipe=replace(
+            cell.input_recipe, source_check_id="check-target",
+        ),
+        input_partition_id="partition-target",
+        oracle_contract=cell.observation_contract, authority="A", hard=True,
+        source="challenge:previous-cell",
+    )
+    state.atomic_obligations[obligation.key] = obligation
+    state.atomic_evidence[obligation.key] = AtomicEvidence(
+        obligation.key, "PASS", requirement_id=cell.requirement_id,
+        role="TARGET", input_partition_id="partition-target",
+        authority="A", stability_runs=2,
+    )
+    state.locked_checks.target_ids.add("check-target")
+
+    assert evaluate_reach(state).reached

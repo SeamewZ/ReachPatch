@@ -1,0 +1,11 @@
+diff --git a/sklearn/neighbors/nca.py b/sklearn/neighbors/nca.py
+--- a/sklearn/neighbors/nca.py
++++ b/sklearn/neighbors/nca.py
+@@ -2,6 +2,7 @@
+ """
+ Neighborhood Component Analysis
+ """
++import numbers
+ 
+ # Authors: William de Vazelhes <wdevazelhes@gmail.com>
+ #          John Chiotellis <ioannis.chiotellis@in.tum.de>

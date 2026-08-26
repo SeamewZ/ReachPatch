@@ -13,6 +13,7 @@ from reachpatch.models.reach_avoid import (
     Decision, ReachAvoidState, TransitionCertificate, TrialTransition,
 )
 from reachpatch.reach_avoid.frontier import FrontierStatus
+from reachpatch.reach_avoid.semantics import scenario_semantic_key
 
 from .certificates import build_transition_certificate, verify_transition_certificate
 from .checkpoint import (
@@ -166,10 +167,11 @@ def apply_transition_decision(
         state.atomic_obligations = dict(runtime.atomic_obligations)
         state.atomic_evidence = dict(runtime.atomic_evidence)
         state.probe_registrations = dict(runtime.probe_registrations)
+        state.validation_backlog = dict(runtime.validation_backlog)
         state.generator_session.conversation.append({
             "role": "system",
             "patch_hash": source.patch_hash,
-            "pending_objective_kind": "CONFIRMED_FAILURE",
+            "pending_objective_kind": "REPAIR_FRONTIER",
             "rejected_trial_patch_hash": trial.cumulative_diff.patch_hash,
             "rejected_trial_reasons": trial.transition_decision.reasons,
         })
@@ -263,6 +265,10 @@ def persist_transition(
     write_json("atomic_evidence_after.json", {
         key: value.to_dict() for key, value in trial.evidence.atomic_after.items()
     })
+    write_json("frontier_delta.json", (
+        trial.evidence.frontier_delta.to_dict()
+        if trial.evidence.frontier_delta is not None else {}
+    ))
     write_json("challenge_results.json", {
         "selection": (trial.challenge_result.selected_challenge_ids if trial.challenge_result else ()),
         "executions": [item.to_dict() for item in (
@@ -272,11 +278,47 @@ def persist_transition(
             trial.challenge_result.counterexamples if trial.challenge_result else ()
         )],
     })
+    write_json("validation_batch.json", {
+        "selected_frontier_key": trial.evidence.selected_frontier_key,
+        "obligations": [item.to_dict() for item in trial.atomic_obligations],
+        "selected_challenge_ids": (
+            trial.challenge_result.selected_challenge_ids
+            if trial.challenge_result else ()
+        ),
+    })
     write_json("transition_evidence.json", trial.evidence.to_dict())
+    selected_atomic_keys = set()
+    if trial.evidence.frontier_delta is not None:
+        selected_atomic_keys.update(
+            trial.evidence.frontier_delta.before.passed_atomic_keys
+            | trial.evidence.frontier_delta.before.failed_atomic_keys
+            | trial.evidence.frontier_delta.before.unknown_atomic_keys
+            | trial.evidence.frontier_delta.after.passed_atomic_keys
+            | trial.evidence.frontier_delta.after.failed_atomic_keys
+            | trial.evidence.frontier_delta.after.unknown_atomic_keys
+        )
+    selected_scenario_keys = sorted({
+        scenario_semantic_key(
+            requirement_contract_id=obligation.requirement_contract_id,
+            role=obligation.role, input_recipe=obligation.input_recipe,
+            observation_contract=obligation.oracle_contract,
+        )
+        for obligation in trial.atomic_obligations
+        if obligation.key in selected_atomic_keys
+        and obligation.role != "MECHANICAL"
+    })
     write_json("transition_decision.json", {
         "decision": trial.decision.value,
         "selected_frontier_key": trial.evidence.selected_frontier_key,
         "selected_frontier_kind": trial.evidence.selected_frontier_kind,
+        "selected_scenario_keys": selected_scenario_keys,
+        "selected_fail_to_pass": sorted(
+            set(trial.evidence.atomic_fail_to_pass).intersection(
+                trial.evidence.frontier_delta.before.failed_atomic_keys
+                if trial.evidence.frontier_delta is not None else set()
+            )
+        ),
+        "locked_pass_to_fail": list(trial.evidence.locked_targets_lost),
         "verified_progress": list(trial.evidence.verified_progress),
         "material_progress": list(trial.evidence.material_progress),
         "trusted_regressions": list(trial.evidence.trusted_regressions),
@@ -289,4 +331,7 @@ def persist_transition(
     })
     write_json("controller_state_before.json", controller_state_before or {})
     write_json("controller_state_after.json", state.to_dict())
+    write_json("validation_backlog.json", {
+        key: item.to_dict() for key, item in state.validation_backlog.items()
+    })
     return path

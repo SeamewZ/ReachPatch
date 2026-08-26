@@ -223,6 +223,7 @@ def _runtime_state(state: ReachAvoidState | None) -> CheckpointRuntimeState:
             termination_status=None,
             execution_budget_seconds=0.0,
             remaining_wall_seconds=0.0,
+            validation_backlog={},
         )
     return record_from_dict(CheckpointRuntimeState, {
         "confirmed_failures": [item.to_dict() for item in state.confirmed_failures],
@@ -263,6 +264,9 @@ def _runtime_state(state: ReachAvoidState | None) -> CheckpointRuntimeState:
             for key, value in state.probe_registrations.items()
         },
         "consecutive_provisional_without_progress": state.consecutive_provisional_without_progress,
+        "validation_backlog": {
+            key: value.to_dict() for key, value in state.validation_backlog.items()
+        },
     })
 
 
@@ -565,6 +569,7 @@ def restore_checkpoint(
     state.atomic_obligations = dict(runtime.atomic_obligations)
     state.atomic_evidence = dict(runtime.atomic_evidence)
     state.probe_registrations = dict(runtime.probe_registrations)
+    state.validation_backlog = dict(runtime.validation_backlog)
     state.consecutive_provisional_without_progress = (
         runtime.consecutive_provisional_without_progress
     )

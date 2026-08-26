@@ -1,0 +1,660 @@
++ source /opt/miniconda3/bin/activate
+++ _CONDA_ROOT=/opt/miniconda3
+++ . /opt/miniconda3/etc/profile.d/conda.sh
++++ export CONDA_EXE=/opt/miniconda3/bin/conda
++++ CONDA_EXE=/opt/miniconda3/bin/conda
++++ export _CE_M=
++++ _CE_M=
++++ export _CE_CONDA=
++++ _CE_CONDA=
++++ export CONDA_PYTHON_EXE=/opt/miniconda3/bin/python
++++ CONDA_PYTHON_EXE=/opt/miniconda3/bin/python
++++ '[' -z '' ']'
++++ export CONDA_SHLVL=0
++++ CONDA_SHLVL=0
++++ '[' -n '' ']'
++++++ dirname /opt/miniconda3/bin/conda
+++++ dirname /opt/miniconda3/bin
++++ PATH=/opt/miniconda3/condabin:/opt/miniconda3/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
++++ export PATH
++++ '[' -z '' ']'
++++ PS1=
+++ conda activate
+++ local cmd=activate
+++ case "$cmd" in
+++ __conda_activate activate
+++ '[' -n '' ']'
+++ local ask_conda
++++ PS1=
++++ __conda_exe shell.posix activate
++++ /opt/miniconda3/bin/conda shell.posix activate
+++ ask_conda='PS1='\''(base) '\''
+export PATH='\''/opt/miniconda3/bin:/opt/miniconda3/condabin:/opt/miniconda3/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin'\''
+export CONDA_PREFIX='\''/opt/miniconda3'\''
+export CONDA_SHLVL='\''1'\''
+export CONDA_DEFAULT_ENV='\''base'\''
+export CONDA_PROMPT_MODIFIER='\''(base) '\''
+export CONDA_EXE='\''/opt/miniconda3/bin/conda'\''
+export _CE_M='\'''\''
+export _CE_CONDA='\'''\''
+export CONDA_PYTHON_EXE='\''/opt/miniconda3/bin/python'\'''
+++ eval 'PS1='\''(base) '\''
+export PATH='\''/opt/miniconda3/bin:/opt/miniconda3/condabin:/opt/miniconda3/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin'\''
+export CONDA_PREFIX='\''/opt/miniconda3'\''
+export CONDA_SHLVL='\''1'\''
+export CONDA_DEFAULT_ENV='\''base'\''
+export CONDA_PROMPT_MODIFIER='\''(base) '\''
+export CONDA_EXE='\''/opt/miniconda3/bin/conda'\''
+export _CE_M='\'''\''
+export _CE_CONDA='\'''\''
+export CONDA_PYTHON_EXE='\''/opt/miniconda3/bin/python'\'''
++++ PS1='(base) '
++++ export PATH=/opt/miniconda3/bin:/opt/miniconda3/condabin:/opt/miniconda3/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
++++ PATH=/opt/miniconda3/bin:/opt/miniconda3/condabin:/opt/miniconda3/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
++++ export CONDA_PREFIX=/opt/miniconda3
++++ CONDA_PREFIX=/opt/miniconda3
++++ export CONDA_SHLVL=1
++++ CONDA_SHLVL=1
++++ export CONDA_DEFAULT_ENV=base
++++ CONDA_DEFAULT_ENV=base
++++ export 'CONDA_PROMPT_MODIFIER=(base) '
++++ CONDA_PROMPT_MODIFIER='(base) '
++++ export CONDA_EXE=/opt/miniconda3/bin/conda
++++ CONDA_EXE=/opt/miniconda3/bin/conda
++++ export _CE_M=
++++ _CE_M=
++++ export _CE_CONDA=
++++ _CE_CONDA=
++++ export CONDA_PYTHON_EXE=/opt/miniconda3/bin/python
++++ CONDA_PYTHON_EXE=/opt/miniconda3/bin/python
+++ __conda_hashr
+++ '[' -n '' ']'
+++ '[' -n '' ']'
+++ hash -r
++ conda activate testbed
++ local cmd=activate
++ case "$cmd" in
++ __conda_activate activate testbed
++ '[' -n '' ']'
++ local ask_conda
+++ PS1='(base) '
+++ __conda_exe shell.posix activate testbed
+++ /opt/miniconda3/bin/conda shell.posix activate testbed
++ ask_conda='PS1='\''(testbed) '\''
+export PATH='\''/opt/miniconda3/envs/testbed/bin:/opt/miniconda3/condabin:/opt/miniconda3/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin'\''
+export CONDA_PREFIX='\''/opt/miniconda3/envs/testbed'\''
+export CONDA_SHLVL='\''2'\''
+export CONDA_DEFAULT_ENV='\''testbed'\''
+export CONDA_PROMPT_MODIFIER='\''(testbed) '\''
+export CONDA_PREFIX_1='\''/opt/miniconda3'\''
+export CONDA_EXE='\''/opt/miniconda3/bin/conda'\''
+export _CE_M='\'''\''
+export _CE_CONDA='\'''\''
+export CONDA_PYTHON_EXE='\''/opt/miniconda3/bin/python'\'''
++ eval 'PS1='\''(testbed) '\''
+export PATH='\''/opt/miniconda3/envs/testbed/bin:/opt/miniconda3/condabin:/opt/miniconda3/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin'\''
+export CONDA_PREFIX='\''/opt/miniconda3/envs/testbed'\''
+export CONDA_SHLVL='\''2'\''
+export CONDA_DEFAULT_ENV='\''testbed'\''
+export CONDA_PROMPT_MODIFIER='\''(testbed) '\''
+export CONDA_PREFIX_1='\''/opt/miniconda3'\''
+export CONDA_EXE='\''/opt/miniconda3/bin/conda'\''
+export _CE_M='\'''\''
+export _CE_CONDA='\'''\''
+export CONDA_PYTHON_EXE='\''/opt/miniconda3/bin/python'\'''
+++ PS1='(testbed) '
+++ export PATH=/opt/miniconda3/envs/testbed/bin:/opt/miniconda3/condabin:/opt/miniconda3/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+++ PATH=/opt/miniconda3/envs/testbed/bin:/opt/miniconda3/condabin:/opt/miniconda3/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+++ export CONDA_PREFIX=/opt/miniconda3/envs/testbed
+++ CONDA_PREFIX=/opt/miniconda3/envs/testbed
+++ export CONDA_SHLVL=2
+++ CONDA_SHLVL=2
+++ export CONDA_DEFAULT_ENV=testbed
+++ CONDA_DEFAULT_ENV=testbed
+++ export 'CONDA_PROMPT_MODIFIER=(testbed) '
+++ CONDA_PROMPT_MODIFIER='(testbed) '
+++ export CONDA_PREFIX_1=/opt/miniconda3
+++ CONDA_PREFIX_1=/opt/miniconda3
+++ export CONDA_EXE=/opt/miniconda3/bin/conda
+++ CONDA_EXE=/opt/miniconda3/bin/conda
+++ export _CE_M=
+++ _CE_M=
+++ export _CE_CONDA=
+++ _CE_CONDA=
+++ export CONDA_PYTHON_EXE=/opt/miniconda3/bin/python
+++ CONDA_PYTHON_EXE=/opt/miniconda3/bin/python
++ __conda_hashr
++ '[' -n '' ']'
++ '[' -n '' ']'
++ hash -r
++ cd /testbed
++ git config --global --add safe.directory /testbed
++ cd /testbed
++ git status
+On branch master
+Changes not staged for commit:
+  (use "git add <file>..." to update what will be committed)
+  (use "git restore <file>..." to discard changes in working directory)
+	modified:   sympy/physics/vector/point.py
+
+no changes added to commit (use "git add" and/or "git commit -a")
++ git show
+commit d57aaf064041fe52c0fa357639b069100f8b28e1
+Merge: 4a585dcbfe 679d8011aa
+Author: S.Y. Lee <sylee957@gmail.com>
+Date:   Fri Sep 18 19:20:16 2020 +0900
+
+    Merge pull request #20104 from Soumi7/GSoD_Elementary_trigonometric
+    
+    Functions.elementary.trigonometric
+
++ git -c core.fileMode=false diff d57aaf064041fe52c0fa357639b069100f8b28e1
+diff --git a/sympy/physics/vector/point.py b/sympy/physics/vector/point.py
+index d4e3cfcc90..c19dbf031b 100644
+--- a/sympy/physics/vector/point.py
++++ b/sympy/physics/vector/point.py
+@@ -519,6 +519,14 @@ def vel(self, frame):
+ 
+         _check_frame(frame)
+         if not (frame in self._vel_dict):
++            # If the velocity is not defined, try to calculate it from the
++            # position vector if possible.
++            if self._pos_dict:
++                for otherpoint in self._pos_dict:
++                    try:
++                        return self.pos_from(otherpoint).dt(frame) + otherpoint.vel(frame)
++                    except ValueError:
++                        pass
+             raise ValueError('Velocity of point ' + self.name + ' has not been'
+                              ' defined in ReferenceFrame ' + frame.name)
+         return self._vel_dict[frame]
++ source /opt/miniconda3/bin/activate
+++ _CONDA_ROOT=/opt/miniconda3
+++ . /opt/miniconda3/etc/profile.d/conda.sh
++++ export CONDA_EXE=/opt/miniconda3/bin/conda
++++ CONDA_EXE=/opt/miniconda3/bin/conda
++++ export _CE_M=
++++ _CE_M=
++++ export _CE_CONDA=
++++ _CE_CONDA=
++++ export CONDA_PYTHON_EXE=/opt/miniconda3/bin/python
++++ CONDA_PYTHON_EXE=/opt/miniconda3/bin/python
++++ '[' -z x ']'
+++ conda activate
+++ local cmd=activate
+++ case "$cmd" in
+++ __conda_activate activate
+++ '[' -n '' ']'
+++ local ask_conda
++++ PS1='(testbed) '
++++ __conda_exe shell.posix activate
++++ /opt/miniconda3/bin/conda shell.posix activate
+++ ask_conda='PS1='\''(base) '\''
+export PATH='\''/opt/miniconda3/bin:/opt/miniconda3/condabin:/opt/miniconda3/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin'\''
+export CONDA_PREFIX='\''/opt/miniconda3'\''
+export CONDA_SHLVL='\''3'\''
+export CONDA_DEFAULT_ENV='\''base'\''
+export CONDA_PROMPT_MODIFIER='\''(base) '\''
+export CONDA_PREFIX_2='\''/opt/miniconda3/envs/testbed'\''
+export CONDA_EXE='\''/opt/miniconda3/bin/conda'\''
+export _CE_M='\'''\''
+export _CE_CONDA='\'''\''
+export CONDA_PYTHON_EXE='\''/opt/miniconda3/bin/python'\'''
+++ eval 'PS1='\''(base) '\''
+export PATH='\''/opt/miniconda3/bin:/opt/miniconda3/condabin:/opt/miniconda3/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin'\''
+export CONDA_PREFIX='\''/opt/miniconda3'\''
+export CONDA_SHLVL='\''3'\''
+export CONDA_DEFAULT_ENV='\''base'\''
+export CONDA_PROMPT_MODIFIER='\''(base) '\''
+export CONDA_PREFIX_2='\''/opt/miniconda3/envs/testbed'\''
+export CONDA_EXE='\''/opt/miniconda3/bin/conda'\''
+export _CE_M='\'''\''
+export _CE_CONDA='\'''\''
+export CONDA_PYTHON_EXE='\''/opt/miniconda3/bin/python'\'''
++++ PS1='(base) '
++++ export PATH=/opt/miniconda3/bin:/opt/miniconda3/condabin:/opt/miniconda3/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
++++ PATH=/opt/miniconda3/bin:/opt/miniconda3/condabin:/opt/miniconda3/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
++++ export CONDA_PREFIX=/opt/miniconda3
++++ CONDA_PREFIX=/opt/miniconda3
++++ export CONDA_SHLVL=3
++++ CONDA_SHLVL=3
++++ export CONDA_DEFAULT_ENV=base
++++ CONDA_DEFAULT_ENV=base
++++ export 'CONDA_PROMPT_MODIFIER=(base) '
++++ CONDA_PROMPT_MODIFIER='(base) '
++++ export CONDA_PREFIX_2=/opt/miniconda3/envs/testbed
++++ CONDA_PREFIX_2=/opt/miniconda3/envs/testbed
++++ export CONDA_EXE=/opt/miniconda3/bin/conda
++++ CONDA_EXE=/opt/miniconda3/bin/conda
++++ export _CE_M=
++++ _CE_M=
++++ export _CE_CONDA=
++++ _CE_CONDA=
++++ export CONDA_PYTHON_EXE=/opt/miniconda3/bin/python
++++ CONDA_PYTHON_EXE=/opt/miniconda3/bin/python
+++ __conda_hashr
+++ '[' -n '' ']'
+++ '[' -n '' ']'
+++ hash -r
++ conda activate testbed
++ local cmd=activate
++ case "$cmd" in
++ __conda_activate activate testbed
++ '[' -n '' ']'
++ local ask_conda
+++ PS1='(base) '
+++ __conda_exe shell.posix activate testbed
+++ /opt/miniconda3/bin/conda shell.posix activate testbed
++ ask_conda='PS1='\''(testbed) '\''
+export PATH='\''/opt/miniconda3/envs/testbed/bin:/opt/miniconda3/condabin:/opt/miniconda3/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin'\''
+export CONDA_PREFIX='\''/opt/miniconda3/envs/testbed'\''
+export CONDA_SHLVL='\''4'\''
+export CONDA_DEFAULT_ENV='\''testbed'\''
+export CONDA_PROMPT_MODIFIER='\''(testbed) '\''
+export CONDA_PREFIX_3='\''/opt/miniconda3'\''
+export CONDA_EXE='\''/opt/miniconda3/bin/conda'\''
+export _CE_M='\'''\''
+export _CE_CONDA='\'''\''
+export CONDA_PYTHON_EXE='\''/opt/miniconda3/bin/python'\'''
++ eval 'PS1='\''(testbed) '\''
+export PATH='\''/opt/miniconda3/envs/testbed/bin:/opt/miniconda3/condabin:/opt/miniconda3/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin'\''
+export CONDA_PREFIX='\''/opt/miniconda3/envs/testbed'\''
+export CONDA_SHLVL='\''4'\''
+export CONDA_DEFAULT_ENV='\''testbed'\''
+export CONDA_PROMPT_MODIFIER='\''(testbed) '\''
+export CONDA_PREFIX_3='\''/opt/miniconda3'\''
+export CONDA_EXE='\''/opt/miniconda3/bin/conda'\''
+export _CE_M='\'''\''
+export _CE_CONDA='\'''\''
+export CONDA_PYTHON_EXE='\''/opt/miniconda3/bin/python'\'''
+++ PS1='(testbed) '
+++ export PATH=/opt/miniconda3/envs/testbed/bin:/opt/miniconda3/condabin:/opt/miniconda3/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+++ PATH=/opt/miniconda3/envs/testbed/bin:/opt/miniconda3/condabin:/opt/miniconda3/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+++ export CONDA_PREFIX=/opt/miniconda3/envs/testbed
+++ CONDA_PREFIX=/opt/miniconda3/envs/testbed
+++ export CONDA_SHLVL=4
+++ CONDA_SHLVL=4
+++ export CONDA_DEFAULT_ENV=testbed
+++ CONDA_DEFAULT_ENV=testbed
+++ export 'CONDA_PROMPT_MODIFIER=(testbed) '
+++ CONDA_PROMPT_MODIFIER='(testbed) '
+++ export CONDA_PREFIX_3=/opt/miniconda3
+++ CONDA_PREFIX_3=/opt/miniconda3
+++ export CONDA_EXE=/opt/miniconda3/bin/conda
+++ CONDA_EXE=/opt/miniconda3/bin/conda
+++ export _CE_M=
+++ _CE_M=
+++ export _CE_CONDA=
+++ _CE_CONDA=
+++ export CONDA_PYTHON_EXE=/opt/miniconda3/bin/python
+++ CONDA_PYTHON_EXE=/opt/miniconda3/bin/python
++ __conda_hashr
++ '[' -n '' ']'
++ '[' -n '' ']'
++ hash -r
++ python -m pip install -e .
+Obtaining file:///testbed
+  Preparing metadata (setup.py): started
+  Preparing metadata (setup.py): finished with status 'done'
+Requirement already satisfied: mpmath>=0.19 in /opt/miniconda3/envs/testbed/lib/python3.9/site-packages (from sympy==1.7.dev0) (1.3.0)
+Installing collected packages: sympy
+  Attempting uninstall: sympy
+    Found existing installation: sympy 1.7.dev0
+    Uninstalling sympy-1.7.dev0:
+      Successfully uninstalled sympy-1.7.dev0
+  DEPRECATION: Legacy editable install of sympy==1.7.dev0 from file:///testbed (setup.py develop) is deprecated. pip 25.0 will enforce this behaviour change. A possible replacement is to add a pyproject.toml or enable --use-pep517, and use setuptools >= 64. If the resulting installation is not behaving as expected, try using --config-settings editable_mode=compat. Please consult the setuptools documentation for more information. Discussion can be found at https://github.com/pypa/pip/issues/11457
+  Running setup.py develop for sympy
+Successfully installed sympy
+WARNING: Running pip as the 'root' user can result in broken permissions and conflicting behaviour with the system package manager, possibly rendering your system unusable.It is recommended to use a virtual environment instead: https://pip.pypa.io/warnings/venv. Use the --root-user-action option if you know what you are doing and want to suppress this warning.
++ git checkout d57aaf064041fe52c0fa357639b069100f8b28e1 sympy/physics/vector/tests/test_point.py
+Updated 0 paths from 479269d1df
++ git apply -v -
+Checking patch sympy/physics/vector/tests/test_point.py...
+Applied patch sympy/physics/vector/tests/test_point.py cleanly.
++ : '>>>>> Start Test Output'
++ PYTHONWARNINGS=ignore::UserWarning,ignore::SyntaxWarning
++ bin/test -C --verbose sympy/physics/vector/tests/test_point.py
+============================= test process starts ==============================
+executable:         /opt/miniconda3/envs/testbed/bin/python  (3.9.20-final-0) [CPython]
+architecture:       64-bit
+cache:              no
+ground types:       python 
+numpy:              None
+random seed:        82371714
+hash randomization: on (PYTHONHASHSEED=3963719407)
+
+sympy/physics/vector/tests/test_point.py[14] 
+test_point_v1pt_theorys ok
+test_point_a1pt_theorys ok
+test_point_v2pt_theorys ok
+test_point_a2pt_theorys ok
+test_point_funcs ok
+test_point_pos ok
+test_point_partial_velocity ok
+test_point_vel E
+test_auto_point_vel E
+test_auto_point_vel_multiple_point_path ok
+test_auto_vel_dont_overwrite ok
+test_auto_point_vel_if_tree_has_vel_but_inappropriate_pos_vector E
+test_auto_point_vel_shortest_path F
+test_auto_point_vel_connected_frames ok                                   [FAIL]
+
+
+________________________________________________________________________________
+___________ sympy/physics/vector/tests/test_point.py:test_point_vel ____________
+Traceback (most recent call last):
+  File "/testbed/sympy/core/assumptions.py", line 454, in getit
+    return self._assumptions[fact]
+KeyError: 'zero'
+
+During handling of the above exception, another exception occurred:
+
+Traceback (most recent call last):
+  File "/testbed/sympy/core/assumptions.py", line 454, in getit
+    return self._assumptions[fact]
+KeyError: 'integer'
+
+During handling of the above exception, another exception occurred:
+
+Traceback (most recent call last):
+  File "/testbed/sympy/core/assumptions.py", line 454, in getit
+    return self._assumptions[fact]
+KeyError: 'finite'
+
+During handling of the above exception, another exception occurred:
+
+Traceback (most recent call last):
+  File "/testbed/sympy/core/assumptions.py", line 454, in getit
+    return self._assumptions[fact]
+KeyError: 'extended_negative'
+
+During handling of the above exception, another exception occurred:
+
+Traceback (most recent call last):
+  File "/testbed/sympy/core/assumptions.py", line 454, in getit
+    return self._assumptions[fact]
+KeyError: 'extended_positive'
+
+During handling of the above exception, another exception occurred:
+
+Traceback (most recent call last):
+  File "/testbed/sympy/physics/vector/tests/test_point.py", line 137, in test_point_vel
+    raises(ValueError , lambda: Q.vel(N)) # Velocity of O in N is not defined
+  File "/testbed/sympy/testing/pytest.py", line 104, in raises
+    code()
+  File "/testbed/sympy/physics/vector/tests/test_point.py", line 137, in <lambda>
+    raises(ValueError , lambda: Q.vel(N)) # Velocity of O in N is not defined
+  File "/testbed/sympy/physics/vector/point.py", line 527, in vel
+    return self.pos_from(otherpoint).dt(frame) + otherpoint.vel(frame)
+  File "/testbed/sympy/physics/vector/point.py", line 527, in vel
+    return self.pos_from(otherpoint).dt(frame) + otherpoint.vel(frame)
+  File "/testbed/sympy/physics/vector/point.py", line 527, in vel
+    return self.pos_from(otherpoint).dt(frame) + otherpoint.vel(frame)
+  [Previous line repeated 941 more times]
+  File "/testbed/sympy/physics/vector/vector.py", line 643, in dt
+    return time_derivative(self, otherframe)
+  File "/testbed/sympy/physics/vector/functions.py", line 199, in time_derivative
+    outlist += [(express(v[0], frame,
+  File "/testbed/sympy/matrices/matrices.py", line 459, in diff
+    deriv = ArrayDerivative(self, *args, evaluate=True)
+  File "/testbed/sympy/tensor/array/array_derivatives.py", line 15, in __new__
+    obj = super(ArrayDerivative, cls).__new__(cls, expr, *variables, **kwargs)
+  File "/testbed/sympy/core/function.py", line 1456, in __new__
+    obj = cls._dispatch_eval_derivative_n_times(expr, v, count)
+  File "/testbed/sympy/tensor/array/array_derivatives.py", line 102, in _dispatch_eval_derivative_n_times
+    result = cls._call_derive_matrix_by_scalar(expr, v)
+  File "/testbed/sympy/tensor/array/array_derivatives.py", line 60, in _call_derive_matrix_by_scalar
+    return _matrix_derivative(expr, v)
+  File "/testbed/sympy/matrices/expressions/matexpr.py", line 631, in _matrix_derivative
+    lines = expr._eval_derivative_matrix_lines(x)
+  File "/testbed/sympy/core/expr.py", line 3820, in _eval_derivative_matrix_lines
+    return [_LeftRightArgs([S.One, S.One], higher=self._eval_derivative(x))]
+  File "/testbed/sympy/matrices/matrices.py", line 466, in _eval_derivative
+    return self.applyfunc(lambda x: x.diff(arg))
+  File "/testbed/sympy/matrices/common.py", line 1968, in applyfunc
+    return self._eval_applyfunc(f)
+  File "/testbed/sympy/matrices/common.py", line 1908, in _eval_applyfunc
+    out = self._new(self.rows, self.cols, [f(x) for x in self])
+  File "/testbed/sympy/matrices/common.py", line 1908, in <listcomp>
+    out = self._new(self.rows, self.cols, [f(x) for x in self])
+  File "/testbed/sympy/matrices/matrices.py", line 466, in <lambda>
+    return self.applyfunc(lambda x: x.diff(arg))
+  File "/testbed/sympy/core/expr.py", line 3442, in diff
+    return _derivative_dispatch(self, *symbols, **assumptions)
+  File "/testbed/sympy/core/function.py", line 1926, in _derivative_dispatch
+    return Derivative(expr, *variables, **kwargs)
+  File "/testbed/sympy/core/function.py", line 1457, in __new__
+    if obj is not None and obj.is_zero:
+  File "/testbed/sympy/core/assumptions.py", line 458, in getit
+    return _ask(fact, self)
+  File "/testbed/sympy/core/assumptions.py", line 513, in _ask
+    _ask(pk, obj)
+  File "/testbed/sympy/core/assumptions.py", line 513, in _ask
+    _ask(pk, obj)
+  File "/testbed/sympy/core/assumptions.py", line 501, in _ask
+    a = evaluate(obj)
+  File "/testbed/sympy/core/mul.py", line 1478, in _eval_is_even
+    is_integer = self.is_integer
+  File "/testbed/sympy/core/assumptions.py", line 458, in getit
+    return _ask(fact, self)
+  File "/testbed/sympy/core/assumptions.py", line 513, in _ask
+    _ask(pk, obj)
+  File "/testbed/sympy/core/assumptions.py", line 501, in _ask
+    a = evaluate(obj)
+  File "/testbed/sympy/core/mul.py", line 1338, in _eval_is_imaginary
+    if self.is_finite is False:
+  File "/testbed/sympy/core/assumptions.py", line 458, in getit
+    return _ask(fact, self)
+  File "/testbed/sympy/core/assumptions.py", line 513, in _ask
+    _ask(pk, obj)
+  File "/testbed/sympy/core/assumptions.py", line 513, in _ask
+    _ask(pk, obj)
+  File "/testbed/sympy/core/assumptions.py", line 513, in _ask
+    _ask(pk, obj)
+  [Previous line repeated 6 more times]
+  File "/testbed/sympy/core/assumptions.py", line 501, in _ask
+    a = evaluate(obj)
+  File "/testbed/sympy/core/expr.py", line 827, in _eval_is_negative
+    extended_negative = self.is_extended_negative
+  File "/testbed/sympy/core/assumptions.py", line 458, in getit
+    return _ask(fact, self)
+  File "/testbed/sympy/core/assumptions.py", line 513, in _ask
+    _ask(pk, obj)
+  File "/testbed/sympy/core/assumptions.py", line 501, in _ask
+    a = evaluate(obj)
+  File "/testbed/sympy/core/expr.py", line 817, in _eval_is_positive
+    extended_positive = self.is_extended_positive
+  File "/testbed/sympy/core/assumptions.py", line 458, in getit
+    return _ask(fact, self)
+  File "/testbed/sympy/core/assumptions.py", line 501, in _ask
+    a = evaluate(obj)
+  File "/testbed/sympy/core/mul.py", line 1413, in _eval_is_extended_positive
+    return self._eval_pos_neg(1)
+  File "/testbed/sympy/core/mul.py", line 1418, in _eval_pos_neg
+    if t.is_extended_positive:
+  File "/testbed/sympy/core/assumptions.py", line 454, in getit
+    return self._assumptions[fact]
+RecursionError: maximum recursion depth exceeded while calling a Python object
+________________________________________________________________________________
+_________ sympy/physics/vector/tests/test_point.py:test_auto_point_vel _________
+Traceback (most recent call last):
+  File "/testbed/sympy/core/assumptions.py", line 454, in getit
+    return self._assumptions[fact]
+KeyError: 'zero'
+
+During handling of the above exception, another exception occurred:
+
+Traceback (most recent call last):
+  File "/testbed/sympy/core/assumptions.py", line 454, in getit
+    return self._assumptions[fact]
+KeyError: 'integer'
+
+During handling of the above exception, another exception occurred:
+
+Traceback (most recent call last):
+  File "/testbed/sympy/core/assumptions.py", line 454, in getit
+    return self._assumptions[fact]
+KeyError: 'finite'
+
+During handling of the above exception, another exception occurred:
+
+Traceback (most recent call last):
+  File "/testbed/sympy/core/assumptions.py", line 454, in getit
+    return self._assumptions[fact]
+KeyError: 'extended_positive'
+
+During handling of the above exception, another exception occurred:
+
+Traceback (most recent call last):
+  File "/testbed/sympy/physics/vector/tests/test_point.py", line 156, in test_auto_point_vel
+    raises(ValueError, lambda : P2.vel(B)) # O's velocity is defined in different frame, and no
+  File "/testbed/sympy/testing/pytest.py", line 104, in raises
+    code()
+  File "/testbed/sympy/physics/vector/tests/test_point.py", line 156, in <lambda>
+    raises(ValueError, lambda : P2.vel(B)) # O's velocity is defined in different frame, and no
+  File "/testbed/sympy/physics/vector/point.py", line 527, in vel
+    return self.pos_from(otherpoint).dt(frame) + otherpoint.vel(frame)
+  File "/testbed/sympy/physics/vector/point.py", line 527, in vel
+    return self.pos_from(otherpoint).dt(frame) + otherpoint.vel(frame)
+  File "/testbed/sympy/physics/vector/point.py", line 527, in vel
+    return self.pos_from(otherpoint).dt(frame) + otherpoint.vel(frame)
+  [Previous line repeated 940 more times]
+  File "/testbed/sympy/physics/vector/vector.py", line 643, in dt
+    return time_derivative(self, otherframe)
+  File "/testbed/sympy/physics/vector/functions.py", line 202, in time_derivative
+    outlist += (time_derivative(Vector([v]), v[1]) + \
+  File "/testbed/sympy/physics/vector/functions.py", line 199, in time_derivative
+    outlist += [(express(v[0], frame,
+  File "/testbed/sympy/matrices/matrices.py", line 459, in diff
+    deriv = ArrayDerivative(self, *args, evaluate=True)
+  File "/testbed/sympy/tensor/array/array_derivatives.py", line 15, in __new__
+    obj = super(ArrayDerivative, cls).__new__(cls, expr, *variables, **kwargs)
+  File "/testbed/sympy/core/function.py", line 1456, in __new__
+    obj = cls._dispatch_eval_derivative_n_times(expr, v, count)
+  File "/testbed/sympy/tensor/array/array_derivatives.py", line 102, in _dispatch_eval_derivative_n_times
+    result = cls._call_derive_matrix_by_scalar(expr, v)
+  File "/testbed/sympy/tensor/array/array_derivatives.py", line 60, in _call_derive_matrix_by_scalar
+    return _matrix_derivative(expr, v)
+  File "/testbed/sympy/matrices/expressions/matexpr.py", line 631, in _matrix_derivative
+    lines = expr._eval_derivative_matrix_lines(x)
+  File "/testbed/sympy/core/expr.py", line 3820, in _eval_derivative_matrix_lines
+    return [_LeftRightArgs([S.One, S.One], higher=self._eval_derivative(x))]
+  File "/testbed/sympy/matrices/matrices.py", line 466, in _eval_derivative
+    return self.applyfunc(lambda x: x.diff(arg))
+  File "/testbed/sympy/matrices/common.py", line 1968, in applyfunc
+    return self._eval_applyfunc(f)
+  File "/testbed/sympy/matrices/common.py", line 1908, in _eval_applyfunc
+    out = self._new(self.rows, self.cols, [f(x) for x in self])
+  File "/testbed/sympy/matrices/common.py", line 1908, in <listcomp>
+    out = self._new(self.rows, self.cols, [f(x) for x in self])
+  File "/testbed/sympy/matrices/matrices.py", line 466, in <lambda>
+    return self.applyfunc(lambda x: x.diff(arg))
+  File "/testbed/sympy/core/expr.py", line 3442, in diff
+    return _derivative_dispatch(self, *symbols, **assumptions)
+  File "/testbed/sympy/core/function.py", line 1926, in _derivative_dispatch
+    return Derivative(expr, *variables, **kwargs)
+  File "/testbed/sympy/core/function.py", line 1457, in __new__
+    if obj is not None and obj.is_zero:
+  File "/testbed/sympy/core/assumptions.py", line 458, in getit
+    return _ask(fact, self)
+  File "/testbed/sympy/core/assumptions.py", line 513, in _ask
+    _ask(pk, obj)
+  File "/testbed/sympy/core/assumptions.py", line 501, in _ask
+    a = evaluate(obj)
+  File "/testbed/sympy/core/mul.py", line 1454, in _eval_is_odd
+    is_integer = self.is_integer
+  File "/testbed/sympy/core/assumptions.py", line 458, in getit
+    return _ask(fact, self)
+  File "/testbed/sympy/core/assumptions.py", line 513, in _ask
+    _ask(pk, obj)
+  File "/testbed/sympy/core/assumptions.py", line 513, in _ask
+    _ask(pk, obj)
+  File "/testbed/sympy/core/assumptions.py", line 501, in _ask
+    a = evaluate(obj)
+  File "/testbed/sympy/core/expr.py", line 824, in _eval_is_negative
+    finite = self.is_finite
+  File "/testbed/sympy/core/assumptions.py", line 458, in getit
+    return _ask(fact, self)
+  File "/testbed/sympy/core/assumptions.py", line 513, in _ask
+    _ask(pk, obj)
+  File "/testbed/sympy/core/assumptions.py", line 513, in _ask
+    _ask(pk, obj)
+  File "/testbed/sympy/core/assumptions.py", line 513, in _ask
+    _ask(pk, obj)
+  [Previous line repeated 1 more time]
+  File "/testbed/sympy/core/assumptions.py", line 501, in _ask
+    a = evaluate(obj)
+  File "/testbed/sympy/core/expr.py", line 817, in _eval_is_positive
+    extended_positive = self.is_extended_positive
+  File "/testbed/sympy/core/assumptions.py", line 458, in getit
+    return _ask(fact, self)
+  File "/testbed/sympy/core/assumptions.py", line 513, in _ask
+    _ask(pk, obj)
+  File "/testbed/sympy/core/assumptions.py", line 513, in _ask
+    _ask(pk, obj)
+  File "/testbed/sympy/core/assumptions.py", line 513, in _ask
+    _ask(pk, obj)
+  [Previous line repeated 5 more times]
+  File "/testbed/sympy/core/assumptions.py", line 501, in _ask
+    a = evaluate(obj)
+  File "/testbed/sympy/core/mul.py", line 1204, in <lambda>
+    _eval_is_commutative = lambda self: _fuzzy_group(
+  File "/testbed/sympy/core/logic.py", line 82, in _fuzzy_group
+    for a in args:
+  File "/testbed/sympy/core/mul.py", line 1205, in <genexpr>
+    a.is_commutative for a in self.args)
+  File "/testbed/sympy/core/assumptions.py", line 454, in getit
+    return self._assumptions[fact]
+RecursionError: maximum recursion depth exceeded while calling a Python object
+________________________________________________________________________________
+ sympy/physics/vector/tests/test_point.py:test_auto_point_vel_if_tree_has_vel_but_inappropriate_pos_vector 
+Traceback (most recent call last):
+  File "/testbed/sympy/physics/vector/tests/test_point.py", line 197, in test_auto_point_vel_if_tree_has_vel_but_inappropriate_pos_vector
+    raises(ValueError, lambda : P1.vel(S)) # P.vel(S) not defined
+  File "/testbed/sympy/testing/pytest.py", line 104, in raises
+    code()
+  File "/testbed/sympy/physics/vector/tests/test_point.py", line 197, in <lambda>
+    raises(ValueError, lambda : P1.vel(S)) # P.vel(S) not defined
+  File "/testbed/sympy/physics/vector/point.py", line 527, in vel
+    return self.pos_from(otherpoint).dt(frame) + otherpoint.vel(frame)
+  File "/testbed/sympy/physics/vector/point.py", line 527, in vel
+    return self.pos_from(otherpoint).dt(frame) + otherpoint.vel(frame)
+  File "/testbed/sympy/physics/vector/point.py", line 527, in vel
+    return self.pos_from(otherpoint).dt(frame) + otherpoint.vel(frame)
+  [Previous line repeated 974 more times]
+  File "/testbed/sympy/physics/vector/vector.py", line 643, in dt
+    return time_derivative(self, otherframe)
+  File "/testbed/sympy/physics/vector/functions.py", line 199, in time_derivative
+    outlist += [(express(v[0], frame,
+  File "/testbed/sympy/matrices/matrices.py", line 459, in diff
+    deriv = ArrayDerivative(self, *args, evaluate=True)
+  File "/testbed/sympy/tensor/array/array_derivatives.py", line 15, in __new__
+    obj = super(ArrayDerivative, cls).__new__(cls, expr, *variables, **kwargs)
+  File "/testbed/sympy/core/function.py", line 1403, in __new__
+    return cls._get_zero_with_shape_like(expr)
+  File "/testbed/sympy/tensor/array/array_derivatives.py", line 37, in _get_zero_with_shape_like
+    return expr.zeros(*expr.shape)
+  File "/testbed/sympy/matrices/common.py", line 1165, in zeros
+    return klass._eval_zeros(rows, cols)
+  File "/testbed/sympy/matrices/common.py", line 805, in _eval_zeros
+    return cls._new(rows, cols, entry)
+  File "/testbed/sympy/matrices/immutable.py", line 69, in _new
+    rows, cols, flat_list = cls._handle_creation_inputs(*args, **kwargs)
+  File "/testbed/sympy/matrices/matrices.py", line 1063, in _handle_creation_inputs
+    if len(args) == 3 and isinstance(args[2], Callable):
+  File "/opt/miniconda3/envs/testbed/lib/python3.9/abc.py", line 119, in __instancecheck__
+    return _abc_instancecheck(cls, instance)
+RecursionError: maximum recursion depth exceeded in comparison
+
+________________________________________________________________________________
+__ sympy/physics/vector/tests/test_point.py:test_auto_point_vel_shortest_path __
+Traceback (most recent call last):
+  File "/testbed/sympy/physics/vector/tests/test_point.py", line 219, in test_auto_point_vel_shortest_path
+    assert P4.vel(B) == q1.diff(t) * B.x + u2 * B.y + 2 * q2.diff(t) * B.z
+AssertionError
+
+====== tests finished: 10 passed, 1 failed, 3 exceptions, in 9.02 seconds ======
+DO *NOT* COMMIT!
++ : '>>>>> End Test Output'
++ git checkout d57aaf064041fe52c0fa357639b069100f8b28e1 sympy/physics/vector/tests/test_point.py
+Updated 1 path from 479269d1df

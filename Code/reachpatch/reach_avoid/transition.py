@@ -3,7 +3,6 @@ from __future__ import annotations
 from dataclasses import replace
 from pathlib import Path
 
-from reachpatch.challenge_graph.execute import execute_challenge_round
 from reachpatch.challenge_graph.models import (
     challenge_obligation_key, open_high_challenge_ids,
 )
@@ -13,22 +12,30 @@ from reachpatch.execution import (
 )
 from reachpatch.models.base import content_hash, stable_id
 from reachpatch.models.evidence import (
-    ExecutableCheck, ExecutableOracle, ObservationContract, PairClassification, PublicEvidence,
+    ExecutableCheck, ExecutableOracle, ObservationContract, OutcomeStatus,
+    PairClassification, PairedTraceBundle, PublicEvidence, RunObservation,
+    TraceBundle,
 )
 from reachpatch.models.graphs import ChallengeCell, ChallengeGraph, ChallengeStatus, ExecutableScenario
 from reachpatch.models.reach_avoid import (
-    AtomicEvidence, AtomicObligation, AvoidEvaluation, AvoidKind, ChallengeSelection, CheckpointEvidence, Decision,
+    AtomicEvidence, AtomicObligation, AvoidEvaluation, AvoidKind, ChallengeRoundResult, ChallengeSelection, CheckpointEvidence, Decision,
     FrontierDelta, build_frontier_measure,
     GeneratorResult, ProgressEvaluation, ReachAvoidState, ReachEvaluation,
     StateCheckpoint, TransitionDecision, TransitionEvidence, TrialTransition,
     TransitionTraceBundle, atomic_obligation_key, normalize_input_recipe_semantics,
 )
+from .validation_backlog import derive_impact_validation_plan
 from reachpatch.reach_avoid.gates import compare_progress, evaluate_avoid, evaluate_reach
 from reachpatch.reach_avoid.graph_stack import (
     latest_graph_metrics, set_graph_metrics, update_graph_stack_after_diff,
 )
 from reachpatch.reach_avoid.regression import (
     build_diff_conditioned_regression_plan, materialize_trial_challenges,
+)
+from reachpatch.reach_avoid.semantics import (
+    input_partition_semantic_key, scenario_semantic_key,
+    normalize_execution_contract,
+    normalize_target_cell,
 )
 
 
@@ -175,61 +182,105 @@ def _frontier_matches_cell(frontier, cell, stack) -> bool:
     )
 
 
+def _frontier_scenario_rank(frontier, cell, stack) -> tuple[int, int, int, str]:
+    """Rank a trial cell against the selected frontier's stable semantics.
+
+    Requirement membership is intentionally the weakest match.  A single
+    Requirement can materialize several adjacent partitions after a diff; if
+    those cells are truncated first, the exact failing partition can disappear
+    from the two-scenario primary batch.
+    """
+    if frontier is None:
+        return (1, 1, 1, cell.challenge_id)
+    partition_id = input_partition_semantic_key(cell.input_recipe)
+    exact_partition = bool(
+        getattr(frontier, "input_partition_id", None)
+        and partition_id == frontier.input_partition_id
+    )
+    binding_ids = set(getattr(frontier, "binding_ids", ()))
+    path_ids = set(getattr(frontier, "path_class_ids", ()))
+    unit = stack.binding_graph.units.get(cell.binding_id)
+    bound_route = bool(
+        cell.binding_id in binding_ids
+        or cell.path_class_id in path_ids
+        or (unit is not None and unit.path_class_id in path_ids)
+    )
+    requirement_match = cell.requirement_id in set(
+        getattr(frontier, "requirement_ids", ()),
+    )
+    return (
+        not exact_partition,
+        not bound_route,
+        not requirement_match,
+        cell.challenge_id,
+    )
+
+
 def _atomic_obligation_from_cell(cell, stack) -> AtomicObligation:
     leaf = stack.requirement_graph.leaves.get(cell.requirement_id)
-    contract_id = getattr(
-        getattr(leaf, "expected_observation", None), "contract_id", None,
-    ) or cell.observation_contract.contract_id
     role = (
         "PRESERVATION" if cell.kind == "PRESERVATION"
+        or bool(getattr(leaf, "preservation", False))
         else "IMPACT" if cell.kind == "IMPACT"
         else "TARGET"
     )
-    semantic_recipe = {
-        "kind": cell.input_recipe.kind,
-        "concrete_input": cell.input_recipe.concrete_input,
-        "derivation": cell.input_recipe.derivation,
-        "command": cell.execution_scenario.command,
-        "cwd": cell.execution_scenario.cwd,
-        "environment": cell.execution_scenario.environment,
-        "timeout_seconds": cell.execution_scenario.timeout_seconds,
-        "backend": "shared-executor",
-    }
-    partition_id = stable_id(
-        "input-partition", normalize_input_recipe_semantics({
-            "concrete_input": cell.input_recipe.concrete_input,
-            "derivation": cell.input_recipe.derivation,
-            "kind": cell.input_recipe.kind,
-        }),
+    normalized_contract = normalize_execution_contract(
+        cell.observation_contract,
+        role=role,
+        force_process_success=(
+            role == "TARGET"
+            and (
+                str(getattr(cell, "origin", "")).upper() == "PUBLIC_CHECK"
+                or str(getattr(getattr(cell, "input_recipe", None), "kind", "")).upper()
+                == "PUBLIC_REPLAY"
+            )
+        ),
     )
+    contract_id = getattr(normalized_contract, "contract_id", None) or cell.observation_contract.contract_id
+    # Input partition identity must be identical in ChallengeCell,
+    # RepairFrontier, and AtomicObligation. Execution details travel in the
+    # scenario, not in a second competing partition key.
+    partition_id = input_partition_semantic_key(cell.input_recipe)
     # A cell's resolved oracle is the executable authority for a transition.
     # Requirement prose can describe a return value while a public check
     # establishes the same requirement through exit status.  Carrying the
     # prose contract here would make a passing public assertion look like an
     # atomic failure.
-    oracle_expected = cell.oracle.expected
+    oracle_expected = normalized_contract.expected if role == "TARGET" else cell.oracle.expected
+    if hasattr(oracle_expected, "to_dict"):
+        oracle_expected = oracle_expected.to_dict()
+    if role in {"PRESERVATION", "IMPACT"} and cell.oracle.authority == "C" and isinstance(oracle_expected, dict):
+        # Authority-C preservation is a relation to the stable baseline
+        # observation.  Keep only typed observable fields so the shared
+        # ObservationContract comparator can evaluate it; duration, trace IDs
+        # and status metadata are not behavior.
+        oracle_expected = {
+            key: oracle_expected[key]
+            for key in ("exit_code", "stdout", "stderr", "value", "exception")
+            if key in oracle_expected and oracle_expected[key] is not None
+        } or oracle_expected
     if isinstance(oracle_expected, dict) and set(oracle_expected) == {"exit_code"} and oracle_expected["exit_code"] == 0:
         atomic_contract = ObservationContract(
-            relation=cell.oracle.relation, expected=0, observable="exit_code",
+            relation=normalized_contract.relation, expected={"exit_code": 0}, observable="process",
             comparator="EXIT_ZERO",
         )
     elif isinstance(oracle_expected, dict) and any(
         key in oracle_expected for key in ("exit_code", "stdout", "stderr", "value", "exception")
     ):
         atomic_contract = ObservationContract(
-            relation=cell.oracle.relation, expected=oracle_expected, observable="process",
+            relation=normalized_contract.relation, expected=oracle_expected, observable="process",
             comparator="EQUALS",
         )
     else:
-        comparator = cell.observation_contract.normalized_comparator
+        comparator = normalized_contract.normalized_comparator
         atomic_contract = ObservationContract(
-            relation=cell.oracle.relation, expected=oracle_expected,
-            observable=cell.observation_contract.observable,
+            relation=normalized_contract.relation, expected=oracle_expected,
+            observable=normalized_contract.observable,
             comparator=(comparator if comparator != "RELATION_HOLDS" else "EQUALS"),
         )
     raw = AtomicObligation(
         key="", requirement_id=cell.requirement_id,
-        requirement_contract_id=contract_id, role=role, input_recipe=semantic_recipe,
+        requirement_contract_id=contract_id, role=role, input_recipe=cell.input_recipe,
         input_partition_id=partition_id, oracle_contract=atomic_contract,
         authority=cell.oracle.authority if cell.oracle.authority in {"A", "B", "C", "PROVISIONAL"} else "PROVISIONAL",
         hard=cell.hard, source=f"challenge:{cell.challenge_id}",
@@ -237,28 +288,70 @@ def _atomic_obligation_from_cell(cell, stack) -> AtomicObligation:
     return replace(raw, key=atomic_obligation_key(raw))
 
 
-def _transition_atomic_obligations(state, trial_stack, selection, selected_frontier):
+def build_transition_validation_batch(
+    state: ReachAvoidState,
+    selected_frontier,
+    trial_diff,
+    *,
+    trial_stack=None,
+    selection: ChallengeSelection | None = None,
+) -> tuple[AtomicObligation, ...]:
     """Return the bounded validation set in the required execution order.
 
     The selected frontier must be evaluated before locks and impact replays.
     Duplicates are removed by the patch-independent atomic semantic key.
     """
-    selected_ids = set(getattr(selection, "challenge_ids", ()))
-    candidates = [
-        cell for cell in trial_stack.challenge_graph.active_cells()
-        if cell.challenge_id in selected_ids and cell.execution_scenario.command
+    trial_stack = trial_stack or state.graph_stack
+    selection = selection or ChallengeSelection(
+        tuple(getattr(selected_frontier, "challenge_ids", ()))[:2],
+    )
+    selected_ids = tuple(getattr(selection, "challenge_ids", ()))
+    cells_by_id = {
+        cell.challenge_id: cell
+        for cell in trial_stack.challenge_graph.active_cells()
+    }
+    # Preserve the materializer's selected-frontier order.  Iterating the
+    # graph dictionary here used to put older target cells ahead of a newly
+    # materialized preservation replay, so the selected frontier silently
+    # disappeared from transition evidence.
+    primary_candidates = [
+        cells_by_id[challenge_id] for challenge_id in selected_ids
+        if challenge_id in cells_by_id
+        and cells_by_id[challenge_id].execution_scenario.command
     ]
-    candidates.sort(key=lambda cell: (
-        not _frontier_matches_cell(selected_frontier, cell, trial_stack),
+    primary_candidates.sort(key=lambda cell: (
+        _frontier_scenario_rank(selected_frontier, cell, trial_stack),
         cell.kind == "PRESERVATION",
-        cell.challenge_id,
     ))
-    locked_ids = state.locked_checks.target_ids | state.locked_checks.preservation_ids
+    candidates = primary_candidates[:2]
+    planning_state = replace(state, graph_stack=trial_stack)
+    validation_items = derive_impact_validation_plan(
+        planning_state, selected_frontier, trial_diff,
+    )
+    cells_by_scenario = {}
     for cell in trial_stack.challenge_graph.active_cells():
         if not cell.execution_scenario.command:
             continue
-        if cell.input_recipe.source_check_id in locked_ids and cell not in candidates:
-            candidates.append(cell)
+        obligation = _atomic_obligation_from_cell(cell, trial_stack)
+        scenario_key = scenario_semantic_key(
+            requirement_contract_id=obligation.requirement_contract_id,
+            role=obligation.role,
+            input_recipe=cell.input_recipe,
+            observation_contract=cell.observation_contract,
+        )
+        cells_by_scenario.setdefault(scenario_key, cell)
+    locked_added = 0
+    impact_added = 0
+    for item in validation_items:
+        candidate = cells_by_scenario.get(item.scenario_key or "")
+        if candidate is None or candidate in candidates:
+            continue
+        if item.kind.startswith("LOCKED_") and locked_added < 4:
+            candidates.append(candidate)
+            locked_added += 1
+        elif item.kind == "IMPACT_REPLAY" and impact_added < 2:
+            candidates.append(candidate)
+            impact_added += 1
     obligations: list[AtomicObligation] = []
     seen: set[str] = set()
     for cell in candidates:
@@ -267,11 +360,37 @@ def _transition_atomic_obligations(state, trial_stack, selection, selected_front
             continue
         seen.add(obligation.key)
         obligations.append(obligation)
+    # A source-backed ISSUE_DIFF_MISMATCH can be actionable before a
+    # ChallengeCell exists.  Its objective supplies the selected executable
+    # structural obligation.  Carry that obligation as one atomic unit into
+    # the triplet; otherwise transition would validate only mechanics and
+    # could never retain an evidence-limited repair.
+    objective = state.current_repair_objective
+    if (
+        objective is not None
+        and getattr(objective, "selected_frontier", None) is not None
+        and objective.selected_frontier.semantic_key
+        == getattr(selected_frontier, "semantic_key", "")
+    ):
+        requirement_ids = set(getattr(selected_frontier, "requirement_ids", ()))
+        for obligation in objective.atomic_obligations:
+            if len([item for item in obligations if item.role != "MECHANICAL"]) >= 2:
+                break
+            if (
+                obligation.role == "MECHANICAL"
+                or obligation.requirement_id not in requirement_ids
+                or obligation.key in seen
+            ):
+                continue
+            seen.add(obligation.key)
+            obligations.append(obligation)
     # Registered probes are durable state, not tool-call transcripts.  When a
     # probe is linked to this frontier it must be re-run in the controller's
     # triplet and compared alongside the selected challenge.
     selected_key = getattr(selected_frontier, "semantic_key", "")
     for registration in state.probe_registrations.values():
+        if len(obligations) >= 2:
+            break
         if registration.linked_frontier_key != selected_key:
             continue
         obligation = registration.atomic_obligation
@@ -288,6 +407,242 @@ def _transition_atomic_obligations(state, trial_stack, selection, selected_front
     )
     obligations.append(replace(mechanical, key=atomic_obligation_key(mechanical)))
     return tuple(obligations)
+
+
+def _atomic_trace(evidence: AtomicEvidence, *, tree_hash: str, suffix: str) -> TraceBundle:
+    """Reify one triplet observation as a graph/audit trace.
+
+    The triplet executor is the sole runner for a transition.  This adapter
+    does not execute anything; it only translates its structured observation
+    into the existing ChallengeGraph evidence shape so the rest of the
+    Reach--Avoid state can consume the same run without a second paired
+    execution.
+    """
+    payload = evidence.observed_payload if isinstance(evidence.observed_payload, dict) else {}
+    raw_status = payload.get("status", evidence.status)
+    try:
+        status = OutcomeStatus(str(raw_status))
+    except ValueError:
+        status = OutcomeStatus.UNKNOWN
+    observation = RunObservation(
+        status=status,
+        return_code=payload.get("return_code"),
+        stdout=str(payload.get("stdout", "")),
+        stderr=str(payload.get("stderr", "")),
+        duration_seconds=float(payload.get("duration_seconds", 0.0) or 0.0),
+        value=payload.get("value"),
+        exception=payload.get("exception"),
+    )
+    return TraceBundle(
+        trace_bundle_id=(evidence.trace_ids[-1] if evidence.trace_ids
+                         else stable_id("triplet-trace", evidence.obligation_key, suffix)),
+        tree_hash=tree_hash, command=tuple(evidence.command), observation=observation,
+        executed_symbol_ids=(), executed_path_ids=(),
+        first_project_frame=evidence.first_project_frame,
+        stable_runs=max(1, evidence.stability_runs), comparable=True,
+        cwd=evidence.cwd, backend=evidence.backend,
+    )
+
+
+def _triplet_classification(incumbent: AtomicEvidence, trial: AtomicEvidence) -> PairClassification:
+    if incumbent.status == "PASS" and trial.status == "PASS":
+        return PairClassification.PASS_PRESERVED
+    if incumbent.status != "PASS" and trial.status == "PASS":
+        return (PairClassification.PASS_PRESERVED
+                if trial.role in {"PRESERVATION", "IMPACT"}
+                else PairClassification.TARGET_FIXED)
+    if incumbent.status == "PASS" and trial.status != "PASS":
+        return (PairClassification.PRESERVATION_REGRESSION
+                if trial.role in {"PRESERVATION", "IMPACT"}
+                else PairClassification.TARGET_REGRESSED)
+    if trial.status in {"UNKNOWN", "UNEXECUTABLE", "BLOCKED"}:
+        return PairClassification.UNKNOWN
+    return PairClassification.TARGET_STILL_FAILING
+
+
+def apply_triplet_evidence_to_trial_graph(
+    trial_stack, obligations: tuple[AtomicObligation, ...],
+    trace_bundle: TransitionTraceBundle,
+) -> GraphStack:
+    """Apply already-collected triplet evidence without running a challenge."""
+    cells = dict(trial_stack.challenge_graph.cells)
+    for obligation in obligations:
+        if not obligation.source.startswith("challenge:"):
+            continue
+        challenge_id = obligation.source.split(":", 1)[1]
+        cell = cells.get(challenge_id)
+        evidence = trace_bundle.trial.get(obligation.key)
+        if cell is None or evidence is None:
+            continue
+        status_map = {
+            "PASS": ChallengeStatus.PASS,
+            "FAIL": ChallengeStatus.FAIL,
+            "UNKNOWN": ChallengeStatus.UNKNOWN,
+            "UNEXECUTABLE": ChallengeStatus.UNSUPPORTED,
+            "BLOCKED": ChallengeStatus.UNKNOWN,
+        }
+        terminal = status_map.get(evidence.status, ChallengeStatus.UNKNOWN)
+        payload = evidence.observed_payload if isinstance(evidence.observed_payload, dict) else {}
+        try:
+            outcome = OutcomeStatus(str(payload.get("status", evidence.status)))
+        except ValueError:
+            outcome = OutcomeStatus.UNKNOWN
+        cells[challenge_id] = replace(
+            cell, patched_outcome=outcome, trace_bundle_id=(
+                evidence.trace_ids[-1] if evidence.trace_ids else cell.trace_bundle_id
+            ), stability_runs=evidence.stability_runs, terminal_status=terminal,
+        )
+    challenge_graph = replace(trial_stack.challenge_graph, cells=cells)
+    return replace(trial_stack, challenge_graph=challenge_graph)
+
+
+def _mechanical_status(evidence: dict[str, AtomicEvidence]) -> bool | None:
+    item = next((value for value in evidence.values()
+                 if value.role == "MECHANICAL"), None)
+    if item is None:
+        return None
+    return item.status == "PASS"
+
+
+def compute_selected_frontier_delta(
+    selected_frontier,
+    incumbent_evidence: dict[str, AtomicEvidence],
+    trial_evidence: dict[str, AtomicEvidence],
+) -> FrontierDelta:
+    """Compare only evidence semantically owned by one repair frontier."""
+    before = build_frontier_measure(
+        selected_frontier, incumbent_evidence,
+        mechanical_ok=_mechanical_status(incumbent_evidence),
+    )
+    after = build_frontier_measure(
+        selected_frontier, trial_evidence,
+        mechanical_ok=_mechanical_status(trial_evidence),
+    )
+    trusted_fail_to_pass = {
+        key for key in before.failed_atomic_keys & after.passed_atomic_keys
+        if incumbent_evidence[key].authority in {"A", "B", "C"}
+        and trial_evidence[key].authority in {"A", "B", "C"}
+        and incumbent_evidence[key].stability_runs >= 2
+        and trial_evidence[key].stability_runs >= 2
+    }
+    trusted_pass_to_fail = {
+        key for key in before.passed_atomic_keys & after.failed_atomic_keys
+        if incumbent_evidence[key].authority in {"A", "B", "C"}
+        and trial_evidence[key].authority in {"A", "B", "C"}
+        and incumbent_evidence[key].stability_runs >= 2
+        and trial_evidence[key].stability_runs >= 2
+    }
+    kind = _frontier_kind_name(selected_frontier)
+    reasons: list[str] = []
+    verified_closed = False
+    if (
+        kind == "MECHANICAL_FAILURE"
+        and before.mechanical_ok is False
+        and after.mechanical_ok is True
+    ):
+        reasons.append("mechanical fail -> pass")
+        verified_closed = True
+    elif kind == "BEHAVIOR_FAILURE" and trusted_fail_to_pass:
+        reasons.append("selected trusted atomic FAIL -> PASS")
+        verified_closed = True
+    elif (
+        kind == "PRESERVATION_REGRESSION"
+        and trusted_fail_to_pass
+        and not any(
+            incumbent_evidence[key].role == "TARGET"
+            for key in trusted_pass_to_fail
+        )
+    ):
+        reasons.append(
+            "preservation atomic FAIL -> PASS with locked targets retained",
+        )
+        verified_closed = True
+    elif (
+        kind == "LOCALIZATION_FAILURE"
+        and before.binding_alignment != "ALIGNED"
+        and after.binding_alignment == "ALIGNED"
+    ):
+        reasons.append("dynamic trace aligned binding to current source")
+        verified_closed = True
+    elif (
+        kind == "REQUIREMENT_COVERAGE_GAP"
+        and after.covered_partition_ids - before.covered_partition_ids
+    ):
+        reasons.append("missing requirement partition executed")
+        verified_closed = True
+    elif kind == "ISSUE_DIFF_MISMATCH":
+        if trusted_fail_to_pass:
+            reasons.append("selected mismatch scenario FAIL -> PASS")
+        elif (
+            before.entered_project_code is False
+            and after.entered_project_code is True
+        ):
+            reasons.append("selected mismatch scenario entered project code")
+        elif after.stable_observation_count > before.stable_observation_count:
+            reasons.append("selected mismatch gained a stable observation")
+        elif (
+            before.binding_alignment != "ALIGNED"
+            and after.binding_alignment == "ALIGNED"
+            and after.stable_observation_count > 0
+        ):
+            reasons.append(
+                "incremental edit aligned to selected source and passed stable validation",
+            )
+        # Graph/source alignment alone never closes a mismatch frontier.
+        verified_closed = False
+    return FrontierDelta(
+        selected_frontier_key=selected_frontier.semantic_key,
+        selected_frontier_kind=kind, before=before, after=after,
+        verified_closed=verified_closed, material_progress=bool(reasons),
+        progress_reasons=tuple(reasons),
+        regression_reasons=(
+            ("selected trusted atomic PASS -> FAIL",)
+            if trusted_pass_to_fail else ()
+        ),
+    )
+
+
+def _challenge_result_from_triplet(
+    state: ReachAvoidState, trial_stack: GraphStack,
+    selection: ChallengeSelection, obligations: tuple[AtomicObligation, ...],
+    trace_bundle: TransitionTraceBundle,
+) -> Any:
+    """Build a compatibility result from the single triplet execution."""
+    executions: list[PairedTraceBundle] = []
+    for obligation in obligations:
+        if not obligation.source.startswith("challenge:"):
+            continue
+        challenge_id = obligation.source.split(":", 1)[1]
+        incumbent = trace_bundle.incumbent.get(obligation.key)
+        trial = trace_bundle.trial.get(obligation.key)
+        baseline = trace_bundle.baseline.get(obligation.key)
+        if incumbent is None or trial is None or baseline is None:
+            continue
+        cell = trial_stack.challenge_graph.cells.get(challenge_id)
+        if cell is None:
+            continue
+        role = "PRESERVATION" if obligation.role in {"PRESERVATION", "IMPACT"} else "TARGET"
+        classification = _triplet_classification(incumbent, trial)
+        oracle_id = stable_id("triplet-oracle", obligation.key, obligation.requirement_contract_id)
+        executions.append(PairedTraceBundle(
+            paired_bundle_id=stable_id("triplet-paired", obligation.key, tuple(trial.trace_ids)),
+            check_id=cell.input_recipe.source_check_id or challenge_id,
+            challenge_id=challenge_id, patch_hash=trial_stack.patch_hash,
+            baseline=_atomic_trace(baseline, tree_hash="baseline", suffix="baseline"),
+            patched=_atomic_trace(trial, tree_hash=trial_stack.patch_hash, suffix="trial"),
+            classification=classification, oracle_id=oracle_id,
+            oracle_authority=trial.authority, expected_relation=(
+                getattr(obligation.oracle_contract, "relation", "")
+            ), stable_runs=min(baseline.stability_runs, trial.stability_runs),
+            previous=_atomic_trace(incumbent, tree_hash="incumbent", suffix="incumbent"),
+            oracle_contract_id=getattr(obligation.oracle_contract, "contract_id", ""),
+        ))
+    return ChallengeRoundResult(
+        selected_challenge_ids=tuple(selection.challenge_ids),
+        executed_challenge_ids=tuple(item.challenge_id for item in executions),
+        executions=tuple(executions), counterexamples=(), confirmed_failures=(),
+        updated_graph_stack=trial_stack, frontiers=(), execution_seconds=0.0, cache_hits=0,
+    )
 
 
 def _materialize_registered_probes(state, trial_stack, selected_frontier):
@@ -389,11 +744,18 @@ def compute_transition_evidence(
         challenge_id for challenge_id, classification in classifications.items()
         if classification is PairClassification.TARGET_REGRESSED
     ))
+    locked_check_ids = (
+        set(state.locked_checks.target_ids)
+        | set(state.locked_checks.preservation_ids)
+    )
     locked_lost = tuple(sorted(
-        check_id for check_id in state.locked_checks.target_ids
+        check_id for check_id in locked_check_ids
         if any(
             execution.check_id == check_id
-            and execution.classification is PairClassification.TARGET_REGRESSED
+            and execution.classification in {
+                PairClassification.TARGET_REGRESSED,
+                PairClassification.PRESERVATION_REGRESSION,
+            }
             for execution in challenge_result.executions
         )
     ))
@@ -593,52 +955,13 @@ def compute_transition_evidence(
     ]
     frontier_delta = None
     if selected_frontier is not None:
-        before_measure = build_frontier_measure(selected_frontier, atomic_before,
-                                                mechanical_ok=getattr(state.last_mechanical_result, "passed", None))
-        after_measure = build_frontier_measure(selected_frontier, atomic_after, mechanical_ok=mechanical.passed)
-        reasons: list[str] = []
-        kind = _frontier_kind_name(selected_frontier)
-        # Only a stable A/B/C transition may close a behavior or preservation
-        # frontier.  Provisional observations still remain useful evidence,
-        # but can at most justify a provisional working patch.
-        selected_fail_to_pass = (
-            set(atomic_fail_to_pass)
-            .intersection(before_measure.failed_atomic_keys)
-            .intersection(after_measure.passed_atomic_keys)
+        frontier_delta = compute_selected_frontier_delta(
+            selected_frontier, atomic_before, atomic_after,
         )
-        if kind == "MECHANICAL_FAILURE" and before_measure.mechanical_ok is False and after_measure.mechanical_ok is True:
-            reasons.append("mechanical fail -> pass")
-        elif kind == "BEHAVIOR_FAILURE" and selected_fail_to_pass:
-            reasons.append("selected trusted atomic FAIL -> PASS")
-        elif kind == "PRESERVATION_REGRESSION" and selected_fail_to_pass and not atomic_pass_to_fail:
-            reasons.append("preservation atomic FAIL -> PASS with locked targets retained")
-        elif kind == "REPRODUCTION_GAP" and not before_measure.entered_project_code and after_measure.entered_project_code and after_measure.stable_observation_count:
-            reasons.append("reproduction entered project code with stable trace")
-        elif kind == "LOCALIZATION_FAILURE" and before_measure.binding_alignment != "ALIGNED" and after_measure.binding_alignment == "ALIGNED":
-            reasons.append("dynamic trace aligned binding to current source")
-        elif kind == "OBSERVATION_GAP" and after_measure.stable_observation_count > before_measure.stable_observation_count:
-            reasons.append("stable typed observation obtained")
-        elif kind == "REQUIREMENT_COVERAGE_GAP" and after_measure.covered_partition_ids - before_measure.covered_partition_ids:
-            reasons.append("missing requirement partition executed")
-        elif kind == "IMPACT_RISK" and after_measure.replayed_impact_ids - before_measure.replayed_impact_ids:
-            reasons.append("impact consumer replayed without regression")
-        verified_closed = bool(reasons) and (
-            kind in {"MECHANICAL_FAILURE", "BEHAVIOR_FAILURE", "PRESERVATION_REGRESSION"}
-            or (kind == "REPRODUCTION_GAP" and after_measure.entered_project_code)
-            or (kind == "LOCALIZATION_FAILURE" and after_measure.binding_alignment == "ALIGNED")
-            or (kind == "OBSERVATION_GAP" and after_measure.stable_observation_count > 0)
-            or (kind == "REQUIREMENT_COVERAGE_GAP" and
-                bool(after_measure.covered_partition_ids - before_measure.covered_partition_ids))
-            or (kind == "IMPACT_RISK" and
-                bool(after_measure.replayed_impact_ids - before_measure.replayed_impact_ids))
-        )
-        frontier_delta = FrontierDelta(
-            selected_frontier_key=selected_frontier.semantic_key,
-            selected_frontier_kind=kind, before=before_measure, after=after_measure,
-            verified_closed=verified_closed, material_progress=bool(reasons),
-            progress_reasons=tuple(reasons),
-            regression_reasons=("trusted atomic PASS -> FAIL",) if atomic_pass_to_fail else (),
-        )
+    confirmed_regression_keys = tuple(sorted(
+        key for key in atomic_pass_to_fail
+        if atomic_after[key].role in {"PRESERVATION", "IMPACT"}
+    ))
     return TransitionEvidence(
         mechanical=mechanical,
         target_pass_ids_before=before_target,
@@ -681,7 +1004,11 @@ def compute_transition_evidence(
         frontier_delta=frontier_delta, trace_bundle=trace_bundle,
         verified_progress=tuple(frontier_delta.progress_reasons if frontier_delta and frontier_delta.verified_closed else ()),
         material_progress=tuple(frontier_delta.progress_reasons if frontier_delta and frontier_delta.material_progress else ()),
-        trusted_regressions=tuple(sorted(set(atomic_pass_to_fail) | set(preservation_regressions) | set(target_regressions))),
+        trusted_regressions=tuple(sorted(
+            set(confirmed_regression_keys)
+            | set(preservation_regressions)
+            | set(locked_lost)
+        )),
         hard_avoid_violations=tuple(
             reason for reason in mechanical.failure_reasons
             if not mechanical.passed
@@ -695,12 +1022,28 @@ def decide_reach_avoid_transition(
     trial_graph_stack,
     evidence: TransitionEvidence,
 ) -> TransitionDecision:
+    # A transition is about the selected repair frontier.  A new impact or
+    # locked replay can add useful evidence, but it cannot independently
+    # promote an unrelated trial.  The no-frontier fallback is retained for
+    # direct API callers that construct TransitionEvidence outside the
+    # controller; production always supplies a selected frontier.
+    delta = evidence.frontier_delta
+    if delta is None:
+        selected_fail_to_pass = set(evidence.atomic_fail_to_pass)
+    else:
+        selected_fail_to_pass = (
+            set(evidence.atomic_fail_to_pass)
+            .intersection(delta.before.failed_atomic_keys)
+            .intersection(delta.after.passed_atomic_keys)
+        )
     target_progress_keys = tuple(
-        key for key in evidence.atomic_fail_to_pass
+        key for key in selected_fail_to_pass
         if evidence.atomic_after.get(key, AtomicEvidence(key, "UNKNOWN")).role == "TARGET"
     )
-    trusted_target_progress = bool(target_progress_keys) or bool(evidence.target_failures_closed)
-    trusted_atomic_progress = bool(evidence.atomic_fail_to_pass)
+    trusted_target_progress = bool(target_progress_keys) or bool(
+        delta is None and evidence.target_failures_closed
+    )
+    trusted_atomic_progress = bool(selected_fail_to_pass)
     hard_avoid_reasons = list(evidence.hard_avoid_violations)
     if evidence.locked_targets_lost:
         hard_avoid_reasons.append("locked trusted target changed PASS -> FAIL")
@@ -728,15 +1071,24 @@ def decide_reach_avoid_transition(
         reasons = ("target progress retained while preservation regression is repairable",)
         next_kind = "PRESERVATION_REGRESSION"
     elif (
-        evidence.frontier_delta is not None
-        and evidence.frontier_delta.verified_closed
+        delta is not None
+        and delta.verified_closed
     ) or trusted_atomic_progress:
-        decision = Decision.COMMIT_WORKING
-        reasons = ("selected frontier closed by trusted atomic evidence",)
-        next_kind = None
+        # An ISSUE_DIFF_MISMATCH may identify the right source mechanism, but
+        # it begins with provisional alignment evidence.  It must be retained
+        # for the next targeted validation, never treated as a direct Reach
+        # proof or an unconditional commit.
+        if evidence.selected_frontier_kind == "ISSUE_DIFF_MISMATCH":
+            decision = Decision.KEEP_PROVISIONAL
+            reasons = ("issue/diff mismatch gained selected scenario evidence",)
+            next_kind = evidence.selected_frontier_kind
+        else:
+            decision = Decision.COMMIT_WORKING
+            reasons = ("selected frontier closed by trusted atomic evidence",)
+            next_kind = None
     elif (
-        evidence.frontier_delta is not None
-        and evidence.frontier_delta.material_progress
+        delta is not None
+        and delta.material_progress
         and not evidence.trusted_regressions
     ):
         decision = Decision.KEEP_PROVISIONAL
@@ -747,10 +1099,10 @@ def decide_reach_avoid_transition(
         reasons = ("selected frontier has no verified or material progress",)
         next_kind = None
     strict_progress = trusted_atomic_progress or bool(
-        evidence.frontier_delta and evidence.frontier_delta.verified_closed
+        delta and delta.verified_closed
     )
     causal_progress = bool(
-        evidence.frontier_delta and evidence.frontier_delta.material_progress
+        delta and delta.material_progress
     )
     return TransitionDecision(
         decision=decision,
@@ -971,20 +1323,96 @@ def evaluate_trial_transition(
         state.graph_stack, cumulative, trial_tree, state.base_repository, "",
         public_evidence, state.graph_budget,
     )
+    trial_stack = replace(
+        trial_stack,
+        challenge_graph=replace(
+            trial_stack.challenge_graph,
+            cells={
+                challenge_id: normalize_target_cell(cell)
+                for challenge_id, cell in trial_stack.challenge_graph.cells.items()
+            },
+        ),
+    )
     trial_stack = _materialize_registered_probes(
         state, trial_stack, selected_frontier,
+    )
+    trial_stack = replace(
+        trial_stack,
+        challenge_graph=replace(
+            trial_stack.challenge_graph,
+            cells={
+                challenge_id: normalize_target_cell(cell)
+                for challenge_id, cell in trial_stack.challenge_graph.cells.items()
+            },
+        ),
     )
     diff_graph_metrics = latest_graph_metrics()
     diff_program = trial_stack.program_graph
     impact = trial_stack.program_graph.impact_cone
     plan = build_diff_conditioned_regression_plan(state, cumulative, impact)
-    transient = replace(state, graph_stack=trial_stack)
     selection = materialize_trial_challenges(
         state, trial_stack, plan, selected_frontier=selected_frontier,
     )
-    challenge_result = execute_challenge_round(
-        transient, selection, state.base_repository, trial_tree,
-        previous_tree=Path(source_checkpoint.snapshot_tree),
+    # Build the bounded atomic batch first, then execute exactly one triplet.
+    # The former implementation ran execute_challenge_round here and ran the
+    # same scenarios again in execute_transition_triplet, making transition
+    # evidence depend on two different runners.
+    atomic_obligations = build_transition_validation_batch(
+        state, selected_frontier, cumulative,
+        trial_stack=trial_stack, selection=selection,
+    )
+    trace_bundle = execute_transition_triplet(
+        state.base_repository, Path(source_checkpoint.snapshot_tree), trial_tree,
+        atomic_obligations,
+        {
+            "stability_runs": 2,
+            "backend": "shared-executor",
+        },
+    )
+    # Dynamic alignment is derived from the triplet trace, never from a
+    # static MAY_EXECUTE edge.  The adapter annotates evidence for the
+    # selected frontier before measure/delta comparison.
+    trial_evidence = dict(trace_bundle.trial)
+    incremental_paths = {hunk.path for hunk in incremental.hunks}
+    selected_slice_paths = {
+        trial_stack.program_graph.nodes[node_id].path
+        for node_id in getattr(selected_frontier, "repair_slice_ids", ())
+        if node_id in trial_stack.program_graph.nodes
+    }
+    selected_incremental_alignment = bool(
+        incremental_paths & selected_slice_paths
+    )
+    for obligation in atomic_obligations:
+        evidence_item = trial_evidence.get(obligation.key)
+        if evidence_item is None:
+            continue
+        if (
+            _frontier_kind_name(selected_frontier) == "ISSUE_DIFF_MISMATCH"
+            and obligation.role == "TARGET"
+            and obligation.requirement_id
+            in set(getattr(selected_frontier, "requirement_ids", ()))
+            and selected_incremental_alignment
+            and evidence_item.stability_runs >= 2
+        ):
+            trial_evidence[obligation.key] = replace(
+                evidence_item, binding_alignment="ALIGNED",
+            )
+            continue
+        if not obligation.source.startswith("challenge:"):
+            continue
+        challenge_id = obligation.source.split(":", 1)[1]
+        cell = trial_stack.challenge_graph.cells.get(challenge_id)
+        entered = bool(evidence_item.entered_project_code)
+        alignment = "UNKNOWN"
+        if entered and cell is not None and _frontier_matches_cell(selected_frontier, cell, trial_stack):
+            alignment = "ALIGNED" if cell.changed_hunk_ids else "UNKNOWN"
+        trial_evidence[obligation.key] = replace(evidence_item, binding_alignment=alignment)
+    trace_bundle = replace(trace_bundle, trial=trial_evidence)
+    trial_stack = apply_triplet_evidence_to_trial_graph(
+        trial_stack, atomic_obligations, trace_bundle,
+    )
+    challenge_result = _challenge_result_from_triplet(
+        state, trial_stack, selection, atomic_obligations, trace_bundle,
     )
     execution_graph_metrics = latest_graph_metrics()
     set_graph_metrics({
@@ -992,56 +1420,6 @@ def evaluate_trial_transition(
         + execution_graph_metrics.get(key, 0.0)
         for key in diff_graph_metrics
     })
-    execution_program = challenge_result.updated_graph_stack.program_graph
-    combined_program = replace(
-        execution_program,
-        files_reparsed=(
-            diff_program.files_reparsed + execution_program.files_reparsed
-        ),
-        symbols_expanded=(
-            diff_program.symbols_expanded + execution_program.symbols_expanded
-        ),
-        cache_hits=diff_program.cache_hits + execution_program.cache_hits,
-    )
-    trial_stack = replace(
-        challenge_result.updated_graph_stack,
-        program_graph=combined_program,
-    )
-    challenge_result = replace(
-        challenge_result, updated_graph_stack=trial_stack,
-    )
-    atomic_obligations = _transition_atomic_obligations(
-        state, trial_stack, selection, selected_frontier,
-    )
-    execution_by_challenge = {
-        item.challenge_id: item for item in challenge_result.executions
-    }
-    alignment_by_key: dict[str, str] = {}
-    for obligation in atomic_obligations:
-        if not obligation.source.startswith("challenge:"):
-            continue
-        challenge_id = obligation.source.split(":", 1)[1]
-        cell = trial_stack.challenge_graph.cells.get(challenge_id)
-        paired = execution_by_challenge.get(challenge_id)
-        unit = trial_stack.binding_graph.units.get(cell.binding_id) if cell else None
-        entered = bool(paired and (
-            paired.patched.first_project_frame
-            or paired.patched.executed_symbol_ids
-            or paired.patched.executed_path_ids
-        ))
-        if entered and unit is not None and unit.status.execution_confirmed and cell.changed_hunk_ids:
-            alignment_by_key[obligation.key] = "ALIGNED"
-        elif entered and cell is not None and _frontier_matches_cell(selected_frontier, cell, trial_stack):
-            alignment_by_key[obligation.key] = "DISJOINT"
-    trace_bundle = execute_transition_triplet(
-        state.base_repository, Path(source_checkpoint.snapshot_tree), trial_tree,
-        atomic_obligations,
-        {
-            "stability_runs": 2,
-            "backend": "shared-executor",
-            "binding_alignment_by_key": alignment_by_key,
-        },
-    )
     evidence = compute_transition_evidence(
         state, trial_stack, challenge_result, mechanical, selected_frontier,
         trace_bundle=trace_bundle, atomic_obligations=atomic_obligations,

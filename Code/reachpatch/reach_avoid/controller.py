@@ -31,8 +31,9 @@ from reachpatch.models.reach_avoid import (
 )
 from reachpatch.reach_avoid.frontier import (
     FrontierStatus, NextActionKind, RepairFrontier, RepairFrontierKind, derive_repair_frontiers,
-    select_next_action,
+    repair_frontier_kind_rank, select_next_action,
 )
+from reachpatch.reach_avoid.semantics import normalize_target_cell
 from reachpatch.repair.objective import (
     atomic_obligation_from_validation, compile_repair_objective,
     deduplicate_validation_obligations, mechanical_validation_obligation,
@@ -51,18 +52,23 @@ from .persistence import apply_transition_decision, record_locked_passes
 from .repair_player import RepairPlayer
 from reachpatch.repair.initial_agent import InitialPatchAgent
 from .transition import evaluate_trial_transition
+from .validation_backlog import derive_validation_backlog
 
 
 @dataclass(frozen=True, slots=True)
 class ReachAvoidConfig:
     max_real_patch_revisions: int = 8
     max_no_progress_generator_attempts: int = 2
-    max_challenge_attempts_per_frontier: int = 3
+    max_challenge_attempts_per_frontier: int = 2
     max_challenge_rounds: int = 24
     max_challenge_batch: int = 6
     execution_budget_seconds: float = 3600.0
+    # Evidence recovery is deliberately smaller than normal graph refreshes:
+    # it supplies one selected frontier with an edit basis, not a repository
+    # analysis phase.
+    max_primary_recovery_seconds: float = 120.0
     graph_budget: GraphBudget = field(default_factory=lambda: GraphBudget(
-        max_files=8, max_nodes=1500, max_edges=6000, direct_caller_depth=1,
+        max_files=6, max_nodes=500, max_edges=2000, direct_caller_depth=1,
     ))
 
     def __post_init__(self) -> None:
@@ -70,12 +76,14 @@ class ReachAvoidConfig:
             raise ValueError("max_real_patch_revisions must be between 1 and 8")
         if self.max_no_progress_generator_attempts != 2:
             raise ValueError("max_no_progress_generator_attempts must be 2")
-        if self.max_challenge_attempts_per_frontier != 3:
-            raise ValueError("max_challenge_attempts_per_frontier must be 3")
+        if self.max_challenge_attempts_per_frontier != 2:
+            raise ValueError("max_challenge_attempts_per_frontier must be 2")
         if not 1 <= self.max_challenge_batch <= 6:
             raise ValueError("max_challenge_batch must be between 1 and 6")
         if not 1 <= self.max_challenge_rounds <= 24:
             raise ValueError("max_challenge_rounds must be between 1 and 24")
+        if not 0.0 < self.max_primary_recovery_seconds <= 120.0:
+            raise ValueError("max_primary_recovery_seconds must be in (0, 120]")
 
 
 @dataclass(slots=True)
@@ -119,6 +127,20 @@ class ReachAvoidController:
             )
         result.mkdir(parents=True, exist_ok=False)
         return result
+
+    @staticmethod
+    def _normalize_target_cells(stack):
+        """Make target success prose executable in every local graph stack."""
+        cells = {
+            challenge_id: normalize_target_cell(cell)
+            for challenge_id, cell in stack.challenge_graph.cells.items()
+        }
+        if all(cells[key] is cell for key, cell in stack.challenge_graph.cells.items()):
+            return stack
+        return replace(
+            stack,
+            challenge_graph=replace(stack.challenge_graph, cells=cells),
+        )
 
     def initialize(
         self,
@@ -185,6 +207,7 @@ class ReachAvoidController:
             execution_budget_seconds=self.config.execution_budget_seconds,
             remaining_wall_seconds=self.config.execution_budget_seconds,
             graph_budget=self.config.graph_budget,
+            validation_backlog={},
         )
         store = CheckpointStore(root)
         self._contexts[run_id] = _RunContext(instance, public, requirement, store)
@@ -513,6 +536,7 @@ class ReachAvoidController:
             self.config.graph_budget,
             revision=0,
         )
+        stack = self._normalize_target_cells(stack)
         mechanical = context.initial_mechanical
         state.last_mechanical_result = mechanical
         cells = stack.challenge_graph.active_cells()
@@ -550,7 +574,48 @@ class ReachAvoidController:
         context.initial_tree = None
         discard_bootstrap_tree(state.run_root / "initial_working", state.run_root)
         discard_bootstrap_tree(state.run_root / "bootstrap_working", state.run_root)
+        self._run_initial_target_validation(state)
         self._refresh_repair_frontiers(state)
+
+    def _run_initial_target_validation(self, state: ReachAvoidState) -> None:
+        """Establish bounded p0 target evidence before repair scheduling.
+
+        A pending cell is validation backlog, not a repair frontier.  Without
+        this bootstrap pass a correct p0 has neither a Reach Set witness nor a
+        behavior failure from which to select a primary frontier.  This is a
+        single, deterministic public-target batch: it is deliberately limited
+        to the same two-scenario budget used for a selected frontier and never
+        runs impact or preservation consumers opportunistically.
+        """
+        mechanical = state.last_mechanical_result
+        if mechanical is None or not mechanical.passed:
+            return
+        authority_rank = {"A": 0, "B": 1, "C": 2, "PROVISIONAL": 3}
+        cells = [
+            cell for cell in state.graph_stack.challenge_graph.active_cells()
+            if cell.kind != "PRESERVATION"
+            and cell.hard
+            and cell.execution_scenario.command
+            and cell.terminal_status.value in {"PENDING", "UNKNOWN"}
+        ]
+        selected = tuple(
+            cell.challenge_id for cell in sorted(
+                cells,
+                key=lambda cell: (
+                    authority_rank.get(cell.authority, 4),
+                    cell.requirement_id,
+                    cell.challenge_id,
+                ),
+            )[:2]
+        )
+        if not selected:
+            return
+        result = execute_challenge_round(
+            state, ChallengeSelection(selected), state.base_repository,
+            Path(state.working_checkpoint.snapshot_tree),
+        )
+        state.challenge_round_count += 1
+        self._apply_challenge_result(state, result)
 
     def _refresh_confirmed_failures(self, state: ReachAvoidState) -> None:
         cells = state.graph_stack.challenge_graph.cells
@@ -573,7 +638,7 @@ class ReachAvoidController:
                 history.closed = not failure.open
 
     def _apply_challenge_result(self, state: ReachAvoidState, result) -> None:
-        state.graph_stack = result.updated_graph_stack
+        state.graph_stack = self._normalize_target_cells(result.updated_graph_stack)
         for execution in result.executions:
             cell = state.graph_stack.challenge_graph.cells.get(execution.challenge_id)
             if cell:
@@ -597,6 +662,12 @@ class ReachAvoidController:
             state.frontier_attempts[challenge_id] = state.frontier_attempts.get(challenge_id, 0) + 1
             cell = state.graph_stack.challenge_graph.cells.get(challenge_id)
             if cell is not None:
+                challenge_attempt_key = (
+                    f"{challenge_id}|{state.graph_stack.patch_hash}"
+                )
+                state.challenge_attempts[challenge_attempt_key] = (
+                    state.challenge_attempts.get(challenge_attempt_key, 0) + 1
+                )
                 for frontier_id, recipe_ids in state.graph_stack.challenge_graph.frontier_attempts.items():
                     if cell.input_recipe.recipe_id in recipe_ids:
                         state.frontier_attempts[frontier_id] = (
@@ -697,7 +768,26 @@ class ReachAvoidController:
             elif old.patch_hash == state.graph_stack.patch_hash:
                 # A same-patch graph refresh cannot erase an open problem.
                 derived[frontier_id] = old
-        state.repair_frontiers = derived
+        # Lifecycle snapshots from a previous local graph can coexist with
+        # newly-derived semantics.  Keep terminal snapshots for audit, but
+        # bound the *selectable* queue deterministically.  Dropped open items
+        # are not closed: the next local derivation can surface them after a
+        # higher-priority frontier is resolved or exhausted.
+        authority_rank = {"A": 4, "B": 3, "C": 2, "PROVISIONAL": 1}
+        active = [item for item in derived.values() if not item.terminal]
+        active.sort(key=lambda item: (
+            repair_frontier_kind_rank(item),
+            not item.hard,
+            not item.actionable,
+            -authority_rank.get(item.authority, 0),
+            item.semantic_key,
+        ))
+        retained_ids = {item.frontier_id for item in active[:2]}
+        state.repair_frontiers = {
+            frontier_id: item for frontier_id, item in derived.items()
+            if item.terminal or frontier_id in retained_ids
+        }
+        state.validation_backlog = derive_validation_backlog(state)
 
     def _restore_safe_checkpoint(self, state: ReachAvoidState) -> None:
         """Discard only provisional working state after its bounded budget.
@@ -751,11 +841,14 @@ class ReachAvoidController:
         expanded = update_graph_stack_after_diff(
             state.graph_stack, actual, Path(state.working_checkpoint.snapshot_tree),
             state.base_repository, context.instance.issue, context.public_evidence,
+            # Recovery may expand just the selected frontier's direct caller
+            # slice.  Do not let a context request turn it into a broad graph
+            # traversal; scheduler starvation begins precisely there.
             replace(
                 self.config.graph_budget,
-                direct_caller_depth=max(
-                    (request.depth for request in requests), default=1,
-                ),
+                max_files=min(self.config.graph_budget.max_files, 6),
+                max_nodes=min(self.config.graph_budget.max_nodes, 500),
+                direct_caller_depth=1,
             ),
             context_requests=tuple(requests),
         )
@@ -820,8 +913,6 @@ class ReachAvoidController:
                     node.node_id for node in state.graph_stack.program_graph.nodes.values()
                     if node.path == path and node.start_line <= line <= node.end_line
                 )
-        if frontier.kind is RepairFrontierKind.IMPACT_RISK:
-            seeds.extend(frontier.repair_slice_ids)
         return tuple(dict.fromkeys(seed for seed in seeds if seed))
 
     def _recovery_attempt(self, state: ReachAvoidState, frontier) -> int:
@@ -836,7 +927,25 @@ class ReachAvoidController:
         state.frontier_attempts[key] = attempt
         return attempt
 
-    def _recovery_candidate(self, state: ReachAvoidState, frontier):
+    @staticmethod
+    def _primary_recovery_scenario_timeout(
+        timeout_seconds: float,
+        remaining_seconds: float,
+    ) -> float | None:
+        """Bound a paired, two-run recovery scenario to its wall budget.
+
+        ``execute_challenge_round`` performs two stability runs on both the
+        baseline and working tree.  Dividing the remaining recovery budget by
+        four ensures the executor cannot consume more than the selected
+        primary recovery allocation through subprocess timeouts alone.
+        """
+        if remaining_seconds <= 0.0:
+            return None
+        return min(float(timeout_seconds), remaining_seconds / 4.0)
+
+    def _recovery_candidate(
+        self, state: ReachAvoidState, frontier, *, deadline: float,
+    ):
         """Run at most one executable scenario belonging to ``frontier``.
 
         Recovery is allowed to add a bounded graph slice and execute a real
@@ -864,6 +973,31 @@ class ReachAvoidController:
                           and cell.terminal_status.value in {"PENDING", "UNKNOWN"}), None)
         if candidate is None:
             return None
+        timeout = self._primary_recovery_scenario_timeout(
+            candidate.execution_scenario.timeout_seconds,
+            deadline - time.monotonic(),
+        )
+        if timeout is None:
+            return None
+        # The shared executor obtains its timeout from ChallengeCell.  Replace
+        # only this selected cell in the live local graph before executing it,
+        # so cwd/environment/backend stay exactly as materialized.
+        limited = replace(
+            candidate,
+            execution_scenario=replace(
+                candidate.execution_scenario, timeout_seconds=timeout,
+            ),
+        )
+        state.graph_stack = replace(
+            state.graph_stack,
+            challenge_graph=replace(
+                state.graph_stack.challenge_graph,
+                cells={
+                    **state.graph_stack.challenge_graph.cells,
+                    candidate.challenge_id: limited,
+                },
+            ),
+        )
         result = execute_challenge_round(
             state, ChallengeSelection((candidate.challenge_id,), ()),
             state.base_repository, Path(state.working_checkpoint.snapshot_tree),
@@ -904,22 +1038,14 @@ class ReachAvoidController:
             "impact_replayed": replayed, "coverage_executed": coverage_executed,
         }
         closed = {
-            "REPRODUCTION_GAP": entered and stable,
             "LOCALIZATION_FAILURE": aligned,
-            "OBSERVATION_GAP": stable and typed,
             "REQUIREMENT_COVERAGE_GAP": coverage_executed,
-            "IMPACT_RISK": replayed,
         }.get(close_rule, False)
         recipe = {"kind": current.kind.value, "action": action,
                   "attempt": attempt, **checks}
         if closed:
             status = FrontierStatus.CLOSED
             closure = current.closure_evidence + (recipe | {"closed": True},)
-        elif attempt >= 3:
-            status = FrontierStatus.EXHAUSTED
-            closure = current.closure_evidence + (recipe | {
-                "kind": "EVIDENCE_LIMITED", "closed": False,
-            },)
         else:
             editable = replace(current, status=FrontierStatus.ACTIONABLE).actionable
             status = (
@@ -927,7 +1053,6 @@ class ReachAvoidController:
                 if current.kind in {
                     RepairFrontierKind.LOCALIZATION_FAILURE,
                     RepairFrontierKind.REQUIREMENT_COVERAGE_GAP,
-                    RepairFrontierKind.IMPACT_RISK,
                 } and editable else FrontierStatus.IN_EVIDENCE_RECOVERY
             )
             closure = current.closure_evidence
@@ -937,65 +1062,42 @@ class ReachAvoidController:
             closure_evidence=closure,
         )
 
-    def _recover_reproduction_gap(self, state: ReachAvoidState, frontier, attempt: int) -> None:
-        action = ("TRACE_PUBLIC_CHECK", "TRACE_ISSUE_WITNESS", "EXPAND_DIRECT_CALLER")[min(attempt - 1, 2)]
-        requirement_id = next(iter(frontier.requirement_ids), "")
-        if requirement_id:
-            self._expand_binding_frontier(state, ChallengeSelection((), ((requirement_id, action),)),
-                                          seed_symbols=self._recovery_seed_symbols(state, frontier))
-        self._recovery_candidate(state, frontier)
-        self._finish_recovery(state, frontier, attempt, action, close_rule=RepairFrontierKind.REPRODUCTION_GAP.value)
-
-    def _recover_localization_failure(self, state: ReachAvoidState, frontier, attempt: int) -> None:
+    def _recover_localization_failure(
+        self, state: ReachAvoidState, frontier, attempt: int, *, deadline: float,
+    ) -> None:
         action = ("TRACE_PUBLIC_CHECK", "EXPAND_DIRECT_CALLER", "EXPAND_RETURN_CONSUMER")[min(attempt - 1, 2)]
         requirement_id = next(iter(frontier.requirement_ids), "")
-        if requirement_id:
+        if requirement_id and time.monotonic() < deadline:
             self._expand_binding_frontier(state, ChallengeSelection((), ((requirement_id, action),)),
                                           seed_symbols=self._recovery_seed_symbols(state, frontier))
-        self._recovery_candidate(state, frontier)
+        self._recovery_candidate(state, frontier, deadline=deadline)
         self._finish_recovery(state, frontier, attempt, action, close_rule=RepairFrontierKind.LOCALIZATION_FAILURE.value)
 
-    def _recover_observation_gap(self, state: ReachAvoidState, frontier, attempt: int) -> None:
-        action = ("TRACE_PUBLIC_CHECK", "TRACE_ISSUE_WITNESS", "EXPAND_RETURN_CONSUMER")[min(attempt - 1, 2)]
-        requirement_id = next(iter(frontier.requirement_ids), "")
-        if requirement_id:
-            self._expand_binding_frontier(state, ChallengeSelection((), ((requirement_id, action),)),
-                                          seed_symbols=self._recovery_seed_symbols(state, frontier))
-        self._recovery_candidate(state, frontier)
-        self._finish_recovery(state, frontier, attempt, action, close_rule=RepairFrontierKind.OBSERVATION_GAP.value)
-
-    def _recover_requirement_coverage_gap(self, state: ReachAvoidState, frontier, attempt: int) -> None:
+    def _recover_requirement_coverage_gap(
+        self, state: ReachAvoidState, frontier, attempt: int, *, deadline: float,
+    ) -> None:
         action = ("MATERIALIZE_BRANCH_PARTITION", "TRACE_PUBLIC_CHECK", "EXPAND_DIRECT_CALLER")[min(attempt - 1, 2)]
         requirement_id = next(iter(frontier.requirement_ids), "")
-        if requirement_id:
+        if requirement_id and time.monotonic() < deadline:
             self._expand_binding_frontier(state, ChallengeSelection((), ((requirement_id, action),)),
                                           seed_symbols=self._recovery_seed_symbols(state, frontier))
-        self._recovery_candidate(state, frontier)
+        self._recovery_candidate(state, frontier, deadline=deadline)
         self._finish_recovery(state, frontier, attempt, action, close_rule=RepairFrontierKind.REQUIREMENT_COVERAGE_GAP.value)
-
-    def _recover_impact_risk(self, state: ReachAvoidState, frontier, attempt: int) -> None:
-        action = ("EXPAND_RETURN_CONSUMER", "EXPAND_PROTOCOL_DISPATCH", "EXPAND_EXCEPTION_HANDLER")[min(attempt - 1, 2)]
-        requirement_id = next(iter(frontier.requirement_ids), "")
-        if requirement_id:
-            self._expand_binding_frontier(state, ChallengeSelection((), ((requirement_id, action),)),
-                                          seed_symbols=self._recovery_seed_symbols(state, frontier))
-        self._recovery_candidate(state, frontier)
-        self._finish_recovery(state, frontier, attempt, action, close_rule=RepairFrontierKind.IMPACT_RISK.value)
 
     def _recover_evidence_for_frontier(self, state: ReachAvoidState, frontier) -> None:
         """Dispatch evidence recovery without allowing unsupported edits."""
         attempt = self._recovery_attempt(state, frontier)
         handlers = {
-            RepairFrontierKind.REPRODUCTION_GAP: self._recover_reproduction_gap,
             RepairFrontierKind.LOCALIZATION_FAILURE: self._recover_localization_failure,
-            RepairFrontierKind.OBSERVATION_GAP: self._recover_observation_gap,
             RepairFrontierKind.REQUIREMENT_COVERAGE_GAP: self._recover_requirement_coverage_gap,
-            RepairFrontierKind.IMPACT_RISK: self._recover_impact_risk,
         }
         handler = handlers.get(frontier.kind)
         if handler is None:
             return
-        handler(state, frontier, attempt)
+        handler(
+            state, frontier, attempt,
+            deadline=time.monotonic() + self.config.max_primary_recovery_seconds,
+        )
 
     def _performance(self, state: ReachAvoidState, record: PerformanceRecord) -> None:
         path = state.run_root / "performance.jsonl"
@@ -1305,6 +1407,8 @@ class ReachAvoidController:
             frontier = state.repair_frontiers.get(action.frontier_id or "")
             if frontier is None:
                 continue
+            if action.kind is NextActionKind.REPAIR_EVIDENCE_LIMITED:
+                frontier = replace(frontier, authority="PROVISIONAL")
             objective = compile_repair_objective(state, frontier)
             state.current_repair_objective = objective
             self._record_repair_objective(state, objective)
@@ -1322,19 +1426,37 @@ class ReachAvoidController:
                 attempts = state.frontier_attempts.get(attempt_key, 0) + 1
                 state.frontier_attempts[attempt_key] = attempts
                 if attempts >= 2:
+                    # Empty responses and repeated rejected responses are a
+                    # bounded mechanism failure for this semantic frontier.
+                    # Mark it terminal so the next graph refresh cannot
+                    # reopen it and spin through recovery/generator calls
+                    # forever.  Other frontiers remain eligible.
                     state.repair_frontiers[frontier.frontier_id] = replace(
-                        frontier, status=FrontierStatus.IN_EVIDENCE_RECOVERY,
+                        frontier, status=FrontierStatus.EXHAUSTED,
+                        closure_evidence=frontier.closure_evidence + ({
+                            "kind": "NOOP_OR_REJECTED",
+                            "attempts": attempts,
+                            "error_kind": generator_result.error_kind,
+                            "closed": False,
+                        },),
                     )
                 continue
             mechanism_hash = incremental_mechanism_hash(generator_result.incremental_diff)
             if mechanism_hash in frontier.attempted_mechanism_hashes:
                 discard_ephemeral_tree(generator_result.modified_tree, state.run_root)
-                state.frontier_attempts[f"noop:{frontier.semantic_key}"] = (
-                    state.frontier_attempts.get(f"noop:{frontier.semantic_key}", 0) + 1
-                )
-                state.repair_frontiers[frontier.frontier_id] = replace(
-                    frontier, status=FrontierStatus.IN_EVIDENCE_RECOVERY,
-                )
+                attempt_key = f"noop:{frontier.semantic_key}"
+                attempts = state.frontier_attempts.get(attempt_key, 0) + 1
+                state.frontier_attempts[attempt_key] = attempts
+                if attempts >= 2:
+                    state.repair_frontiers[frontier.frontier_id] = replace(
+                        frontier, status=FrontierStatus.EXHAUSTED,
+                        closure_evidence=frontier.closure_evidence + ({
+                            "kind": "REPEATED_MECHANISM",
+                            "attempts": attempts,
+                            "mechanism_hash": mechanism_hash,
+                            "closed": False,
+                        },),
+                    )
                 continue
             state.phase = ReachAvoidPhase.TRANSITION
             trial = evaluate_trial_transition(
@@ -1344,7 +1466,17 @@ class ReachAvoidController:
                 discard_ephemeral_tree(trial.trial_tree, state.run_root)
                 discard_ephemeral_tree(generator_result.modified_tree, state.run_root)
                 attempt_key = f"noop:{frontier.semantic_key}"
-                state.frontier_attempts[attempt_key] = state.frontier_attempts.get(attempt_key, 0) + 1
+                attempts = state.frontier_attempts.get(attempt_key, 0) + 1
+                state.frontier_attempts[attempt_key] = attempts
+                if attempts >= 2:
+                    state.repair_frontiers[frontier.frontier_id] = replace(
+                        frontier, status=FrontierStatus.EXHAUSTED,
+                        closure_evidence=frontier.closure_evidence + ({
+                            "kind": "TRIAL_NOT_EVALUABLE",
+                            "attempts": attempts,
+                            "closed": False,
+                        },),
+                    )
                 continue
             if trial.challenge_result is not None:
                 state.challenge_round_count += 1

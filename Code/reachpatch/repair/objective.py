@@ -13,6 +13,10 @@ from reachpatch.models.reach_avoid import (
     AtomicObligation, ReachAvoidState, RepairObjective, ValidationObligation,
     atomic_obligation_key,
 )
+from reachpatch.reach_avoid.semantics import (
+    input_partition_semantic_key,
+    normalize_execution_contract,
+)
 from reachpatch.reach_avoid.frontier import RepairFrontier, RepairFrontierKind
 
 
@@ -79,6 +83,18 @@ def validation_obligation_from_challenge(cell, *, source: str) -> ValidationObli
         else "IMPACT" if cell.kind in {"IMPACT", "PROTOCOL"}
         else "TARGET"
     )
+    contract = normalize_execution_contract(
+        cell.observation_contract,
+        role=role,
+        force_process_success=(
+            role == "TARGET"
+            and (
+                str(getattr(cell, "origin", "")).upper() == "PUBLIC_CHECK"
+                or str(getattr(getattr(cell, "input_recipe", None), "kind", "")).upper()
+                == "PUBLIC_REPLAY"
+            )
+        ),
+    )
     return ValidationObligation(
         validation_id=stable_id(
             "challenge-validation", cell.requirement_id, role,
@@ -93,8 +109,8 @@ def validation_obligation_from_challenge(cell, *, source: str) -> ValidationObli
         concrete_input=cell.input_recipe.concrete_input,
         input_derivation="; ".join(cell.input_recipe.derivation) or source,
         oracle_id=cell.oracle.oracle_id,
-        expected_relation=cell.oracle.relation,
-        expected_observation=cell.oracle.expected,
+        expected_relation=contract.relation,
+        expected_observation=contract.expected,
         requirement_id=cell.requirement_id, binding_id=cell.binding_id,
         challenge_id=cell.challenge_id,
     )
@@ -112,11 +128,17 @@ def atomic_obligation_from_validation(
         )
     else:
         expected = obligation.expected_observation
-        contract = ObservationContract(
-            obligation.expected_relation or "validation contract", expected,
-            observable="process" if isinstance(expected, dict) else "return",
-            comparator="EQUALS",
-        )
+        if isinstance(expected, dict) and expected.get("exit_code") == 0:
+            contract = ObservationContract(
+                obligation.expected_relation or "validation command succeeds",
+                {"exit_code": 0}, observable="process", comparator="EXIT_ZERO",
+            )
+        else:
+            contract = ObservationContract(
+                obligation.expected_relation or "validation contract", expected,
+                observable="process" if isinstance(expected, dict) else "return",
+                comparator="EQUALS",
+            )
     recipe = InputRecipe(
         recipe_id=stable_id(
             "validation-input-recipe", obligation.requirement_id,
@@ -136,10 +158,7 @@ def atomic_obligation_from_validation(
             "TARGET", "PRESERVATION", "IMPACT", "MECHANICAL",
         } else "TARGET"),
         input_recipe=recipe,
-        input_partition_id=(obligation.challenge_id or stable_id(
-            "validation-partition", obligation.requirement_id, obligation.role,
-            obligation.command, obligation.concrete_input,
-        )),
+        input_partition_id=input_partition_semantic_key(recipe),
         oracle_contract=contract,
         authority=(obligation.authority if obligation.authority in {
             "A", "B", "C", "PROVISIONAL",
@@ -463,6 +482,31 @@ def compile_repair_objective(
     else:
         requirement_id = failure.requirement_id
     requirement = graph.requirement_graph.leaves[failure.requirement_id]
+    if frontier is not None:
+        # A preservation replay can be dynamically reclassified as a
+        # localization gap when its trace is currently disjoint.  Preserve
+        # the semantic role selected by Reach--Avoid so the next generator
+        # objective repairs the preservation contract rather than treating it
+        # as a fresh target failure.
+        selected_cells = tuple(
+            graph.challenge_graph.cells.get(challenge_id)
+            for challenge_id in frontier.challenge_ids
+        )
+        contract_text = " ".join((
+            str(getattr(frontier, "expected_contract", "")),
+            str(getattr(frontier, "expected_observation", "")),
+        )).casefold()
+        preservation_semantic = (
+            frontier.kind is RepairFrontierKind.PRESERVATION_REGRESSION
+            or "baseline_relation" in contract_text
+            or "preserv" in contract_text
+            or any(cell is not None and (
+                cell.kind == "PRESERVATION"
+                or cell.observation_contract.observable == "baseline_relation"
+            ) for cell in selected_cells)
+        )
+        if preservation_semantic and not requirement.preservation:
+            requirement = replace(requirement, preservation=True)
     related_failures = tuple(
         item for item in state.confirmed_failures
         if item.open and item.patch_hash == graph.patch_hash
@@ -572,6 +616,13 @@ def compile_repair_objective(
     failing_symbol_ids = (
         _binding_symbol_ids(failure_binding_ids, graph.binding_graph)
         | causal_failure_node_ids
+        | frozenset(
+            node_id for node_id in (
+                getattr(frontier, "repair_slice_ids", ())
+                if frontier is not None else ()
+            )
+            if node_id in graph.program_graph.nodes
+        )
     )
     protected_target_binding_symbol_ids = _binding_symbol_ids(
         protected_target_binding_ids, graph.binding_graph,
@@ -767,8 +818,7 @@ def compile_repair_objective(
         if event.get("patch_hash") == graph.patch_hash
         and event.get("pending_objective_kind")
     ), (
-        "CONFIRMED_FAILURE" if frontier is not None and frontier.kind is RepairFrontierKind.BEHAVIOR_FAILURE
-        else frontier.kind.value if frontier is not None else "CONFIRMED_FAILURE"
+        frontier.kind.value if frontier is not None else "REPAIR_FRONTIER"
     ))
     if requirement.preservation:
         pending_kind = "PRESERVATION_REGRESSION"
@@ -828,9 +878,15 @@ def compile_repair_objective(
         # refresh.  Its incumbent/baseline output is evidence of the original
         # failure and must never become the target's expected output.
         if cell is not None and cell.oracle.executable:
-            expected_observation = cell.oracle.expected
+            contract = normalize_execution_contract(
+                cell.observation_contract,
+                role="PRESERVATION" if is_preservation else "TARGET",
+            )
+            expected_observation = contract.expected
         elif not is_preservation:
-            expected_observation = packet_requirement.expected_observation.expected
+            expected_observation = normalize_execution_contract(
+                packet_requirement.expected_observation, role="TARGET",
+            ).expected
         else:
             # Preservation without a more specific executable oracle is the
             # one place where a stable baseline is a valid contract source.
@@ -858,7 +914,12 @@ def compile_repair_objective(
             # Requiring its raw observation here turns a fixed target into a
             # validation failure whenever the old output differs from the actual
             # contract (for example an assertion check versus a direct probe).
-            expected_relation=cell.oracle.relation, expected_observation=cell.oracle.expected,
+            expected_relation=normalize_execution_contract(
+                cell.observation_contract, role="TARGET",
+            ).relation,
+            expected_observation=normalize_execution_contract(
+                cell.observation_contract, role="TARGET",
+            ).expected,
             requirement_id=cell.requirement_id, binding_id=unit.binding_id, challenge_id=cell.challenge_id,
         ))
     if frontier is not None and frontier.kind is not RepairFrontierKind.MECHANICAL_FAILURE:
@@ -897,8 +958,6 @@ def compile_repair_objective(
             selected_role = (
                 "PRESERVATION"
                 if frontier.kind is RepairFrontierKind.PRESERVATION_REGRESSION
-                else "IMPACT"
-                if frontier.kind is RepairFrontierKind.IMPACT_RISK
                 else "TARGET"
             )
             structural = mechanical_validation_obligation(
@@ -935,6 +994,13 @@ def compile_repair_objective(
         atomic_obligation_from_validation(obligation)
         for obligation in obligations
     ]
+    if not requirement.preservation:
+        requirement = replace(
+            requirement,
+            expected_observation=normalize_execution_contract(
+                requirement.expected_observation, role="TARGET",
+            ),
+        )
     return RepairObjective(
         objective_id=stable_id(
             "repair-objective", graph.patch_hash, failure.failure_id,

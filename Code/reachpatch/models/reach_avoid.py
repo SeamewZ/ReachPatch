@@ -12,6 +12,11 @@ from .evidence import (
 )
 from .graphs import GraphBudget, GraphStack, InputRecipe
 from reachpatch.reach_avoid.frontier import RepairFrontier
+from reachpatch.reach_avoid.semantics import (
+    input_partition_semantic_key, normalize_input_recipe_semantics as _normalize_recipe,
+    observation_contract_semantic_id,
+)
+from reachpatch.reach_avoid.validation_backlog import ValidationBacklogItem
 
 
 @dataclass(frozen=True, slots=True)
@@ -34,26 +39,12 @@ class AtomicObligation(SerializableRecord):
 
 
 def normalize_input_recipe_semantics(recipe: Any) -> Any:
-    if recipe is None:
-        return None
-    if hasattr(recipe, "to_dict"):
-        recipe = recipe.to_dict()
-    if isinstance(recipe, dict):
-        return {key: normalize_input_recipe_semantics(value) for key, value in sorted(recipe.items())
-                if key not in {"recipe_id", "source_check_id"}}
-    if isinstance(recipe, (list, tuple)):
-        return tuple(normalize_input_recipe_semantics(item) for item in recipe)
-    return recipe
+    return _normalize_recipe(recipe)
 
 
 def atomic_obligation_key(obligation: AtomicObligation) -> str:
     contract = obligation.oracle_contract
-    if hasattr(contract, "contract_id"):
-        contract_id = contract.contract_id
-    elif hasattr(contract, "normalized"):
-        contract_id = content_hash(contract.normalized())
-    else:
-        contract_id = content_hash(contract)
+    contract_id = observation_contract_semantic_id(contract)
     return stable_id(
         "atomic-obligation", obligation.requirement_contract_id, obligation.role,
         normalize_input_recipe_semantics(obligation.input_recipe),
@@ -124,10 +115,7 @@ class ProbeRegistration(SerializableRecord):
                 "timeout_seconds": self.timeout_seconds,
                 "backend": self.backend,
             },
-            input_partition_id=stable_id(
-                "probe-input-partition", self.input_recipe.kind,
-                self.input_recipe.concrete_input, self.input_recipe.derivation,
-            ),
+            input_partition_id=input_partition_semantic_key(self.input_recipe),
             oracle_contract=self.observation_contract,
             authority=(self.authority if self.authority in {"A", "B", "C", "PROVISIONAL"}
                        else "PROVISIONAL"),
@@ -593,6 +581,7 @@ class ReachAvoidState(SerializableRecord):
     atomic_evidence: dict[str, AtomicEvidence] = field(default_factory=dict)
     probe_registrations: dict[str, ProbeRegistration] = field(default_factory=dict)
     consecutive_provisional_without_progress: int = 0
+    validation_backlog: dict[str, ValidationBacklogItem] = field(default_factory=dict)
 
 
 @dataclass(frozen=True, slots=True)
@@ -644,3 +633,4 @@ class CheckpointRuntimeState(SerializableRecord):
     atomic_evidence: dict[str, AtomicEvidence] = field(default_factory=dict)
     probe_registrations: dict[str, ProbeRegistration] = field(default_factory=dict)
     consecutive_provisional_without_progress: int = 0
+    validation_backlog: dict[str, ValidationBacklogItem] = field(default_factory=dict)

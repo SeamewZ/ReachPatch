@@ -58,6 +58,54 @@ def test_target_progress_commits_working(state_factory):
     assert result.promote_to_working
 
 
+def test_unrelated_impact_progress_cannot_commit_selected_frontier_trial(state_factory):
+    before = FrontierMeasure(
+        "selected", "BEHAVIOR_FAILURE",
+        failed_atomic_keys=frozenset({"selected"}),
+    )
+    after = FrontierMeasure(
+        "selected", "BEHAVIOR_FAILURE",
+        failed_atomic_keys=frozenset({"selected"}),
+    )
+    result = decide(state_factory(), evidence(
+        selected_frontier_key="selected",
+        selected_frontier_kind="BEHAVIOR_FAILURE",
+        atomic_fail_to_pass=("impact",),
+        atomic_before={
+            "selected": AtomicEvidence("selected", "FAIL", role="TARGET", authority="A", stability_runs=2),
+            "impact": AtomicEvidence("impact", "FAIL", role="IMPACT", authority="A", stability_runs=2),
+        },
+        atomic_after={
+            "selected": AtomicEvidence("selected", "FAIL", role="TARGET", authority="A", stability_runs=2),
+            "impact": AtomicEvidence("impact", "PASS", role="IMPACT", authority="A", stability_runs=2),
+        },
+        frontier_delta=FrontierDelta("selected", "BEHAVIOR_FAILURE", before, after),
+    ))
+
+    assert result.decision is Decision.ROLLBACK
+
+
+def test_issue_diff_mismatch_progress_is_kept_provisional_not_committed(state_factory):
+    before = FrontierMeasure(
+        "mismatch", "ISSUE_DIFF_MISMATCH",
+        failed_atomic_keys=frozenset({"target"}),
+    )
+    after = FrontierMeasure(
+        "mismatch", "ISSUE_DIFF_MISMATCH",
+        passed_atomic_keys=frozenset({"target"}),
+    )
+    result = decide(state_factory(), evidence(
+        selected_frontier_key="mismatch",
+        selected_frontier_kind="ISSUE_DIFF_MISMATCH",
+        atomic_fail_to_pass=("target",),
+        atomic_before={"target": AtomicEvidence("target", "FAIL", role="TARGET", authority="A", stability_runs=2)},
+        atomic_after={"target": AtomicEvidence("target", "PASS", role="TARGET", authority="A", stability_runs=2)},
+        frontier_delta=FrontierDelta("mismatch", "ISSUE_DIFF_MISMATCH", before, after),
+    ))
+
+    assert result.decision is Decision.KEEP_PROVISIONAL
+
+
 def test_provisional_behavior_observation_cannot_close_or_commit_frontier(state_factory):
     before = FrontierMeasure(
         "frontier", "BEHAVIOR_FAILURE", failed_atomic_keys=frozenset({"target"}),

@@ -111,7 +111,7 @@ def test_partial_patch_counterexample_provisional_regression_repair_reaches(tmp_
     assert result.unified_diff.count("diff --git") == 1
     assert "+    if value == 0:" in result.unified_diff
     assert fake.objective_kinds == [
-        "INITIAL_PATCH", "CONFIRMED_FAILURE", "PRESERVATION_REGRESSION",
+        "INITIAL_PATCH", "BEHAVIOR_FAILURE", "PRESERVATION_REGRESSION",
     ]
     assert "return 2" in fake.working_values[1]
     assert "return 3" in fake.working_values[2]
@@ -127,8 +127,14 @@ def test_partial_patch_counterexample_provisional_regression_repair_reaches(tmp_
         ).splitlines()
     )
     assert performance[0]["revision"] == 0
-    assert performance[0]["files_reparsed"] > 0
-    assert performance[0]["symbols_expanded"] > 0
+    # Base-commit AST/index data is intentionally persistent.  A warm cache
+    # is valid initial graph participation and must not be reported as a
+    # failed graph build merely because no file needed reparsing.
+    assert (
+        performance[0]["files_reparsed"]
+        + performance[0]["cache_hit_count"]
+    ) > 0
+    assert performance[0]["program_update_seconds"] > 0
     assert any(
         record["revision"] > 0 and record["files_reparsed"] > 0
         for record in performance

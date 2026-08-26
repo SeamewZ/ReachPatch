@@ -1,0 +1,51 @@
+{
+    "total_instances": 10,
+    "submitted_instances": 10,
+    "completed_instances": 9,
+    "resolved_instances": 1,
+    "unresolved_instances": 8,
+    "empty_patch_instances": 1,
+    "error_instances": 0,
+    "completed_ids": [
+        "astropy__astropy-7746",
+        "django__django-11742",
+        "django__django-12747",
+        "django__django-13321",
+        "django__django-13448",
+        "django__django-14534",
+        "django__django-15695",
+        "scikit-learn__scikit-learn-14092",
+        "sympy__sympy-20049"
+    ],
+    "incomplete_ids": [],
+    "empty_patch_ids": [
+        "sphinx-doc__sphinx-8282"
+    ],
+    "submitted_ids": [
+        "astropy__astropy-7746",
+        "django__django-11742",
+        "django__django-12747",
+        "django__django-13321",
+        "django__django-13448",
+        "django__django-14534",
+        "django__django-15695",
+        "scikit-learn__scikit-learn-14092",
+        "sphinx-doc__sphinx-8282",
+        "sympy__sympy-20049"
+    ],
+    "resolved_ids": [
+        "django__django-13448"
+    ],
+    "unresolved_ids": [
+        "astropy__astropy-7746",
+        "django__django-11742",
+        "django__django-12747",
+        "django__django-13321",
+        "django__django-14534",
+        "django__django-15695",
+        "scikit-learn__scikit-learn-14092",
+        "sympy__sympy-20049"
+    ],
+    "error_ids": [],
+    "schema_version": 2
+}
