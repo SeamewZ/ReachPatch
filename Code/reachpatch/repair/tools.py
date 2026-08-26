@@ -54,11 +54,14 @@ class RepairToolExecutor:
     @staticmethod
     def _stable_observation(value: Any) -> dict[str, Any]:
         rendered = RepairToolExecutor._observation_dict(value)
-        return {
+        result = {
             key: rendered[key] for key in
-            ("status", "return_code", "stdout", "stderr", "exception", "value")
+            ("status", "return_code", "exit_code", "stdout", "stderr", "exception", "value")
             if key in rendered
         }
+        if "exit_code" in result and "return_code" not in result:
+            result["return_code"] = result["exit_code"]
+        return result
 
     @staticmethod
     def _observations_match(expected: Any, current: dict[str, Any]) -> bool | None:
@@ -77,7 +80,7 @@ class RepairToolExecutor:
 
         return all(
             normalized(key, expected_value.get(key))
-            == normalized(key, current.get(key))
+            == normalized(key, current.get("return_code") if key == "exit_code" else current.get(key))
             for key in comparable
         )
 
@@ -134,6 +137,13 @@ class RepairToolExecutor:
         for obligation in self.objective.validation_obligations:
             if obligation.authority not in {"A", "B", "C"}:
                 continue
+            if obligation.role != "MECHANICAL" and obligation.expected_observation is None:
+                # A relation without a structured expected payload is an
+                # evidence gap, not an executable validation obligation.
+                # Keep it in Reach-Avoid state for recovery, but do not make
+                # the edit agent finish against an obligation that can only
+                # produce UNKNOWN.
+                continue
             command = tuple(map(str, obligation.command))
             if command not in self.allowed_commands:
                 self.allowed_commands.add(command)
@@ -185,7 +195,7 @@ class RepairToolExecutor:
             "unknown_validation_ids": unknown_ids,
             "satisfied_validation_ids": satisfied_ids,
             "outcomes": outcomes,
-            "ready": bool(required_count) and not pending_commands and not failed_ids,
+            "ready": bool(required_count) and not pending_commands and not failed_ids and not unknown_ids,
         }
 
     def validation_summary(self) -> dict[str, Any]:
@@ -986,6 +996,15 @@ class RepairToolExecutor:
                 "finish_revision requires the graph-grounded reproduction commands "
                 "for every open preservation counterexample and protected target"
             )
+        unknown_validations = tuple(
+            item for item in validation.get("outcomes", ())
+            if item.get("outcome") == "UNKNOWN"
+        )
+        if unknown_validations:
+            raise RuntimeError(
+                "finish_revision requires rerunning UNKNOWN validations: "
+                + ", ".join(str(item.get("validation_id")) for item in unknown_validations)
+            )
         failed_validations = tuple(
             item for item in validation.get("outcomes", ())
             if item.get("outcome") == "FAILED"
@@ -1008,14 +1027,9 @@ class RepairToolExecutor:
             and item.get("evidence_kind") == "TARGET"
             for item in validation.get("outcomes", ())
         )
-        if validation["failed_validation_ids"] and not deferred_preservation_only:
-            raise RuntimeError(
-                "finish_revision rejects an edit that still fails graph-grounded "
-                "validation: " + ", ".join(
-                    f"{item['validation_id']}[{item.get('evidence_kind', 'UNKNOWN')}]"
-                    for item in failed_validations
-                )
-            )
+        # A failed target is a valid end to this editing turn.  Reach-Avoid
+        # will classify the resulting trial and decide whether to continue;
+        # the tool must not claim that the edit is validated.
         self.finished = True
         self.finish_summary = summary
         return {
@@ -1025,6 +1039,7 @@ class RepairToolExecutor:
             "incremental_patch_hash": current.patch_hash,
             "changed_files": current.changed_files,
             "validation_status": self.validation_summary(),
+            "evidence_limited": not bool(validation.get("required_count")),
             "deferred_preservation_validation_ids": tuple(
                 str(item["validation_id"]) for item in failed_validations
             ) if deferred_preservation_only else (),

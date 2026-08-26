@@ -453,3 +453,9 @@ def empty_graph_stack(base_commit: str, patch_hash: str) -> GraphStack:
     result = GraphStack(patch_hash, 0, requirement, program, binding, challenge)
     result.validate()
     return result
+
+# Semantic requirement compiler records are re-exported here for consumers that
+# treat graph models as the public schema surface.
+from reachpatch.requirement_graph.compiler import (  # noqa: E402
+    ClaimRole, CompiledRequirementClaim, EvidenceSpan, RequirementCompilation,
+)

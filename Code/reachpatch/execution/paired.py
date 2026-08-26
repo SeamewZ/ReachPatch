@@ -15,6 +15,7 @@ from reachpatch.models.evidence import (
 )
 from reachpatch.models.graphs import ExecutableScenario, InputRecipe
 from reachpatch.models.reach_avoid import AtomicEvidence, AtomicObligation, TransitionTraceBundle
+from reachpatch.models.reach_avoid import FailureStage
 from reachpatch.oracle.observe import observe_oracle
 
 from .trace import run_trace
@@ -408,6 +409,7 @@ def execute_transition_triplet(
                 role=obligation.role, input_partition_id=obligation.input_partition_id,
                 authority=obligation.authority, command=command, cwd=cwd,
                 environment_fingerprint=content_hash({"backend": backend, "cwd": cwd, "environment": environment}),
+                failure_stage=FailureStage.NOT_EXECUTED,
             )
         scenario = ExecutableScenario(
             scenario_id=stable_id("atomic-scenario", obligation.key, command, cwd, environment),
@@ -441,6 +443,19 @@ def execute_transition_triplet(
                 matched = False
             status = "PASS" if matched else "FAIL"
         entered = bool(last.first_project_frame or last.executed_symbol_ids or last.executed_path_ids)
+        exception_text = f"{observation.exception or ""} {observation.stderr or ""}".casefold()
+        if status == "PASS":
+            failure_stage = FailureStage.TARGET_PASS
+        elif status in {"UNKNOWN", "BLOCKED", "UNEXECUTABLE"}:
+            failure_stage = FailureStage.NOT_EXECUTED
+        elif any(token in exception_text for token in ("syntaxerror", "indentationerror", "patch apply")):
+            failure_stage = FailureStage.PATCH_OR_SYNTAX_BLOCKER
+        elif any(token in exception_text for token in ("nameerror", "importerror", "modulenotfounderror", "undefined name")):
+            failure_stage = FailureStage.IMPORT_OR_NAME_BLOCKER
+        elif entered:
+            failure_stage = FailureStage.TARGET_CONTRACT_FAILURE
+        else:
+            failure_stage = FailureStage.PRE_TARGET_RUNTIME_BLOCKER
         return AtomicEvidence(
             obligation_key=obligation.key, status=status,
             requirement_id=obligation.requirement_id, role=obligation.role,
@@ -454,7 +469,7 @@ def execute_transition_triplet(
             authority=obligation.authority, command=command, cwd=cwd,
             environment_fingerprint=content_hash({"backend": backend, "cwd": cwd, "environment": environment}),
             binding_alignment=str(policy.get("binding_alignment_by_key", {}).get(obligation.key, "UNKNOWN")),
-            backend=backend,
+            backend=backend, failure_stage=failure_stage,
         )
     result = TransitionTraceBundle(
         baseline={item.key: execute_tree(baseline_tree, item) for item in obligations},

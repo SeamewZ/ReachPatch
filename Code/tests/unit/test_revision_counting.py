@@ -105,7 +105,7 @@ def test_initial_patch_does_not_consume_revision(tmp_path):
     )
     controller.generate_initial_patch(state)
     controller.initialize_graph_stack(state)
-    assert state.repair_revision_count == 0
+    assert state.revision_count == 0
     assert state.working_checkpoint.canonical_diff
 
 
@@ -140,7 +140,7 @@ def test_empty_response_does_not_consume_revision(state_factory):
     state = state_factory()
     result = GeneratorResult("result", "", "none", "empty", error_kind="EMPTY_RESPONSE")
     assert not result.has_new_nonempty_diff
-    assert state.repair_revision_count == 0
+    assert state.revision_count == 0
 
 
 def test_initial_empty_response_retries_from_unchanged_bootstrap(tmp_path):
@@ -175,7 +175,7 @@ def test_initial_empty_response_retries_from_unchanged_bootstrap(tmp_path):
     assert generator.attempt_history[1][0]["error_kind"] == "EMPTY_RESPONSE"
     assert [item["attempt"] for item in attempts] == [1, 2]
     assert controller.final_state.generator_attempt_count == 2
-    assert controller.final_state.repair_revision_count == 0
+    assert controller.final_state.revision_count == 0
     assert not (tmp_path / "run-retry" / "bootstrap_working").exists()
     assert not (tmp_path / "run-retry" / "initial_working").exists()
 
@@ -193,7 +193,7 @@ def test_two_initial_empty_responses_block_without_patch_revision(tmp_path):
     assert result.unified_diff == ""
     assert generator.calls == 2
     assert controller.final_state.generator_attempt_count == 2
-    assert controller.final_state.repair_revision_count == 0
+    assert controller.final_state.revision_count == 0
     assert (bootstrap / "calc.py").read_text(encoding="utf-8") == (
         "def calc():\n    return 1\n"
     )
@@ -226,7 +226,7 @@ def test_repair_nonprogress_seals_best_working_patch_without_revision(tmp_path):
     assert result.status == "BEST_EFFORT_FRONTIER_EXHAUSTED"
     assert result.unified_diff == _PATCH
     assert generator.calls == 3
-    assert controller.final_state.repair_revision_count == 0
+    assert controller.final_state.revision_count == 0
     assert controller.final_state.generator_attempt_count == 3
 
 
@@ -239,7 +239,7 @@ def test_same_diff_does_not_consume_revision(state_factory):
     transition = evaluate_trial_transition(state, result)
     assert not transition.trial_patch_changed
     assert not transition.entered_evaluation
-    assert state.repair_revision_count == 0
+    assert state.revision_count == 0
 
 
 def test_rejected_incremental_diff_uses_the_same_hash_as_repair_gate():
@@ -254,5 +254,5 @@ def test_eight_real_revisions_is_maximum():
 
 def test_reach_stops_before_eight(state_factory):
     state = state_factory(target_status=ChallengeStatus.PASS, stability_runs=2)
-    assert state.repair_revision_count == 0
+    assert state.revision_count == 0
     assert evaluate_reach(state).reached

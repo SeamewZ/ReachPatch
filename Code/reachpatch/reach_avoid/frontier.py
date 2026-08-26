@@ -265,6 +265,27 @@ class RepairFrontier(SerializableRecord):
         return False
 
     @property
+    def is_target_like(self) -> bool:
+        return self.kind in {
+            RepairFrontierKind.BEHAVIOR_FAILURE,
+            RepairFrontierKind.LOCALIZATION_FAILURE,
+            RepairFrontierKind.REQUIREMENT_COVERAGE_GAP,
+            RepairFrontierKind.ISSUE_DIFF_MISMATCH,
+        }
+
+    @property
+    def has_verified_source_slice(self) -> bool:
+        return bool(self.repair_slice_ids and (self.execution_route or self.first_project_frame))
+
+    @property
+    def has_stable_trusted_failure(self) -> bool:
+        observation = self.patched_observation
+        if not isinstance(observation, Mapping):
+            return False
+        status = str(observation.get("status", "")).upper()
+        return self.authority in {"A", "B", "C"} and status == "FAIL"
+
+    @property
     def terminal(self) -> bool:
         return self.status in {FrontierStatus.CLOSED, FrontierStatus.EXHAUSTED, FrontierStatus.SUPERSEDED}
 
@@ -536,6 +557,18 @@ def derive_repair_frontiers(
             and cell.stability_runs >= 2
             and cell.authority in {"A", "B", "C"}
             for cell in related
+        )
+        # Transition triplets are authoritative even when the regenerated
+        # ChallengeGraph has not yet copied terminal state onto every replay
+        # cell. Do not create an ISSUE_DIFF_MISMATCH alongside a target that
+        # already has stable trusted AtomicEvidence.
+        trusted_pass = trusted_pass or any(
+            item.role == "TARGET"
+            and item.requirement_id == requirement_id
+            and item.authority in {"A", "B", "C"}
+            and item.status == "PASS"
+            and item.stability_runs >= 2
+            for item in getattr(state, "atomic_evidence", {}).values()
         )
         if not trusted_pass:
             mismatch_unit = next((

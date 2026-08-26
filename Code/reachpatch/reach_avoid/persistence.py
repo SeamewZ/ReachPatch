@@ -18,6 +18,8 @@ from reachpatch.reach_avoid.semantics import scenario_semantic_key
 from .certificates import build_transition_certificate, verify_transition_certificate
 from .checkpoint import (
     CheckpointStore, capture_checkpoint, capture_current_graph_checkpoint,
+    restore_parent_working_checkpoint, update_best_checkpoint, update_safe_checkpoint,
+    update_working_checkpoint,
 )
 
 
@@ -94,6 +96,7 @@ def apply_transition_decision(
     store: CheckpointStore,
 ) -> TransitionCertificate:
     source = state.working_checkpoint
+    locked_successes_before = tuple(state.locked_successes)
     controller_state_before = state.to_dict()
     if trial.source_checkpoint_id != source.checkpoint_id:
         raise RuntimeError("transition source is not the current working checkpoint")
@@ -103,7 +106,7 @@ def apply_transition_decision(
     state.transition_counts[trial.decision.value] = (
         state.transition_counts.get(trial.decision.value, 0) + 1
     )
-    if trial.decision in {Decision.COMMIT_WORKING, Decision.KEEP_PROVISIONAL}:
+    if trial.decision in {Decision.ADVANCE_SAFE, Decision.KEEP_REPAIRING, Decision.REACHED}:
         closed_failure_ids = set(trial.evidence.confirmed_failures_closed)
         if closed_failure_ids:
             state.confirmed_failures = [
@@ -130,16 +133,35 @@ def apply_transition_decision(
             obligation.key: obligation for obligation in trial.atomic_obligations
         }
         state.atomic_evidence = dict(trial.evidence.atomic_after)
+        # A stable trusted FAIL -> PASS belongs to the durable lock set. Future
+        # revisions must replay it and a PASS -> FAIL on that same semantic
+        # obligation is the only target regression gate.
+        for key in trial.evidence.strict_progress_ids:
+            item = trial.evidence.atomic_after.get(key)
+            if item is not None and item.role == "TARGET" and item.authority in {"A", "B", "C"}:
+                if key not in state.locked_successes:
+                    state.locked_successes.append(key)
         checkpoint = capture_checkpoint(
             state, trial, store,
-            "WORKING" if trial.decision is Decision.COMMIT_WORKING else "PROVISIONAL",
+            "REACHED" if trial.decision is Decision.REACHED else ("SAFE" if trial.decision is Decision.ADVANCE_SAFE else "WORKING"),
         )
-        certificate = build_transition_certificate(state, trial, checkpoint)
-        state.working_checkpoint = checkpoint
+        certificate = build_transition_certificate(
+            state, trial, checkpoint,
+            locked_successes_before=locked_successes_before,
+        )
+        update_working_checkpoint(state, checkpoint)
         state.graph_stack = trial.graph_stack
-        if trial.decision is Decision.COMMIT_WORKING:
+        if trial.decision is Decision.ADVANCE_SAFE:
+            update_safe_checkpoint(state, checkpoint)
+            update_best_checkpoint(state, checkpoint)
+        elif trial.decision is Decision.REACHED:
+            update_safe_checkpoint(state, checkpoint)
+            update_best_checkpoint(state, checkpoint)
             state.certified_checkpoint = checkpoint
-            state.consecutive_provisional_without_progress = 0
+        if trial.decision in {Decision.ADVANCE_SAFE, Decision.REACHED}:
+            state.consecutive_evidence_limited_steps = 0
+        else:
+            state.consecutive_evidence_limited_steps += 1
         if (
             trial.selected_frontier is not None
             and trial.evidence.frontier_delta is not None
@@ -155,19 +177,47 @@ def apply_transition_decision(
                 },),
             )
         state.checkpoint_history[checkpoint.checkpoint_id] = checkpoint
+        state.transition_history.append(certificate)
         result = checkpoint
     else:
         # Rollback restores the source patch and graph stack while retaining
         # the trial's execution evidence and mechanism history in a new
         # content-addressed evidence checkpoint.
-        state.graph_stack = store.graph_stack(source)
+        retained_counterexamples = list(state.counterexamples)
+        retained_failures = list(state.confirmed_failures)
+        retained_failure_history = dict(state.failure_history)
+        retained_locked_checks = state.locked_checks
+        retained_locked_successes = list(state.locked_successes)
+        retained_transition_counts = dict(state.transition_counts)
+        retained_transition_history = list(state.transition_history)
+        retained_distinct_hashes = set(state.distinct_patch_hashes)
+        retained_rejected_hashes = set(state.rejected_patch_hashes)
+        retained_revision_count = state.revision_count
+        retained_generator_attempt_count = state.generator_attempt_count
+        retained_challenge_round_count = state.challenge_round_count
+        retained_frontier_attempts = dict(state.frontier_attempts)
+        retained_challenge_attempts = dict(state.challenge_attempts)
+        retained_generator_session = state.generator_session
+        restore_parent_working_checkpoint(state, source, store)
+        state.counterexamples = retained_counterexamples
+        state.confirmed_failures = retained_failures
+        state.failure_history = retained_failure_history
+        state.locked_checks = retained_locked_checks
+        state.locked_successes = retained_locked_successes
+        state.transition_counts = retained_transition_counts
+        state.transition_history = retained_transition_history
+        state.distinct_patch_hashes = retained_distinct_hashes
+        state.rejected_patch_hashes = retained_rejected_hashes
+        state.revision_count = retained_revision_count
+        state.generator_attempt_count = retained_generator_attempt_count
+        state.challenge_round_count = retained_challenge_round_count
+        state.frontier_attempts = retained_frontier_attempts
+        state.challenge_attempts = retained_challenge_attempts
+        state.generator_session = retained_generator_session
         state.observations.retain_patch(source.patch_hash)
-        runtime = store.runtime_state(source.checkpoint_id)
-        state.last_mechanical_result = runtime.last_mechanical_result
-        state.atomic_obligations = dict(runtime.atomic_obligations)
-        state.atomic_evidence = dict(runtime.atomic_evidence)
-        state.probe_registrations = dict(runtime.probe_registrations)
-        state.validation_backlog = dict(runtime.validation_backlog)
+        # Trial evidence remains in the transition certificate/history; the
+        # incumbent's atomic and mechanical evidence is restored as the live
+        # working state, and locked successes are not discarded.
         state.generator_session.conversation.append({
             "role": "system",
             "patch_hash": source.patch_hash,
@@ -177,9 +227,14 @@ def apply_transition_decision(
         })
         result = capture_current_graph_checkpoint(state, store, "ROLLBACK_EVIDENCE")
         state.graph_stack.validate()
-        certificate = build_transition_certificate(state, trial, result)
-        state.working_checkpoint = result
+        certificate = build_transition_certificate(
+            state, trial, result,
+            locked_successes_before=locked_successes_before,
+        )
+        update_working_checkpoint(state, result)
         state.checkpoint_history[result.checkpoint_id] = result
+        state.rejected_patch_hashes.add(trial.cumulative_diff.patch_hash)
+        state.transition_history.append(certificate)
     trial.certificate = certificate
     persist_transition(
         state, trial, certificate, store,

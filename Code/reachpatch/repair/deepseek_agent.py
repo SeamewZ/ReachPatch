@@ -17,14 +17,14 @@ from .tools import RepairToolExecutor, TOOL_SCHEMAS
 
 @dataclass(frozen=True, slots=True)
 class DeepSeekConfig:
-    initial_generator_max_turns: int = 20
+    initial_generator_max_turns: int = 24
     # Kept at the historical public field value for checkpoint/config
     # deserialization; the active limit is `revision_generator_turn_limit`.
     revision_generator_max_turns: int = 12
     revision_generator_turn_limit: int = 20
-    root_recovery_max_turns: int = 24
-    initial_generator_wall_time_s: float = 600.0
-    revision_generator_wall_time_s: float = 900.0
+    root_recovery_max_turns: int = 28
+    initial_generator_wall_time_s: float = 1200.0
+    revision_generator_wall_time_s: float = 1200.0
     initial_generator_token_budget: int = 32768
     revision_generator_token_budget: int = 32768
 
@@ -201,6 +201,7 @@ class DeepSeekAgent:
         return {
             "objective_id": objective.objective_id,
             "objective_kind": objective.objective_kind,
+            "repair_mode": objective.mode,
             "selected_frontier": cls._compact(
                 objective.selected_frontier.to_dict()
                 if objective.selected_frontier is not None else None,
@@ -272,6 +273,7 @@ class DeepSeekAgent:
                 "Inspect the relevant causal slice and execution contract before making "
                 "the initial behavioral edit. "
             )
+            + "Edit the existing working tree and preserve its complete cumulative diff; do not reset to a clean repository or generate an independent patch. Read the exact failure command, Oracle, stdout/stderr, traceback, current diff and causal cut before changing code. "
             + "Use the allowed source slices, reproduce every grounded observation, and "
             "preserve locked target and preservation behavior. A patch must change executable "
             "behavior, not only comments, whitespace, or an unchanged excerpt. Never use "
@@ -280,6 +282,7 @@ class DeepSeekAgent:
             "diff is inspected and all required validations are SATISFIED; UNKNOWN is not PASS. "
             "If a protected target passes while preservation fails, make one cumulative edit "
             "that repairs the preservation consumer and retains the target. "
+            "Do not delete target behavior, weaken inputs, modify tests, or swallow exceptions to obtain a surface pass. When target progress and a regression coexist, retain the target mechanism and repair the regression in the same cumulative edit. "
             "read_file, search_symbol, inspect_callers, inspect_trace, and inspect_diff are "
             "available whenever needed to understand a failed observation.\n"
             + retry_guidance

@@ -343,10 +343,18 @@ def _component_evidence(run_root: Path, terminal: dict[str, Any]) -> dict[str, A
     transitions = _transition_payloads(run_root)
     certificates = [item["certificate"] for item in transitions]
     frontier_records = {}
+    validation_backlog_records = {}
+    recovery_attempts = 0
     for path in sorted((run_root / "checkpoint_store").glob("*/runtime_state.json")):
         runtime = _read_json(path) or {}
         for frontier_id, frontier in (runtime.get("repair_frontiers") or {}).items():
             frontier_records[str(frontier_id)] = frontier
+        for backlog_id, item in (runtime.get("validation_backlog") or {}).items():
+            validation_backlog_records[str(backlog_id)] = item
+        recovery_attempts += sum(
+            int(value) for key, value in (runtime.get("frontier_attempts") or {}).items()
+            if str(key).startswith("recovery:")
+        )
     objectives = _objective_evidence(run_root)
     graphs = _terminal_graphs(run_root, str(terminal["checkpoint_id"]))
     requirement = graphs["requirement"]
@@ -418,6 +426,23 @@ def _component_evidence(run_root: Path, terminal: dict[str, Any]) -> dict[str, A
         for item in certificate.get("counterexamples_closed", ())
     })
     decisions = Counter(str(item.get("decision")) for item in certificates)
+    generator_attempts = []
+    attempts_path = run_root / "generator_attempts.jsonl"
+    if attempts_path.is_file():
+        # Keep parsing local and tolerant: malformed audit lines must not erase
+        # the sealed result.
+        generator_attempts = []
+        for line in attempts_path.read_text(encoding="utf-8", errors="replace").splitlines():
+            try:
+                value = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if isinstance(value, dict):
+                generator_attempts.append(value)
+    no_op_count = sum(
+        str(item.get("result_kind")) in {"NO_NEW_DIFF", "GENERATOR_ERROR"}
+        for item in generator_attempts
+    )
     dynamic_edges = sum(
         bool(edge.get("dynamic_confirmed"))
         for edge in program.get("edges", {}).values()
@@ -490,7 +515,15 @@ def _component_evidence(run_root: Path, terminal: dict[str, Any]) -> dict[str, A
             "rollback_count": decisions.get("ROLLBACK", 0),
             "provisional_count": decisions.get("KEEP_PROVISIONAL", 0),
             "commit_count": decisions.get("COMMIT_WORKING", 0),
+            "advance_safe_count": decisions.get("ADVANCE_SAFE", 0),
+            "keep_repairing_count": decisions.get("KEEP_REPAIRING", 0),
+            "reject_trial_count": decisions.get("REJECT_TRIAL", 0),
+            "reached_count": decisions.get("REACHED", 0),
+            "seal_best_count": decisions.get("SEAL_BEST", 0),
             "frontier_count": len(frontier_records),
+            "validation_backlog_count": len(validation_backlog_records),
+            "evidence_recovery_count": recovery_attempts,
+            "no_op_count": no_op_count,
             "frontier_kind_counts": dict(Counter(
                 str(item.get("kind")) for item in frontier_records.values()
             )),

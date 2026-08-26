@@ -370,7 +370,15 @@ def materialize_challenge_graph(
                         ChallengeStatus.EXPLORATION_ONLY
                         if oracle_resolution.exploration_only else ChallengeStatus.PENDING
                     ),
-                    hard=requirement.hard,
+                    # Only reporter/public executable scenarios can certify a
+                    # hard target.  AST-derived branch/impact partitions are
+                    # useful challenge probes, but without an independent
+                    # Authority A/B/C oracle they must remain soft validation
+                    # work and cannot block Reach.
+                    hard=(
+                        requirement.hard
+                        and origin in {"PUBLIC_CHECK", "ISSUE_WITNESS"}
+                    ),
                     origin=origin,
                 )
                 cells[challenge_id] = cell

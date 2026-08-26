@@ -22,8 +22,9 @@ from reachpatch.models.graphs import (
     BindingGraph, ChallengeGraph, GraphStack, ProgramGraph, RequirementGraph,
 )
 from reachpatch.models.reach_avoid import (
-    CheckpointEvidence, CheckpointRuntimeState, GeneratorSession,
-    ReachAvoidPhase, ReachAvoidState, RepairObjective, StateCheckpoint,
+    CheckpointEvidence, CheckpointRuntimeState, CheckpointScore, FailureStage,
+    GeneratorSession, ReachAvoidPhase, ReachAvoidState, RepairObjective,
+    StateCheckpoint,
     TrialTransition,
 )
 
@@ -214,16 +215,18 @@ def _runtime_state(state: ReachAvoidState | None) -> CheckpointRuntimeState:
             failure_history={},
             generator_session=GeneratorSession("checkpoint-bootstrap"),
             current_repair_objective=None,
-            repair_revision_count=0,
+            revision_count=0,
             generator_attempt_count=0,
             challenge_round_count=0,
-            no_progress_generator_attempts=0,
             frontier_attempts={},
             phase=ReachAvoidPhase.GRAPH_SYNC,
             termination_status=None,
             execution_budget_seconds=0.0,
             remaining_wall_seconds=0.0,
             validation_backlog={},
+            program_slice=None,
+            active_binding_graph=None,
+            target_recovery=None,
         )
     return record_from_dict(CheckpointRuntimeState, {
         "confirmed_failures": [item.to_dict() for item in state.confirmed_failures],
@@ -235,10 +238,9 @@ def _runtime_state(state: ReachAvoidState | None) -> CheckpointRuntimeState:
             state.current_repair_objective.to_dict()
             if state.current_repair_objective is not None else None
         ),
-        "repair_revision_count": state.repair_revision_count,
+        "revision_count": state.revision_count,
         "generator_attempt_count": state.generator_attempt_count,
         "challenge_round_count": state.challenge_round_count,
-        "no_progress_generator_attempts": state.no_progress_generator_attempts,
         "frontier_attempts": dict(state.frontier_attempts),
         "phase": state.phase.value,
         "termination_status": state.termination_status,
@@ -263,11 +265,93 @@ def _runtime_state(state: ReachAvoidState | None) -> CheckpointRuntimeState:
             key: value.to_dict()
             for key, value in state.probe_registrations.items()
         },
-        "consecutive_provisional_without_progress": state.consecutive_provisional_without_progress,
+        "distinct_patch_hashes": sorted(state.distinct_patch_hashes),
+        "consecutive_evidence_limited_steps": state.consecutive_evidence_limited_steps,
+        "pending_frontier_keys": list(state.pending_frontier_keys),
+        "locked_successes": list(state.locked_successes),
+        "rejected_patch_hashes": sorted(state.rejected_patch_hashes),
+        "transition_history": [item.to_dict() for item in state.transition_history],
         "validation_backlog": {
             key: value.to_dict() for key, value in state.validation_backlog.items()
         },
+        "safe_checkpoint_id": state.safe_checkpoint.checkpoint_id if state.safe_checkpoint else None,
+        "best_checkpoint_id": state.best_checkpoint.checkpoint_id if state.best_checkpoint else None,
+        "certified_checkpoint_id": state.certified_checkpoint.checkpoint_id if state.certified_checkpoint else None,
+        "program_slice": (
+            state.program_slice.to_dict()
+            if getattr(state, "program_slice", None) is not None else None
+        ),
+        "active_binding_graph": (
+            state.active_binding_graph.to_dict()
+            if getattr(state, "active_binding_graph", None) is not None else None
+        ),
+        "target_recovery": (
+            state.target_recovery.to_dict()
+            if getattr(state, "target_recovery", None) is not None else None
+        ),
     })
+
+
+def checkpoint_score(
+    evidence: CheckpointEvidence,
+    runtime_state: CheckpointRuntimeState,
+    *,
+    mechanical_blockers: tuple[str, ...] = (),
+    confirmed_regressions: tuple[str, ...] = (),
+) -> tuple[CheckpointScore, dict[str, int]]:
+    target_stage_by_obligation = {
+        key: int(item.failure_stage)
+        for key, item in runtime_state.atomic_evidence.items()
+        if item.role == "TARGET"
+        and (obligation := runtime_state.atomic_obligations.get(key)) is not None
+        and obligation.hard
+    }
+    trusted_targets = tuple(
+        item for item in runtime_state.atomic_evidence.values()
+        if item.role == "TARGET" and item.authority in {"A", "B", "C"}
+        and (obligation := runtime_state.atomic_obligations.get(item.obligation_key)) is not None
+        and obligation.hard
+    )
+    stable_target_passes = sum(
+        item.status == "PASS" and item.stability_runs >= 2
+        for item in trusted_targets
+    )
+    certified_target_passes = sum(
+        item.status == "PASS" and item.stability_runs >= 2
+        and item.authority in {"A", "B"}
+        for item in trusted_targets
+    )
+    preservation_passes = sum(
+        item.role in {"PRESERVATION", "IMPACT"}
+        and item.status == "PASS" and item.stability_runs >= 2
+        and item.authority in {"A", "B", "C"}
+        for item in runtime_state.atomic_evidence.values()
+    )
+    unknown_targets = sum(
+        item.role == "TARGET" and item.status in {"UNKNOWN", "UNEXECUTABLE", "BLOCKED"}
+        for item in runtime_state.atomic_evidence.values()
+    )
+    final_eligible = bool(
+        evidence.mechanical_pass
+        and not mechanical_blockers
+        and not confirmed_regressions
+        and trusted_targets
+        and stable_target_passes == len(trusted_targets)
+    )
+    score = CheckpointScore(
+        final_eligible=final_eligible,
+        certified_target_passes=certified_target_passes,
+        stable_target_passes=stable_target_passes,
+        target_stage_sum=sum(target_stage_by_obligation.values()),
+        closed_counterexamples=evidence.closed_confirmed_failure_count,
+        removed_mechanical_blockers=0,
+        preservation_passes=preservation_passes,
+        confirmed_regressions=len(confirmed_regressions),
+        unresolved_mechanical_blockers=len(mechanical_blockers),
+        unknown_target_count=unknown_targets,
+        impact_cost=evidence.open_high_challenge_count,
+    )
+    return score, target_stage_by_obligation
 
 
 def checkpoint_identity(
@@ -331,6 +415,29 @@ def _write_snapshot(
         return store.load(checkpoint_id)
     temporary = Path(tempfile.mkdtemp(prefix=f".{checkpoint_id}.", dir=store.root))
     snapshot = final / "working_tree"
+    mechanical = runtime_state.last_mechanical_result
+    mechanical_blockers = tuple(mechanical.failure_reasons) if mechanical is not None else ()
+    # AtomicEvidence deliberately does not duplicate the hard/soft flag. Use
+    # the paired obligation as the authority boundary: graph-derived branch
+    # probes can fail while a public target remains correct, and must stay in
+    # validation backlog rather than becoming a checkpoint-level regression.
+    confirmed_regressions = tuple(sorted(
+        key for key, item in runtime_state.atomic_evidence.items()
+        if item.role in {"TARGET", "PRESERVATION", "IMPACT"}
+        and (obligation := runtime_state.atomic_obligations.get(key)) is not None
+        # Target regressions are strict only for certified hard target
+        # obligations. Preservation/impact regressions from a trusted A/B/C
+        # check remain real Avoid evidence even when the requirement leaf is
+        # not itself a hard target.
+        and (obligation.hard or item.role in {"PRESERVATION", "IMPACT"})
+        and item.status == "FAIL" and item.authority in {"A", "B", "C"}
+        and item.stability_runs >= 2
+    ))
+    score, target_stages = checkpoint_score(
+        evidence, runtime_state,
+        mechanical_blockers=mechanical_blockers,
+        confirmed_regressions=confirmed_regressions,
+    )
     checkpoint = StateCheckpoint(
         checkpoint_id=checkpoint_id,
         parent_checkpoint_id=parent_id,
@@ -347,6 +454,16 @@ def _write_snapshot(
         ),
         status=status,
         revision=revision,
+        score=score,
+        final_eligible=score.final_eligible,
+        patch_is_applicable=not any(
+            "patch apply" in reason.lower() or "syntax" in reason.lower()
+            for reason in mechanical_blockers
+        ),
+        mechanical_blockers=mechanical_blockers,
+        confirmed_regressions=confirmed_regressions,
+        target_stage_by_obligation=target_stages,
+        transition_certificate_id=None,
     )
     try:
         _atomic_json(temporary / "checkpoint.json", {
@@ -475,7 +592,7 @@ def capture_checkpoint(
         counterexamples=counterexamples,
         runtime_state=_runtime_state(state),
         status=status,
-        revision=state.repair_revision_count,
+        revision=state.revision_count,
     )
     store.validate(checkpoint, state.base_repository)
     return checkpoint
@@ -525,7 +642,7 @@ def capture_current_graph_checkpoint(
         counterexamples=state.counterexamples,
         runtime_state=_runtime_state(state),
         status=status,
-        revision=state.repair_revision_count,
+        revision=state.revision_count,
     )
     store.validate(checkpoint, state.base_repository)
     return checkpoint
@@ -553,10 +670,9 @@ def restore_checkpoint(
     state.failure_history = runtime.failure_history
     state.generator_session = runtime.generator_session
     state.current_repair_objective = runtime.current_repair_objective
-    state.repair_revision_count = runtime.repair_revision_count
+    state.revision_count = runtime.revision_count
     state.generator_attempt_count = runtime.generator_attempt_count
     state.challenge_round_count = runtime.challenge_round_count
-    state.no_progress_generator_attempts = runtime.no_progress_generator_attempts
     state.frontier_attempts = runtime.frontier_attempts
     state.phase = runtime.phase
     state.termination_status = runtime.termination_status
@@ -570,6 +686,70 @@ def restore_checkpoint(
     state.atomic_evidence = dict(runtime.atomic_evidence)
     state.probe_registrations = dict(runtime.probe_registrations)
     state.validation_backlog = dict(runtime.validation_backlog)
-    state.consecutive_provisional_without_progress = (
-        runtime.consecutive_provisional_without_progress
-    )
+    def resolve_checkpoint(identifier: str | None, current):
+        if not identifier:
+            return current
+        cached = state.checkpoint_history.get(identifier)
+        if cached is not None:
+            return cached
+        try:
+            loaded = store.load(identifier)
+        except FileNotFoundError:
+            return current
+        state.checkpoint_history[identifier] = loaded
+        return loaded
+    state.safe_checkpoint = resolve_checkpoint(runtime.safe_checkpoint_id, state.safe_checkpoint)
+    state.best_checkpoint = resolve_checkpoint(runtime.best_checkpoint_id, state.best_checkpoint)
+    state.certified_checkpoint = resolve_checkpoint(runtime.certified_checkpoint_id, state.certified_checkpoint)
+    state.distinct_patch_hashes = set(runtime.distinct_patch_hashes)
+    state.consecutive_evidence_limited_steps = runtime.consecutive_evidence_limited_steps
+    state.pending_frontier_keys = list(runtime.pending_frontier_keys)
+    state.locked_successes = list(runtime.locked_successes)
+    state.rejected_patch_hashes = set(runtime.rejected_patch_hashes)
+    state.transition_history = list(runtime.transition_history)
+    state.program_slice = runtime.program_slice
+    state.active_binding_graph = runtime.active_binding_graph
+    state.target_recovery = runtime.target_recovery
+
+
+def update_working_checkpoint(state: ReachAvoidState, checkpoint: StateCheckpoint) -> StateCheckpoint:
+    """Promote an applicable checkpoint to the current working tree."""
+    if not checkpoint.patch_is_applicable:
+        raise ValueError("cannot promote an inapplicable checkpoint")
+    state.working_checkpoint = checkpoint
+    state.checkpoint_history[checkpoint.checkpoint_id] = checkpoint
+    return checkpoint
+
+
+def update_safe_checkpoint(state: ReachAvoidState, checkpoint: StateCheckpoint) -> StateCheckpoint:
+    """Record the latest checkpoint that is safe for final selection."""
+    if not checkpoint.patch_is_applicable:
+        raise ValueError("cannot mark an inapplicable checkpoint safe")
+    state.safe_checkpoint = checkpoint
+    state.checkpoint_history[checkpoint.checkpoint_id] = checkpoint
+    return checkpoint
+
+
+def update_best_checkpoint(state: ReachAvoidState, checkpoint: StateCheckpoint) -> StateCheckpoint:
+    """Keep the highest-scoring applicable checkpoint without selector logic."""
+    if not checkpoint.patch_is_applicable:
+        raise ValueError("cannot mark an inapplicable checkpoint best")
+    current = state.best_checkpoint
+    if current is None or checkpoint.score.ordering_key() > current.score.ordering_key():
+        state.best_checkpoint = checkpoint
+        state.checkpoint_history[checkpoint.checkpoint_id] = checkpoint
+    return state.best_checkpoint or checkpoint
+
+
+def restore_parent_working_checkpoint(state: ReachAvoidState, parent: StateCheckpoint, store: CheckpointStore) -> StateCheckpoint:
+    """Restore only the parent of a rejected trial, retaining history."""
+    restore_checkpoint(state, parent, store)
+    return state.working_checkpoint
+
+
+def select_final_checkpoint(state: ReachAvoidState) -> StateCheckpoint:
+    """Choose certified, best, safe, or latest applicable working checkpoint."""
+    for candidate in (state.certified_checkpoint, state.best_checkpoint, state.safe_checkpoint, state.working_checkpoint):
+        if candidate is not None and candidate.patch_is_applicable:
+            return candidate
+    raise RuntimeError("no applicable checkpoint available")

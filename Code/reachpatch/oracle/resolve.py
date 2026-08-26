@@ -123,6 +123,9 @@ def resolve_oracle(
             expected=expected,
             executable=requirement.expected_observation.comparator in {
                 "equals", "raises", "forbidden", "succeeds",
+                "EQUALS", "RAISES", "NOT_RAISES", "EXIT_ZERO", "CONTAINS",
+                "TYPE_IS", "ORDER_EQUALS", "LENGTH_EQUALS", "HAS_ATTR",
+                "STATE_DELTA_EQUALS", "NOT_EQUALS",
             },
             source_evidence_ids=requirement.evidence_ids,
         )

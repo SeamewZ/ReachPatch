@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import re
 import ast
+import json
+from pathlib import Path
 from typing import Any
 
 from reachpatch.models.base import content_hash, stable_id
@@ -330,90 +332,131 @@ def _issue_operation_terms(
 def build_requirement_graph(
     issue: str,
     public_evidence: PublicEvidence,
+    *,
+    transport: Any | None = None,
+    source_hints: tuple[Any, ...] = (),
+    run_root: Any | None = None,
 ) -> RequirementGraph:
-    """Compile evidence-grounded behavioral contracts, not issue sentences."""
-
-    sentences = _sentences(issue)
-    sentence_witnesses = tuple(
-        stable_id("witness", sentence)
-        for sentence in sentences if _EXAMPLE.search(sentence)
-    )
-    structured_witnesses = tuple(dict.fromkeys(
-        str(item["witness_id"])
-        for record in public_evidence.records if record.source == "issue"
-        for item in issue_witnesses(record)
-    ))
-    witnesses = tuple(dict.fromkeys(sentence_witnesses + structured_witnesses))
-    leaves: dict[str, RequirementLeaf] = {}
-    issue_evidence = tuple(
-        record.evidence_id for record in public_evidence.records
-        if record.source == "issue"
-    )
-    normative = tuple(dict.fromkeys(
-        sentence for sentence in sentences
-        if _NORMATIVE.search(sentence)
-        and not _EXAMPLE.search(sentence)
-        and not _DESCRIBED_FAILURE.search(sentence)
-    ))[:8]
-    if not normative and issue.strip():
-        # The issue itself is authoritative, but an implicit behavior remains
-        # one broad contract rather than one leaf per descriptive sentence.
-        normative = (_implicit_contract(issue),)
-    issue_operation = _operation_from_issue(issue, public_evidence)
-    issue_terms = _issue_operation_terms(issue, public_evidence)
-    for sentence in normative:
-        leaf = _leaf(
-            sentence,
-            authority="B",
-            evidence_ids=issue_evidence,
-            witness_ids=witnesses,
-            preservation_override=False,
-            operation=issue_operation,
+    """Compile evidence-grounded behavioral contracts, never raw sentences."""
+    from .compiler import ClaimRole, _fallback, compile_requirement_contract
+    from reachpatch.models.graphs import RequirementVariable
+    # The compiler owns both the forced-tool path and its deterministic fallback.
+    # Passing no transport deliberately invokes that fallback; the retired
+    # sentence/token planner is not part of the production path anymore.
+    compilation = (
+        compile_requirement_contract(
+            issue, public_evidence.records, source_hints, transport, run_root or Path(".")
+        ) if transport is not None else _fallback(
+            issue, source_hints, public_evidence.records,
         )
-        leaves[leaf.requirement_id] = leaf
-
+    )
+    if run_root is not None and transport is None:
+        artifact_root = Path(run_root)
+        artifact_root.mkdir(parents=True, exist_ok=True)
+        (artifact_root / "requirement_compilation.json").write_text(
+            json.dumps({
+                "issue": issue,
+                "raw_tool_arguments": compilation.raw_tool_arguments,
+                "validation_rejections": compilation.rejected_claims,
+                "claims": compilation.claims,
+                "witnesses": compilation.witnesses,
+                "ambiguities": compilation.ambiguities,
+                "fallback_used": compilation.fallback_used,
+            }, sort_keys=True, default=lambda value: value.to_dict() if hasattr(value, "to_dict") else str(value), indent=2) + "\n",
+            encoding="utf-8",
+        )
+    leaves: dict[str, RequirementLeaf] = {}
+    issue_evidence_ids = tuple(
+        str(record.evidence_id)
+        for record in public_evidence.records
+        if getattr(record, "source", None) == "issue"
+    )
+    for claim in compilation.claims:
+        if claim.role in {ClaimRole.ILLUSTRATION, ClaimRole.CONTEXT}:
+            continue
+        expected = claim.expected_observation if isinstance(claim.expected_observation, dict) else {}
+        kind = str(expected.get("kind", "RELATION_HOLDS"))
+        observable = str(expected.get("observable", "exception" if kind == "RAISES" else "return"))
+        contract = ObservationContract(
+            relation=f"compiled:{claim.claim_id}", expected=expected.get("expected"),
+            observable=observable, comparator=kind,
+        )
+        variables = tuple(RequirementVariable(
+            str(item.get("name", "input")), item.get("domain"), "input"
+        ) for item in claim.variables)
+        authority = "B" if claim.role in {ClaimRole.TARGET, ClaimRole.EXCEPTION, ClaimRole.COMPATIBILITY} else "C"
+        leaves[claim.claim_id] = RequirementLeaf(
+            requirement_id=claim.claim_id, kind=claim.role.value, quantifier=claim.quantifier,
+            variables=variables, domain_constraints=claim.domain_constraints,
+            preconditions=claim.preconditions, operation=claim.operation,
+            expected_observation=contract, exception_contract=None,
+            preservation=claim.role is ClaimRole.PRESERVATION, authority=authority,
+            evidence_ids=(
+                issue_evidence_ids
+                if claim.evidence_spans and issue_evidence_ids
+                else tuple(f"span:{span.start}:{span.end}" for span in claim.evidence_spans)
+            ),
+            witness_ids=claim.witness_ids, status=OutcomeStatus.UNKNOWN,
+            hard=claim.role in {ClaimRole.TARGET, ClaimRole.EXCEPTION, ClaimRole.COMPATIBILITY},
+            executable=bool(claim.operation and kind and kind != "RELATION_HOLDS"),
+            issue_evidence_spans=tuple(span.to_dict() for span in claim.evidence_spans),
+        )
+    # Public preservation checks are executable contracts even when the issue
+    # compiler has no preservation sentence. They remain separate from targets.
     for check in public_evidence.checks:
         if check.role != "PRESERVATION":
             continue
-        sentence = (
-            check.expected.relation if check.expected is not None
-            else f"Public check {check.check_id} must remain successful"
+        contract = check.expected or ObservationContract(
+            f"public check {check.check_id} remains successful", {"exit_code": 0},
+            observable="process", comparator="EXIT_ZERO",
         )
-        leaf = _leaf(
-            sentence,
-            authority=check.authority,
-            evidence_ids=check.source_evidence_ids,
-            witness_ids=(),
-            preservation_override=True,
+        requirement_id = stable_id("preservation-check", check.check_id, contract.normalized())
+        leaves.setdefault(requirement_id, RequirementLeaf(
+            requirement_id=requirement_id, kind=ClaimRole.PRESERVATION.value,
+            quantifier="CONTRACT", variables=(), domain_constraints=(), preconditions=(),
             operation=check.symbol_references[0] if check.symbol_references else check.check_id,
-        )
-        leaves[leaf.requirement_id] = leaf
-
+            expected_observation=contract, exception_contract=None, preservation=True,
+            authority=check.authority, evidence_ids=check.source_evidence_ids, witness_ids=(),
+            status=OutcomeStatus.UNKNOWN, hard=False, executable=True,
+        ))
+    # Public API/docstring contracts are preservation evidence only.  They are
+    # admitted when their declared symbol is related to a compiled target
+    # operation; unrelated APIs must not become hard targets merely because
+    # their documentation contains normative wording.
+    target_operations = tuple(
+        str(claim.operation).casefold()
+        for claim in compilation.claims
+        if claim.role in {ClaimRole.TARGET, ClaimRole.EXCEPTION, ClaimRole.COMPATIBILITY}
+    )
     for record in (*public_evidence.api_contracts, *public_evidence.baseline_contracts):
-        preservation = record.source != "issue"
-        symbol = record.metadata.get("symbol")
-        if record.source.startswith("documentation:") and not isinstance(symbol, str):
+        symbol = str((getattr(record, "metadata", {}) or {}).get("symbol", ""))
+        if not symbol:
             continue
-        if (
-            record.metadata.get("kind") == "docstring_and_type_signature"
-            and (not isinstance(symbol, str) or symbol not in issue_terms)
+        symbol_lower = symbol.casefold()
+        if not any(
+            symbol_lower in operation or operation in symbol_lower
+            or symbol_lower.rsplit(".", 1)[-1] in operation
+            for operation in target_operations
         ):
             continue
-        for contract in _grounded_contracts(record.content, record.source):
-            leaf = _leaf(
-                contract,
-                authority=record.authority,
-                evidence_ids=(record.evidence_id,),
-                witness_ids=(),
-                preservation_override=preservation,
-                hard=record.authority in {"A", "B"},
-                operation=symbol if isinstance(symbol, str) else None,
-            )
-            leaves[leaf.requirement_id] = leaf
-
-    for leaf in _validated_proposals(public_evidence):
-        leaves.setdefault(leaf.requirement_id, leaf)
-    return RequirementGraph(
-        leaves=leaves,
-        evidence_hash=content_hash(public_evidence),
-    )
+        contract = ObservationContract(
+            relation=str(getattr(record, "content", "") or f"{symbol} public contract"),
+            expected=True,
+            observable="return",
+            comparator="RELATION_HOLDS",
+        )
+        requirement_id = stable_id("preservation-contract", record.evidence_id, symbol, contract.normalized())
+        leaves.setdefault(requirement_id, RequirementLeaf(
+            requirement_id=requirement_id,
+            kind=ClaimRole.PRESERVATION.value,
+            quantifier="CONTRACT",
+            variables=(), domain_constraints=(), preconditions=(),
+            operation=symbol,
+            expected_observation=contract,
+            exception_contract=None, preservation=True,
+            authority=str(getattr(record, "authority", "PROVISIONAL")),
+            evidence_ids=(str(record.evidence_id),), witness_ids=(),
+            status=OutcomeStatus.UNKNOWN,
+            hard=False, executable=False,
+        ))
+    return RequirementGraph(leaves=leaves, evidence_hash=content_hash(compilation))

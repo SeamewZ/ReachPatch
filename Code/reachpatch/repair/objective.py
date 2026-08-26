@@ -18,6 +18,15 @@ from reachpatch.reach_avoid.semantics import (
     normalize_execution_contract,
 )
 from reachpatch.reach_avoid.frontier import RepairFrontier, RepairFrontierKind
+from enum import StrEnum
+
+
+class RepairMode(StrEnum):
+    FIX_MECHANICAL = "FIX_MECHANICAL"
+    FIX_TARGET = "FIX_TARGET"
+    FIX_REGRESSION_PRESERVE_TARGET = "FIX_REGRESSION_PRESERVE_TARGET"
+    RECOVER_ROOT_CAUSE = "RECOVER_ROOT_CAUSE"
+    EVIDENCE_LIMITED_REVIEW = "EVIDENCE_LIMITED_REVIEW"
 
 
 _REPAIR_NODE_KIND_PRIORITY = {
@@ -153,7 +162,10 @@ def atomic_obligation_from_validation(
     )
     raw = AtomicObligation(
         key="", requirement_id=obligation.requirement_id,
-        requirement_contract_id=(obligation.oracle_id or contract.contract_id),
+        # Oracle IDs are execution-instance identities and may change when a
+        # challenge is rematerialized. The typed observation contract is the
+        # stable semantic identity shared by baseline, incumbent and trial.
+        requirement_contract_id=contract.contract_id,
         role=(obligation.role if obligation.role in {
             "TARGET", "PRESERVATION", "IMPACT", "MECHANICAL",
         } else "TARGET"),
@@ -163,7 +175,7 @@ def atomic_obligation_from_validation(
         authority=(obligation.authority if obligation.authority in {
             "A", "B", "C", "PROVISIONAL",
         } else "PROVISIONAL"),
-        hard=True, source="repair-objective-validation",
+        hard=True, source="repair-objective-validation", binding_id=obligation.binding_id,
     )
     return replace(raw, key=atomic_obligation_key(raw))
 
@@ -822,6 +834,12 @@ def compile_repair_objective(
     ))
     if requirement.preservation:
         pending_kind = "PRESERVATION_REGRESSION"
+    mode = (
+        RepairMode.FIX_MECHANICAL if frontier is not None and frontier.kind is RepairFrontierKind.MECHANICAL_FAILURE
+        else RepairMode.FIX_REGRESSION_PRESERVE_TARGET if requirement.preservation
+        else RepairMode.FIX_TARGET if frontier is not None and frontier.authority in {"A", "B", "C"}
+        else RepairMode.EVIDENCE_LIMITED_REVIEW
+    )
     causal_direction = []
     if requirement.preservation and target_only_summaries:
         causal_direction.append(
@@ -1083,4 +1101,5 @@ def compile_repair_objective(
         working_patch_hash=graph.patch_hash,
         graph_revision=graph.revision,
         atomic_obligations=tuple(dict((item.key, item) for item in atomic_obligations).values()),
+        mode=mode.value,
     )

@@ -423,12 +423,12 @@ def test_challenge_round_does_not_consume_revision(state_factory, monkeypatch):
         "reachpatch.challenge_graph.execute.execute_paired",
         lambda **kwargs: (paired(state, PairClassification.TARGET_FIXED), False),
     )
-    before = state.repair_revision_count
+    before = state.revision_count
     execute_challenge_round(
         state, ChallengeSelection(("challenge-target",)),
         state.base_repository, state.working_checkpoint.snapshot_tree,
     )
-    assert state.repair_revision_count == before
+    assert state.revision_count == before
 
 
 def test_unknown_execution_marks_oracle_unavailable(state_factory):

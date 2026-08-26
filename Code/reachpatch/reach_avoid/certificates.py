@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import dataclasses
 import json
+from datetime import datetime, timezone
 
 from reachpatch.execution.worktree import diff_between
 from reachpatch.models.base import content_hash, stable_id
@@ -37,6 +38,8 @@ def build_transition_certificate(
     state: ReachAvoidState,
     trial: TrialTransition,
     result_checkpoint: StateCheckpoint,
+    *,
+    locked_successes_before: tuple[str, ...] | None = None,
 ) -> TransitionCertificate:
     challenge = trial.challenge_result
     cell_requirements = {
@@ -46,7 +49,7 @@ def build_transition_certificate(
     certificate = TransitionCertificate(
         transition_id=stable_id(
             "transition", state.working_checkpoint.checkpoint_id,
-            trial.cumulative_diff.patch_hash, state.repair_revision_count,
+            trial.cumulative_diff.patch_hash, state.revision_count,
         ),
         source_checkpoint_id=state.working_checkpoint.checkpoint_id,
         trial_checkpoint_id=(
@@ -96,13 +99,64 @@ def build_transition_certificate(
         avoid=trial.avoid,
         decision=trial.decision,
         decision_reasons=trial.transition_decision.reasons,
-        repair_revision_count_before=max(0, state.repair_revision_count - 1),
-        repair_revision_count_after=state.repair_revision_count,
+        revision_count_before=max(0, state.revision_count - 1),
+        revision_count_after=state.revision_count,
         generator_attempt_count=state.generator_attempt_count,
         challenge_round_count=state.challenge_round_count,
         recomputation_hash="",
         selected_frontier_key=trial.evidence.selected_frontier_key,
         selected_frontier_kind=trial.evidence.selected_frontier_kind,
+        selected_requirement_id=(
+            next(iter(getattr(trial.selected_frontier, "requirement_ids", ())), None)
+            if trial.selected_frontier is not None else None
+        ),
+        selected_binding_id=(
+            next(iter(getattr(trial.selected_frontier, "binding_ids", ())), None)
+            if trial.selected_frontier is not None else None
+        ),
+        selected_challenge_id=(
+            next(iter(getattr(trial.selected_frontier, "challenge_ids", ())), None)
+            if trial.selected_frontier is not None else None
+        ),
+        repair_mode=(
+            getattr(state.current_repair_objective, "mode", None)
+            if state.current_repair_objective is not None else None
+        ),
+        model_request_ids=tuple(
+            str(item.get("request_id")) for item in state.generator_session.attempt_history[-1:]
+            if item.get("request_id")
+        ),
+        validation_obligation_ids=tuple(item.key for item in trial.atomic_obligations),
+        exact_commands=tuple(
+            tuple(
+                item.input_recipe.get("command", ())
+                if isinstance(item.input_recipe, dict)
+                else getattr(item.input_recipe, "command", ())
+            )
+            for item in trial.atomic_obligations
+            if (
+                item.input_recipe.get("command", ())
+                if isinstance(item.input_recipe, dict)
+                else getattr(item.input_recipe, "command", ())
+            )
+        ),
+        observation_hashes=tuple(sorted(
+            content_hash(item.to_dict())
+            for item in (
+                list(trial.evidence.atomic_before.values())
+                + list(trial.evidence.atomic_after.values())
+            )
+        )),
+        atomic_progress=dict(trial.evidence.atomic_progress_by_obligation),
+        mechanical_blockers_before=tuple(state.working_checkpoint.mechanical_blockers),
+        mechanical_blockers_after=tuple(trial.evidence.mechanical.failure_reasons),
+        locked_successes_before=(
+            tuple(state.locked_successes)
+            if locked_successes_before is None else tuple(locked_successes_before)
+        ),
+        locked_successes_after=tuple(state.locked_successes),
+        regressions=tuple(trial.evidence.regression_ids),
+        timestamp=datetime.now(timezone.utc).isoformat(),
     )
     executions = challenge.executions if challenge else ()
     trial_graphs = {
@@ -194,7 +248,14 @@ def verify_transition_certificate(
     if missing and certificate.decision is not Decision.ROLLBACK:
         raise RuntimeError(f"transition execution evidence is missing: {sorted(missing)}")
     from .transition import decide_reach_avoid_transition
-    recomputed = decide_reach_avoid_transition(None, None, evidence)
+    trial_meta = type("PersistedTrial", (), {
+        "patch_is_applicable": certificate.decision is not Decision.REJECT_TRIAL
+        or not certificate.hard_avoid_reasons,
+        "patch_hash": certificate.trial_patch_hash,
+    })()
+    recomputed = decide_reach_avoid_transition(
+        source, trial_meta, evidence, certificate.reach, certificate.avoid,
+    )
     if (
         recomputed.decision is not certificate.decision
         or recomputed.reasons != certificate.decision_reasons

@@ -46,7 +46,7 @@ def schedule_primary_action(state: Any, primary: RepairFrontier | None = None) -
         if recovery_count < 2:
             return ScheduledRepair(primary.frontier_id, primary.semantic_key, "RECOVER_PRIMARY_EVIDENCE", "two no-op attempts require mechanism recovery")
         return ScheduledRepair(primary.frontier_id, primary.semantic_key, "SEAL", "primary mechanism exhausted after two no-op attempts")
-    if primary.actionable and primary.kind is not RepairFrontierKind.MECHANICAL_FAILURE:
+    if primary.actionable and primary.kind is not RepairFrontierKind.MECHANICAL_FAILURE and not primary.has_stable_trusted_failure:
         cells = getattr(getattr(state.graph_stack, "challenge_graph", None), "active_cells", lambda: ())()
         selected = set(primary.challenge_ids)
         for cell in sorted(cells, key=lambda item: item.challenge_id):
@@ -78,3 +78,8 @@ def select_next_scheduled_action(state: Any) -> ScheduledRepair:
     # selected repair frontier.  Running arbitrary pending checks here revives
     # the old starvation path: a large impact cone can prevent every repair.
     return schedule_primary_action(state)
+
+
+def select_next_action(state: Any) -> ScheduledRepair:
+    """Public scheduler entry point used by controller and integrations."""
+    return select_next_scheduled_action(state)

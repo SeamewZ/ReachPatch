@@ -25,8 +25,8 @@ from reachpatch.models.evidence import (
 )
 from reachpatch.models.graphs import ContextRequest, GraphBudget, empty_graph_stack
 from reachpatch.models.reach_avoid import (
-    CheckpointEvidence, Decision, GeneratorSession, PerformanceRecord, ReachAvoidPhase,
-    ReachAvoidState, RepairObjective, StateCheckpoint, TerminalResult, ChallengeSelection,
+    AtomicEvidence, CheckpointEvidence, CheckpointScore, FailureStage, GeneratorSession, PerformanceRecord, ReachAvoidPhase,
+    ReachAvoidState, RepairObjective, StateCheckpoint, TerminalResult, ChallengeSelection, Decision,
     ValidationObligation,
 )
 from reachpatch.reach_avoid.frontier import (
@@ -36,13 +36,22 @@ from reachpatch.reach_avoid.frontier import (
 from reachpatch.reach_avoid.semantics import normalize_target_cell
 from reachpatch.repair.objective import (
     atomic_obligation_from_validation, compile_repair_objective,
+    validation_obligation_from_challenge,
     deduplicate_validation_obligations, mechanical_validation_obligation,
 )
 from reachpatch.requirement_graph.builder import build_requirement_graph
 from reachpatch.program_graph import RepositoryIndex, clear_program_graph_caches
+from reachpatch.program_graph.active_slice import (
+    ActiveProgramSlice, ProgramSliceBudget, build_active_program_slice,
+)
+from reachpatch.binding_graph.active import (
+    ActiveBindingGraph, update_active_binding_graph,
+)
+from reachpatch.execution.target_recovery import recover_target_scenarios
 
 from .checkpoint import (
     CheckpointStore, capture_current_graph_checkpoint, capture_initial_checkpoint,
+    select_final_checkpoint,
 )
 from .gates import evaluate_reach
 from .graph_stack import (
@@ -118,6 +127,53 @@ class ReachAvoidController:
         self.config = config or ReachAvoidConfig()
         self._contexts: dict[str, _RunContext] = {}
 
+    def _refresh_active_views(self, state: ReachAvoidState, *, force: bool = False) -> None:
+        """Refresh bounded diff/program/binding/target views for the working patch."""
+        context = self._contexts[state.run_id]
+        working = Path(state.working_checkpoint.snapshot_tree)
+        actual = diff_between(state.base_repository, working)
+        previous = getattr(state, "program_slice", None)
+        previous_hash = (
+            getattr(getattr(previous, "graph", previous), "patch_hash", None)
+            if previous is not None else None
+        )
+        if not force and previous is not None and previous_hash == actual.patch_hash:
+            return
+        budget = ProgramSliceBudget(
+            max_files=min(self.config.graph_budget.max_files, 30),
+            max_symbols=min(self.config.graph_budget.max_nodes, 800),
+            max_static_edges=min(self.config.graph_budget.max_edges, 4000),
+            initial_caller_depth=1, initial_callee_depth=1,
+            max_expansion_depth=3, wall_seconds=45.0,
+        )
+        active_slice = build_active_program_slice(
+            state.base_repository, actual, context.requirement_graph,
+            tuple(state.observations.by_challenge.values()),
+            context.public_evidence.checks, previous, budget,
+        )
+        transport = getattr(getattr(self.repair_player, "generator_agent", None), "transport", None)
+        # A missing target Oracle may trigger one bounded DeepSeek recovery
+        # phase.  Persist the phase counter so graph refreshes do not spend an
+        # unbounded stream of model calls before the repair player runs.
+        recovery_transport = None
+        if transport is not None and state.frontier_attempts.get("target-recovery-agent", 0) < 1:
+            state.frontier_attempts["target-recovery-agent"] = 1
+            recovery_transport = transport
+        recovery = recover_target_scenarios(
+            state.base_repository, state.base_repository, working,
+            context.requirement_graph, active_slice,
+            context.public_evidence, recovery_transport,
+            state.run_root,
+        )
+        active_binding = update_active_binding_graph(
+            context.requirement_graph, active_slice, actual, recovery,
+            context.public_evidence.checks,
+            getattr(state, "active_binding_graph", None),
+        )
+        state.program_slice = active_slice
+        state.target_recovery = recovery
+        state.active_binding_graph = active_binding
+
     def _run_root(self, instance: Instance, run_root: str | Path | None) -> Path:
         if run_root:
             result = Path(run_root).resolve()
@@ -154,7 +210,13 @@ class ReachAvoidController:
         public = public_evidence_from_instance(
             instance.issue, instance.visible_tests, instance.public_metadata, repository,
         )
-        requirement = build_requirement_graph(instance.issue, public)
+        requirement_transport = getattr(
+            getattr(self.repair_player, "generator_agent", None), "transport", None,
+        )
+        requirement = build_requirement_graph(
+            instance.issue, public, transport=requirement_transport,
+            run_root=root,
+        )
         bootstrap = root / "bootstrap_working"
         copy_source_tree(
             repository,
@@ -164,6 +226,7 @@ class ReachAvoidController:
         actual = diff_between(repository, bootstrap)
         stack = empty_graph_stack(instance.base_commit, actual.patch_hash)
         evidence = CheckpointEvidence(False, True, 0, 0, 0, 0, 0, 0)
+        score = CheckpointScore(False, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0)
         placeholder = StateCheckpoint(
             checkpoint_id=stable_id("bootstrap", instance.instance_id, actual.patch_hash),
             parent_checkpoint_id=None,
@@ -178,6 +241,13 @@ class ReachAvoidController:
             open_high_challenge_ids=(),
             status="BOOTSTRAP",
             revision=0,
+            score=score,
+            final_eligible=False,
+            patch_is_applicable=True,
+            mechanical_blockers=("initial patch not generated",),
+            confirmed_regressions=(),
+            target_stage_by_obligation={},
+            transition_certificate_id=None,
         )
         run_id = stable_id("run", instance.instance_id, root)
         state = ReachAvoidState(
@@ -188,6 +258,8 @@ class ReachAvoidController:
             run_root=root,
             graph_stack=stack,
             working_checkpoint=placeholder,
+            safe_checkpoint=None,
+            best_checkpoint=None,
             certified_checkpoint=None,
             checkpoint_history={},
             observations=ObservationBundle(),
@@ -197,16 +269,21 @@ class ReachAvoidController:
             failure_history={},
             generator_session=GeneratorSession(stable_id("generator-session", run_id)),
             current_repair_objective=None,
-            repair_revision_count=0,
+            revision_count=0,
             generator_attempt_count=0,
             challenge_round_count=0,
-            no_progress_generator_attempts=0,
             frontier_attempts={},
             phase=ReachAvoidPhase.INITIALIZING,
             termination_status=None,
             execution_budget_seconds=self.config.execution_budget_seconds,
             remaining_wall_seconds=self.config.execution_budget_seconds,
             graph_budget=self.config.graph_budget,
+            distinct_patch_hashes={actual.patch_hash},
+            consecutive_evidence_limited_steps=0,
+            pending_frontier_keys=[],
+            locked_successes=[],
+            rejected_patch_hashes=set(),
+            transition_history=[],
             validation_backlog={},
         )
         store = CheckpointStore(root)
@@ -567,7 +644,13 @@ class ReachAvoidController:
         # alternative candidate. It is retained only when provisional work stops
         # producing evidence.
         if mechanical.passed:
-            state.certified_checkpoint = checkpoint
+            state.safe_checkpoint = checkpoint
+            state.best_checkpoint = checkpoint
+        else:
+            # An inapplicable or mechanically blocked p0 is retained for
+            # audit, but is never eligible as a final checkpoint.
+            state.safe_checkpoint = None
+            state.best_checkpoint = None
         state.checkpoint_history = {checkpoint.checkpoint_id: checkpoint}
         context.initial_result = None
         context.initial_mechanical = None
@@ -575,6 +658,7 @@ class ReachAvoidController:
         discard_bootstrap_tree(state.run_root / "initial_working", state.run_root)
         discard_bootstrap_tree(state.run_root / "bootstrap_working", state.run_root)
         self._run_initial_target_validation(state)
+        self._refresh_active_views(state, force=True)
         self._refresh_repair_frontiers(state)
 
     def _run_initial_target_validation(self, state: ReachAvoidState) -> None:
@@ -616,6 +700,13 @@ class ReachAvoidController:
         )
         state.challenge_round_count += 1
         self._apply_challenge_result(state, result)
+        # A correct P0 is already the best/safe/certified checkpoint.  Do this
+        # only after real target execution has populated AtomicEvidence; a
+        # mechanically valid but unvalidated patch is never certified.
+        if evaluate_reach(state).reached:
+            state.safe_checkpoint = state.working_checkpoint
+            state.best_checkpoint = state.working_checkpoint
+            state.certified_checkpoint = state.working_checkpoint
 
     def _refresh_confirmed_failures(self, state: ReachAvoidState) -> None:
         cells = state.graph_stack.challenge_graph.cells
@@ -643,6 +734,38 @@ class ReachAvoidController:
             cell = state.graph_stack.challenge_graph.cells.get(execution.challenge_id)
             if cell:
                 state.observations.record(execution, cell.requirement_id)
+                # Standalone challenge passes use the same semantic obligation
+                # shape as transition triplets, so Reach can inspect real target
+                # evidence before the first revision.
+                try:
+                    obligation = atomic_obligation_from_validation(
+                        validation_obligation_from_challenge(cell, source="challenge-round")
+                    )
+                    trace = execution.patched
+                    status = trace.observation.status.value
+                    if status not in {"PASS", "FAIL", "UNKNOWN", "BLOCKED"}:
+                        status = "UNKNOWN"
+                    entered = bool(trace.first_project_frame or trace.executed_symbol_ids or trace.executed_path_ids)
+                    state.atomic_obligations[obligation.key] = obligation
+                    state.atomic_evidence[obligation.key] = AtomicEvidence(
+                        obligation_key=obligation.key, status=status,
+                        requirement_id=obligation.requirement_id, role=obligation.role,
+                        input_partition_id=obligation.input_partition_id,
+                        observed_payload=trace.observation.to_dict(),
+                        expected_payload=obligation.oracle_contract.expected if obligation.oracle_contract else None,
+                        comparator=obligation.oracle_contract.normalized_comparator if obligation.oracle_contract else "RELATION_HOLDS",
+                        stability_runs=trace.stable_runs, entered_project_code=entered,
+                        first_project_frame=trace.first_project_frame,
+                        trace_ids=(trace.trace_bundle_id,), authority=obligation.authority,
+                        command=trace.command, cwd=trace.cwd,
+                        failure_stage=(FailureStage.TARGET_PASS if status == "PASS" else FailureStage.TARGET_CONTRACT_FAILURE if status == "FAIL" and entered else FailureStage.NOT_EXECUTED),
+                    )
+                except (TypeError, ValueError, AttributeError):
+                    # A malformed legacy cell remains graph evidence only; it
+                    # cannot be promoted into a target AtomicEvidence record.
+                    state.frontier_attempts.setdefault(
+                        f"unstructured:{cell.requirement_id}", 0,
+                    )
         record_locked_passes(state, state.graph_stack, result.executions)
         known_packets = {item.counterexample_id for item in state.counterexamples}
         state.counterexamples.extend(
@@ -795,7 +918,7 @@ class ReachAvoidController:
         The selected checkpoint is the last committed mechanically valid tree;
         it is never ranked or selected as an alternative final patch.
         """
-        safe = state.certified_checkpoint
+        safe = state.safe_checkpoint or state.certified_checkpoint
         if safe is None or safe.checkpoint_id == state.working_checkpoint.checkpoint_id:
             state.consecutive_provisional_without_progress = 0
             return
@@ -1253,7 +1376,7 @@ class ReachAvoidController:
                 "error_kind": type(error).__name__,
                 "error": str(error)[-4000:],
                 "generator_attempt_count": state.generator_attempt_count,
-                "repair_revision_count": state.repair_revision_count,
+                "revision_count": state.revision_count,
                 "challenge_round_count": state.challenge_round_count,
             }) + "\n")
 
@@ -1351,7 +1474,7 @@ class ReachAvoidController:
         # Mechanical failures are a first-class RepairFrontier.  They must
         # stay in the active loop so DeepSeek can repair the current patch.
 
-        while state.repair_revision_count < self.config.max_real_patch_revisions:
+        while state.revision_count < self.config.max_real_patch_revisions:
             state.remaining_wall_seconds = max(
                 0.0, state.execution_budget_seconds - (time.monotonic() - started),
             )
@@ -1360,6 +1483,7 @@ class ReachAvoidController:
             reach = evaluate_reach(state)
             if reach.reached:
                 return self.seal_reached(state)
+            self._refresh_active_views(state)
             self._refresh_confirmed_failures(state)
             action = self._action_selection(state)
             if action.kind is NextActionKind.SEAL:
@@ -1374,6 +1498,7 @@ class ReachAvoidController:
                         Path(state.working_checkpoint.snapshot_tree),
                     )
                     self._apply_challenge_result(state, result)
+                    self._refresh_active_views(state, force=True)
                     challenge_seconds = result.execution_seconds
                     cache_hits = result.cache_hits
                 else:
@@ -1381,7 +1506,7 @@ class ReachAvoidController:
                     challenge_seconds = 0.0
                     cache_hits = state.graph_stack.program_graph.cache_hits
                 self._performance(state, PerformanceRecord(
-                    revision=state.repair_revision_count,
+                    revision=state.revision_count,
                     program_update_seconds=latest_graph_metrics()["program_update_seconds"],
                     requirement_update_seconds=latest_graph_metrics()["requirement_update_seconds"],
                     binding_update_seconds=latest_graph_metrics()["binding_update_seconds"],
@@ -1481,7 +1606,7 @@ class ReachAvoidController:
             if trial.challenge_result is not None:
                 state.challenge_round_count += 1
             state.no_progress_generator_attempts = 0
-            state.repair_revision_count += 1
+            state.revision_count += 1
             self._finalize_generator_attempt(state, frontier, trial)
             apply_transition_decision(state, trial, self._contexts[state.run_id].store)
             if trial.decision is Decision.KEEP_PROVISIONAL and not trial.evidence.atomic_fail_to_pass:
@@ -1491,9 +1616,10 @@ class ReachAvoidController:
             if state.consecutive_provisional_without_progress > 2:
                 self._restore_safe_checkpoint(state)
             self._refresh_repair_frontiers(state)
+            self._refresh_active_views(state, force=True)
             trial_program = trial.graph_stack.program_graph
             self._performance(state, PerformanceRecord(
-                revision=state.repair_revision_count,
+                revision=state.revision_count,
                 program_update_seconds=latest_graph_metrics()["program_update_seconds"],
                 requirement_update_seconds=latest_graph_metrics()["requirement_update_seconds"],
                 binding_update_seconds=latest_graph_metrics()["binding_update_seconds"],
@@ -1531,7 +1657,7 @@ class ReachAvoidController:
         return self._output_single_patch(state, state.working_checkpoint, "REACHED")
 
     def seal_best_effort(self, state: ReachAvoidState, reason: str) -> TerminalResult:
-        checkpoint = state.working_checkpoint
+        checkpoint = select_final_checkpoint(state)
         status = f"BEST_EFFORT_{reason}"
         state.termination_status = status
         return self._output_single_patch(state, checkpoint, status)

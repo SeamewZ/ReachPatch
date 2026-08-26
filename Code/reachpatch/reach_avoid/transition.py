@@ -18,10 +18,11 @@ from reachpatch.models.evidence import (
 )
 from reachpatch.models.graphs import ChallengeCell, ChallengeGraph, ChallengeStatus, ExecutableScenario
 from reachpatch.models.reach_avoid import (
-    AtomicEvidence, AtomicObligation, AvoidEvaluation, AvoidKind, ChallengeRoundResult, ChallengeSelection, CheckpointEvidence, Decision,
+    AtomicEvidence, AtomicObligation, AvoidEvaluation, AvoidKind, ChallengeRoundResult, ChallengeSelection, CheckpointEvidence,
+    FailureStage,
     FrontierDelta, build_frontier_measure,
     GeneratorResult, ProgressEvaluation, ReachAvoidState, ReachEvaluation,
-    StateCheckpoint, TransitionDecision, TransitionEvidence, TrialTransition,
+    StateCheckpoint, TransitionDecision, TransitionEvidence, TransitionVerdict, TrialTransition,
     TransitionTraceBundle, atomic_obligation_key, normalize_input_recipe_semantics,
 )
 from .validation_backlog import derive_impact_validation_plan
@@ -37,6 +38,160 @@ from reachpatch.reach_avoid.semantics import (
     normalize_execution_contract,
     normalize_target_cell,
 )
+
+
+def classify_failure_stage(observation: RunObservation | None, obligation: AtomicObligation | None = None):
+    """Classify an execution outcome without treating mechanical checks as target evidence.
+
+    The classifier is deliberately conservative: an exception before a project
+    frame is a blocker, while a value/assertion mismatch after entering the
+    target is a contract failure.  Expected exceptions are successful oracle
+    observations.
+    """
+    from reachpatch.models.reach_avoid import FailureStage
+    if observation is None:
+        return FailureStage.NOT_EXECUTED
+    contract = getattr(obligation, "oracle_contract", None) if obligation is not None else None
+    comparator = getattr(contract, "normalized_comparator", "") if contract is not None else ""
+    exception = str(getattr(observation, "exception", "") or "")
+    stderr = str(getattr(observation, "stderr", "") or "")
+    entered = bool(
+        getattr(observation, "first_project_frame", None)
+        or getattr(observation, "executed_symbol_ids", ())
+        or getattr(observation, "executed_path_ids", ())
+    )
+    if comparator == "RAISES":
+        expected = getattr(contract, "expected", None)
+        expected_name = getattr(expected, "exception_type", expected)
+        if isinstance(expected, dict):
+            expected_name = expected.get("exception_type", expected.get("type", expected))
+        if exception and (not expected_name or str(expected_name) in exception):
+            return FailureStage.TARGET_PASS
+    status = getattr(getattr(observation, "status", None), "value", getattr(observation, "status", None))
+    if status == "PASS":
+        return FailureStage.TARGET_PASS
+    if status in {"UNKNOWN", "BLOCKED", "UNSUPPORTED", None}:
+        return FailureStage.NOT_EXECUTED
+    text = f"{exception} {stderr}".casefold()
+    if any(token in text for token in ("syntaxerror", "indentationerror", "patch apply", "malformed diff")):
+        return FailureStage.PATCH_OR_SYNTAX_BLOCKER
+    if any(token in text for token in ("nameerror", "importerror", "modulenotfounderror", "undefined name")):
+        return FailureStage.IMPORT_OR_NAME_BLOCKER
+    if not entered:
+        return FailureStage.PRE_TARGET_RUNTIME_BLOCKER
+    return FailureStage.TARGET_CONTRACT_FAILURE
+
+
+def _effective_failure_stage(evidence: AtomicEvidence, obligation: AtomicObligation | None) -> FailureStage:
+    """Recover a stage for evidence produced by older executors.
+
+    Stages are part of the progress contract, so an AtomicEvidence record with
+    the default NOT_EXECUTED value must not hide a real NameError or target
+    assertion.  New executors may already persist the stage; otherwise classify
+    the structured observation deterministically.
+    """
+    raw = getattr(evidence, "failure_stage", FailureStage.NOT_EXECUTED)
+    try:
+        stage = FailureStage(int(raw))
+    except (TypeError, ValueError):
+        stage = FailureStage.NOT_EXECUTED
+    if stage is not FailureStage.NOT_EXECUTED:
+        return stage
+    if evidence.role == "MECHANICAL":
+        return FailureStage.TARGET_PASS if evidence.status == "PASS" else FailureStage.PATCH_OR_SYNTAX_BLOCKER
+    if evidence.status == "PASS":
+        return FailureStage.TARGET_PASS
+    if evidence.status in {"UNKNOWN", "UNEXECUTABLE", "BLOCKED"}:
+        return FailureStage.NOT_EXECUTED
+    payload = evidence.observed_payload if isinstance(evidence.observed_payload, dict) else {}
+    text = " ".join(str(payload.get(key, "")) for key in ("exception", "stderr")).casefold()
+    contract = getattr(obligation, "oracle_contract", None)
+    if getattr(contract, "normalized_comparator", "") == "RAISES":
+        expected = getattr(contract, "expected", None)
+        expected_name = expected.get("exception_type", expected.get("type", "")) if isinstance(expected, dict) else expected
+        if expected_name and str(expected_name).casefold() in text:
+            return FailureStage.TARGET_PASS
+    if any(token in text for token in ("syntaxerror", "indentationerror", "patch apply")):
+        return FailureStage.PATCH_OR_SYNTAX_BLOCKER
+    if any(token in text for token in ("nameerror", "importerror", "modulenotfounderror", "undefined name")):
+        return FailureStage.IMPORT_OR_NAME_BLOCKER
+    return FailureStage.TARGET_CONTRACT_FAILURE if evidence.entered_project_code else FailureStage.PRE_TARGET_RUNTIME_BLOCKER
+
+
+def _contract_distance(observation: RunObservation | None, contract) -> float | None:
+    if observation is None or contract is None:
+        return None
+    comparator = getattr(contract, "normalized_comparator", "")
+    expected = getattr(contract, "expected", None)
+    value = getattr(observation, "value", None)
+    if comparator == "LENGTH_EQUALS":
+        try:
+            return float(abs(len(value) - int(expected)))
+        except (TypeError, ValueError):
+            return None
+    if comparator == "CONTAINS":
+        try:
+            return 0.0 if expected in value else 1.0
+        except TypeError:
+            return None
+    if comparator == "ORDER_EQUALS":
+        try:
+            left, right = list(value), list(expected)
+            mismatch = sum(a != b for a, b in zip(left, right)) + abs(len(left) - len(right))
+            return float(mismatch)
+        except (TypeError, ValueError):
+            return None
+    if comparator == "EQUALS":
+        try:
+            if isinstance(value, (int, float)) and isinstance(expected, (int, float)):
+                return float(abs(value - expected))
+        except (TypeError, ValueError):
+            return None
+    return None
+
+
+def compute_atomic_progress(parent: AtomicEvidence, trial: AtomicEvidence, obligation: AtomicObligation | None = None) -> AtomicProgress:
+    from reachpatch.models.reach_avoid import AtomicProgress
+    before_stage = _effective_failure_stage(parent, obligation)
+    after_stage = _effective_failure_stage(trial, obligation)
+    stable = parent.stability_runs >= 2 and trial.stability_runs >= 2
+    same_semantic = (
+        not obligation
+        or not parent.input_partition_id
+        or parent.input_partition_id == trial.input_partition_id
+    )
+    strict = bool(
+        same_semantic and stable and parent.status == "FAIL"
+        and trial.status == "PASS" and trial.entered_project_code
+    )
+    stage_advanced = bool(
+        same_semantic and stable and after_stage > before_stage
+        and trial.entered_project_code
+        and not (before_stage == FailureStage.TARGET_CONTRACT_FAILURE and after_stage < before_stage)
+    )
+    before_distance = _contract_distance(_observation_from_atomic(parent), getattr(obligation, "oracle_contract", None))
+    after_distance = _contract_distance(_observation_from_atomic(trial), getattr(obligation, "oracle_contract", None))
+    distance_improved = bool(before_distance is not None and after_distance is not None and after_distance < before_distance)
+    blocker_removed = before_stage in {FailureStage.PATCH_OR_SYNTAX_BLOCKER, FailureStage.IMPORT_OR_NAME_BLOCKER} and after_stage > before_stage
+    regression = bool(same_semantic and stable and parent.status == "PASS" and trial.status == "FAIL")
+    reason = ("stable FAIL -> PASS" if strict else "failure stage advanced" if stage_advanced else "mechanical blocker removed" if blocker_removed else "contract distance improved" if distance_improved else "stable regression" if regression else "no atomic progress")
+    return AtomicProgress(
+        obligation_id=parent.obligation_key, requirement_id=trial.requirement_id or parent.requirement_id,
+        binding_id=(getattr(obligation, "binding_id", None) if obligation is not None else None), before_status=parent.status, after_status=trial.status,
+        before_stage=before_stage, after_stage=after_stage, stable=stable, authority=trial.authority,
+        entered_target_before=parent.entered_project_code, entered_target_after=trial.entered_project_code,
+        strict_fail_to_pass=strict, stage_advanced=stage_advanced,
+        contract_distance_before=before_distance, contract_distance_after=after_distance,
+        contract_distance_improved=distance_improved, blocker_removed=blocker_removed,
+        regression=regression, reason=reason,
+    )
+
+
+def _observation_from_atomic(evidence: AtomicEvidence):
+    from reachpatch.models.evidence import RunObservation, OutcomeStatus
+    status = OutcomeStatus(evidence.status) if evidence.status in OutcomeStatus._value2member_map_ else OutcomeStatus.UNKNOWN
+    payload = evidence.observed_payload if isinstance(evidence.observed_payload, dict) else {}
+    return RunObservation(status=status, return_code=payload.get("return_code", payload.get("exit_code")), stdout=payload.get("stdout", ""), stderr=payload.get("stderr", ""), duration_seconds=float(payload.get("duration_seconds", 0.0)), value=payload.get("value"), exception=payload.get("exception"))
 
 
 def _tag_selected_frontier(evidence: TransitionEvidence, frontier) -> TransitionEvidence:
@@ -121,9 +276,13 @@ def _public_evidence_from_stack(state: ReachAvoidState) -> PublicEvidence:
 
 
 def _pass_sets(stack):
+    # Only independently certified target cells participate in the global
+    # Requirement closure. Branch/impact partitions are useful validation
+    # probes, but their static B/PROVISIONAL oracle must not turn an
+    # otherwise passing public target into an uncloseable requirement.
     cells = tuple(
         cell for cell in stack.challenge_graph.active_cells()
-        if cell.oracle.trusted and cell.oracle.executable
+        if cell.oracle.trusted and cell.oracle.executable and cell.hard
     )
     grouped: dict[str, dict[str, list]] = {}
     for cell in cells:
@@ -283,7 +442,7 @@ def _atomic_obligation_from_cell(cell, stack) -> AtomicObligation:
         requirement_contract_id=contract_id, role=role, input_recipe=cell.input_recipe,
         input_partition_id=partition_id, oracle_contract=atomic_contract,
         authority=cell.oracle.authority if cell.oracle.authority in {"A", "B", "C", "PROVISIONAL"} else "PROVISIONAL",
-        hard=cell.hard, source=f"challenge:{cell.challenge_id}",
+        hard=cell.hard, source=f"challenge:{cell.challenge_id}", binding_id=cell.binding_id,
     )
     return replace(raw, key=atomic_obligation_key(raw))
 
@@ -314,16 +473,64 @@ def build_transition_validation_batch(
     # graph dictionary here used to put older target cells ahead of a newly
     # materialized preservation replay, so the selected frontier silently
     # disappeared from transition evidence.
-    primary_candidates = [
+    selected_candidates = [
         cells_by_id[challenge_id] for challenge_id in selected_ids
         if challenge_id in cells_by_id
         and cells_by_id[challenge_id].execution_scenario.command
     ]
-    primary_candidates.sort(key=lambda cell: (
+    selected_candidates.sort(key=lambda cell: (
         _frontier_scenario_rank(selected_frontier, cell, trial_stack),
         cell.kind == "PRESERVATION",
     ))
-    candidates = primary_candidates[:2]
+    # The selected frontier owns at most two primary scenarios. A trial that
+    # is repairing preservation still has to replay any already locked target
+    # scenarios, while a target repair must prefer the public/issue witness
+    # cell over graph-derived branch partitions. These hard replays are
+    # appended deterministically and are not displaced by soft exploration.
+    candidates = selected_candidates[:2]
+    selected_requirement_ids = set(getattr(selected_frontier, "requirement_ids", ()))
+    selected_kind = _frontier_kind_name(selected_frontier)
+    locked_check_ids = (
+        set(state.locked_checks.target_ids)
+        | set(state.locked_checks.preservation_ids)
+    )
+
+    def is_hard_target(cell):
+        return bool(
+            cell.hard
+            and cell.kind != "PRESERVATION"
+            and cell.oracle.trusted
+            and cell.oracle.executable
+            and cell.execution_scenario.command
+        )
+
+    def is_locked_target(cell):
+        binding = trial_stack.binding_graph.units.get(cell.binding_id)
+        return bool(
+            is_hard_target(cell)
+            and binding is not None
+            and locked_check_ids.intersection(binding.target_check_ids)
+            and cell.origin in {"PUBLIC_CHECK", "ISSUE_WITNESS", "REGRESSION_REPLAY"}
+        )
+
+    hard_target_candidates = sorted(
+        (cell for cell in trial_stack.challenge_graph.active_cells()
+         if is_hard_target(cell)
+         and (
+             (selected_kind == "BEHAVIOR_FAILURE"
+              and cell.requirement_id in selected_requirement_ids)
+             or is_locked_target(cell)
+         )),
+        key=lambda cell: (
+            not is_locked_target(cell),
+            cell.origin not in {"PUBLIC_CHECK", "ISSUE_WITNESS"},
+            cell.input_recipe.source_check_id or "",
+            cell.challenge_id,
+        ),
+    )
+    for cell in hard_target_candidates:
+        if cell not in candidates and len([item for item in candidates if is_hard_target(item)]) < 2:
+            candidates.append(cell)
     planning_state = replace(state, graph_stack=trial_stack)
     validation_items = derive_impact_validation_plan(
         planning_state, selected_frontier, trial_diff,
@@ -953,6 +1160,30 @@ def compute_transition_evidence(
         and before.stability_runs >= 2 and atomic_after[key].stability_runs >= 2
         and before.status == "PASS" and atomic_after[key].status == "FAIL"
     ]
+    atomic_progress_by_obligation = {}
+    strict_progress_ids = []
+    partial_progress_ids = []
+    regression_ids = []
+    removed_blocker_ids = []
+    introduced_blocker_ids = []
+    for key in sorted(set(atomic_before) | set(atomic_after)):
+        before = atomic_before.get(key)
+        after = atomic_after.get(key)
+        if before is None or after is None:
+            continue
+        obligation = next((item for item in atomic_obligations if item.key == key), None)
+        progress = compute_atomic_progress(before, after, obligation)
+        atomic_progress_by_obligation[key] = progress
+        if progress.strict_fail_to_pass:
+            strict_progress_ids.append(key)
+        elif progress.stage_advanced or progress.contract_distance_improved:
+            partial_progress_ids.append(key)
+        if progress.blocker_removed:
+            removed_blocker_ids.append(key)
+        if progress.regression:
+            regression_ids.append(key)
+        if after.failure_stage in {1, 2} and before.failure_stage not in {1, 2}:
+            introduced_blocker_ids.append(key)
     frontier_delta = None
     if selected_frontier is not None:
         frontier_delta = compute_selected_frontier_delta(
@@ -1014,105 +1245,139 @@ def compute_transition_evidence(
             if not mechanical.passed
         ) + (("forbidden edit",) if mechanical.forbidden_edit else ())
         + (("oracle contamination",) if mechanical.oracle_contamination else ()),
+        atomic_progress_by_obligation=atomic_progress_by_obligation,
+        strict_progress_ids=tuple(strict_progress_ids),
+        partial_progress_ids=tuple(partial_progress_ids),
+        regression_ids=tuple(regression_ids),
+        removed_blocker_ids=tuple(removed_blocker_ids),
+        introduced_blocker_ids=tuple(introduced_blocker_ids),
     )
 
 
 def decide_reach_avoid_transition(
-    before_state: ReachAvoidState,
-    trial_graph_stack,
+    parent_checkpoint: StateCheckpoint | ReachAvoidState | None,
+    trial_checkpoint: StateCheckpoint | object | None,
     evidence: TransitionEvidence,
-) -> TransitionDecision:
-    # A transition is about the selected repair frontier.  A new impact or
-    # locked replay can add useful evidence, but it cannot independently
-    # promote an unrelated trial.  The no-frontier fallback is retained for
-    # direct API callers that construct TransitionEvidence outside the
-    # controller; production always supplies a selected frontier.
-    delta = evidence.frontier_delta
-    if delta is None:
-        selected_fail_to_pass = set(evidence.atomic_fail_to_pass)
-    else:
-        selected_fail_to_pass = (
-            set(evidence.atomic_fail_to_pass)
-            .intersection(delta.before.failed_atomic_keys)
-            .intersection(delta.after.passed_atomic_keys)
+    reach_status: ReachEvaluation | None = None,
+    avoid_status: AvoidEvaluation | None = None,
+) -> TransitionVerdict:
+    # Accept the retired ``(state, trial_graph, evidence)`` call shape for
+    # artifact verification and third-party integrations.  New production
+    # callers pass explicit parent/trial checkpoints and gate statuses.
+    legacy_call = not isinstance(parent_checkpoint, StateCheckpoint)
+    if legacy_call:
+        state = parent_checkpoint
+        parent_checkpoint = getattr(state, "working_checkpoint", None)
+        if reach_status is None and hasattr(state, "graph_stack"):
+            reach_status = evaluate_reach(state)
+        if avoid_status is None:
+            avoid_status = AvoidEvaluation(AvoidKind.NOT_AVOID, (), (), ())
+    if reach_status is None:
+        reach_status = ReachEvaluation(False, (), 0, 0, 0)
+    if avoid_status is None:
+        avoid_status = AvoidEvaluation(AvoidKind.NOT_AVOID, (), (), ())
+    if trial_checkpoint is None or not hasattr(trial_checkpoint, "patch_is_applicable"):
+        trial_patch_hash = getattr(getattr(trial_checkpoint, "graph_stack", None), "patch_hash", None)
+        if trial_patch_hash is None:
+            trial_patch_hash = getattr(parent_checkpoint, "patch_hash", None)
+        trial_checkpoint = type("_TrialCheckpoint", (), {
+            "patch_is_applicable": True, "patch_hash": trial_patch_hash,
+        })()
+    if parent_checkpoint is None:
+        parent_checkpoint = type("_ParentCheckpoint", (), {
+            "patch_hash": None,
+        })()
+    strict_progress = bool(evidence.strict_progress_ids or evidence.atomic_fail_to_pass)
+    partial_progress = bool(
+        evidence.partial_progress_ids
+        or evidence.removed_blocker_ids
+        or (evidence.frontier_delta and evidence.frontier_delta.material_progress)
+    )
+    compensating_progress = strict_progress or partial_progress
+    # A target FAIL on a newly explored or selected-but-never-passing scenario
+    # is ordinary repair evidence. Only a trusted locked success losing its
+    # PASS status is a strict regression that can reject a trial.
+    strict_target_regression = bool(evidence.locked_targets_lost)
+    preservation_regression = bool(
+        evidence.preservation_regressions
+        or tuple(
+            key for key in evidence.regression_ids
+            if evidence.atomic_after.get(key, AtomicEvidence(key, "UNKNOWN")).role
+            in {"PRESERVATION", "IMPACT"}
         )
-    target_progress_keys = tuple(
-        key for key in selected_fail_to_pass
-        if evidence.atomic_after.get(key, AtomicEvidence(key, "UNKNOWN")).role == "TARGET"
     )
-    trusted_target_progress = bool(target_progress_keys) or bool(
-        delta is None and evidence.target_failures_closed
+    unknown_target = any(
+        item.role == "TARGET" and item.status in {"UNKNOWN", "UNEXECUTABLE", "BLOCKED"}
+        for item in evidence.atomic_after.values()
+    ) or evidence.environment_unknown
+    unresolved_mechanical = bool(
+        not evidence.mechanical.passed
+        or evidence.mechanical.static_blocker_ids
+        or evidence.introduced_blocker_ids
     )
-    trusted_atomic_progress = bool(selected_fail_to_pass)
-    hard_avoid_reasons = list(evidence.hard_avoid_violations)
-    if evidence.locked_targets_lost:
-        hard_avoid_reasons.append("locked trusted target changed PASS -> FAIL")
-    if evidence.mechanical.unsafe_api_break or evidence.mechanical.high_risk_side_effect:
-        hard_avoid_reasons.append("confirmed destructive API or data behavior")
-    preservation_regression = bool(evidence.preservation_regressions) or any(
-        evidence.atomic_after.get(key, AtomicEvidence(key, "UNKNOWN")).role
-        in {"PRESERVATION", "IMPACT"}
-        for key in evidence.atomic_pass_to_fail
-    )
-    repairable_regression = preservation_regression and trusted_target_progress
-    if hard_avoid_reasons:
-        decision = Decision.ROLLBACK
-        reasons = tuple(hard_avoid_reasons)
-        next_kind = None
-    elif preservation_regression and not trusted_target_progress:
-        decision = Decision.ROLLBACK
-        reasons = ("confirmed preservation regression without target progress",)
-        next_kind = None
-    elif trusted_target_progress and repairable_regression:
-        # Keep the target mechanism and immediately make the preservation
-        # counterexample the next repair objective.  Rolling this back loses
-        # the only verified target progress and prevents cumulative repair.
-        decision = Decision.KEEP_PROVISIONAL
-        reasons = ("target progress retained while preservation regression is repairable",)
-        next_kind = "PRESERVATION_REGRESSION"
-    elif (
-        delta is not None
-        and delta.verified_closed
-    ) or trusted_atomic_progress:
-        # An ISSUE_DIFF_MISMATCH may identify the right source mechanism, but
-        # it begins with provisional alignment evidence.  It must be retained
-        # for the next targeted validation, never treated as a direct Reach
-        # proof or an unconditional commit.
-        if evidence.selected_frontier_kind == "ISSUE_DIFF_MISMATCH":
-            decision = Decision.KEEP_PROVISIONAL
-            reasons = ("issue/diff mismatch gained selected scenario evidence",)
-            next_kind = evidence.selected_frontier_kind
+
+    if not trial_checkpoint.patch_is_applicable:
+        decision = TransitionDecision.REJECT_TRIAL
+        reasons = ("trial patch is not applicable or has a syntax blocker",)
+    elif evidence.forbidden_path_changes or evidence.repository_corruption:
+        decision = TransitionDecision.REJECT_TRIAL
+        reasons = tuple(evidence.forbidden_path_changes) or ("working tree corruption",)
+    elif evidence.is_exact_duplicate_patch or (not legacy_call and trial_checkpoint.patch_hash == parent_checkpoint.patch_hash):
+        decision = TransitionDecision.REJECT_TRIAL
+        reasons = ("trial is an exact duplicate of its parent",)
+    elif reach_status.reached:
+        decision = TransitionDecision.REACHED
+        reasons = ("all trusted target and preservation obligations reached",)
+    elif strict_target_regression and not compensating_progress:
+        decision = TransitionDecision.REJECT_TRIAL
+        reasons = ("stable target behavior is strictly worse without compensating progress",)
+    elif compensating_progress:
+        if preservation_regression or unresolved_mechanical:
+            decision = TransitionDecision.KEEP_REPAIRING
+            reasons = ("retain atomic progress and repair remaining blocker or regression",)
         else:
-            decision = Decision.COMMIT_WORKING
-            reasons = ("selected frontier closed by trusted atomic evidence",)
-            next_kind = None
-    elif (
-        delta is not None
-        and delta.material_progress
-        and not evidence.trusted_regressions
+            decision = TransitionDecision.ADVANCE_SAFE
+            reasons = ("trial made stable strict or partial atomic progress",)
+    elif evidence.removed_blocker_ids:
+        decision = (
+            TransitionDecision.KEEP_REPAIRING
+            if preservation_regression else TransitionDecision.ADVANCE_SAFE
+        )
+        reasons = ("trial removed a mechanical blocker",)
+    elif preservation_regression:
+        decision = TransitionDecision.KEEP_REPAIRING
+        reasons = ("preservation regression is repairable on the current working patch",)
+    elif unknown_target:
+        decision = TransitionDecision.KEEP_REPAIRING
+        reasons = ("target or Oracle evidence remains unknown",)
+    elif evidence.introduced_blocker_ids or (
+        evidence.regression_ids and not compensating_progress
     ):
-        decision = Decision.KEEP_PROVISIONAL
-        reasons = ("selected frontier made measurable evidence progress",)
-        next_kind = evidence.selected_frontier_kind
+        decision = TransitionDecision.REJECT_TRIAL
+        reasons = ("trial is stably worse than its parent without progress",)
     else:
-        decision = Decision.ROLLBACK
-        reasons = ("selected frontier has no verified or material progress",)
-        next_kind = None
-    strict_progress = trusted_atomic_progress or bool(
-        delta and delta.verified_closed
-    )
-    causal_progress = bool(
-        delta and delta.material_progress
-    )
-    return TransitionDecision(
+        decision = TransitionDecision.KEEP_REPAIRING
+        reasons = ("no proven regression; continue repairing the current cumulative patch",)
+
+    repairable_regression = preservation_regression
+    return TransitionVerdict(
         decision=decision,
         reasons=reasons,
         strict_progress=strict_progress,
-        causal_progress=causal_progress,
-        hard_avoid=bool(hard_avoid_reasons),
+        causal_progress=partial_progress,
+        hard_avoid=decision is TransitionDecision.REJECT_TRIAL and bool(
+            evidence.forbidden_path_changes or evidence.repository_corruption
+            or not trial_checkpoint.patch_is_applicable
+        ),
         repairable_regression=repairable_regression,
-        promote_to_working=decision in {Decision.COMMIT_WORKING, Decision.KEEP_PROVISIONAL},
-        next_objective_kind=next_kind,
+        promote_to_working=decision in {
+            TransitionDecision.REACHED,
+            TransitionDecision.ADVANCE_SAFE,
+            TransitionDecision.KEEP_REPAIRING,
+        },
+        next_objective_kind=(
+            "PRESERVATION_REGRESSION" if preservation_regression else evidence.selected_frontier_kind
+        ),
     )
 
 
@@ -1248,6 +1513,49 @@ def _public_check_paths(state: ReachAvoidState) -> tuple[str, ...]:
     ))
 
 
+def _preview_trial_checkpoint(
+    parent: StateCheckpoint,
+    *,
+    trial_tree: Path | None,
+    cumulative_diff,
+    graph_stack,
+    mechanical,
+    revision: int,
+) -> StateCheckpoint:
+    syntax_or_apply_blocker = any(
+        token in reason.lower()
+        for reason in mechanical.failure_reasons
+        for token in ("syntax error", "cannot apply", "patch apply", "malformed diff")
+    )
+    blockers = tuple(mechanical.failure_reasons)
+    score = replace(
+        parent.score,
+        final_eligible=False,
+        unresolved_mechanical_blockers=len(blockers),
+    )
+    return replace(
+        parent,
+        checkpoint_id=stable_id(
+            "trial-checkpoint", parent.checkpoint_id,
+            cumulative_diff.patch_hash, graph_stack.graph_hashes(), revision,
+        ),
+        parent_checkpoint_id=parent.checkpoint_id,
+        snapshot_tree=str(trial_tree or parent.snapshot_tree),
+        patch_hash=cumulative_diff.patch_hash,
+        canonical_diff=cumulative_diff.canonical_diff,
+        graph_hashes=graph_stack.graph_hashes(),
+        graph_snapshot_dir="",
+        status="TRIAL",
+        revision=revision,
+        score=score,
+        final_eligible=False,
+        patch_is_applicable=not syntax_or_apply_blocker,
+        mechanical_blockers=blockers,
+        confirmed_regressions=(),
+        transition_certificate_id=None,
+    )
+
+
 def evaluate_trial_transition(
     state: ReachAvoidState,
     generator_result: GeneratorResult,
@@ -1264,10 +1572,21 @@ def evaluate_trial_transition(
         evidence = _tag_selected_frontier(TransitionEvidence(
             mechanical, (), (), (), (), (), (), (), (), (), (), False, False, (),
         ), selected_frontier)
-        decision = decide_reach_avoid_transition(state, state.graph_stack, evidence)
         progress = ProgressEvaluation(False, False, 0, 0, (), (), ())
         reach = evaluate_reach(state)
         avoid = AvoidEvaluation(AvoidKind.HARD_AVOID, (str(exc),), (), ())
+        preview = replace(
+            source_checkpoint,
+            checkpoint_id=stable_id("rejected-trial", source_checkpoint.checkpoint_id, str(exc)),
+            parent_checkpoint_id=source_checkpoint.checkpoint_id,
+            patch_is_applicable=False,
+            final_eligible=False,
+            mechanical_blockers=(str(exc),),
+            transition_certificate_id=None,
+        )
+        decision = decide_reach_avoid_transition(
+            source_checkpoint, preview, evidence, reach, avoid,
+        )
         state.graph_stack.validate()
         return TrialTransition(
             source_checkpoint.checkpoint_id, None, empty, empty,
@@ -1282,15 +1601,18 @@ def evaluate_trial_transition(
         evidence = _tag_selected_frontier(TransitionEvidence(
             mechanical, (), (), (), (), (), (), (), (), (), (), False, False, (),
         ), selected_frontier)
-        decision = replace(
-            decide_reach_avoid_transition(state, state.graph_stack, evidence),
-            decision=Decision.ROLLBACK,
-            reasons=("empty or identical cumulative patch",),
-            promote_to_working=False,
-        )
-        progress = ProgressEvaluation(False, False, 0, 0, (), (), ())
+        evidence = replace(evidence, is_exact_duplicate_patch=True)
         reach = evaluate_reach(state)
         avoid = AvoidEvaluation(AvoidKind.NOT_AVOID, (), (), ())
+        preview = _preview_trial_checkpoint(
+            source_checkpoint, trial_tree=trial_tree, cumulative_diff=cumulative,
+            graph_stack=state.graph_stack, mechanical=mechanical,
+            revision=state.revision_count + 1,
+        )
+        decision = decide_reach_avoid_transition(
+            source_checkpoint, preview, evidence, reach, avoid,
+        )
+        progress = ProgressEvaluation(False, False, 0, 0, (), (), ())
         state.graph_stack.validate()
         return TrialTransition(
             source_checkpoint.checkpoint_id, str(trial_tree), incremental, cumulative,
@@ -1307,10 +1629,17 @@ def evaluate_trial_transition(
         evidence = _tag_selected_frontier(TransitionEvidence(
             mechanical, (), (), (), (), (), (), (), (), (), (), False, False, (),
         ), selected_frontier)
-        decision = decide_reach_avoid_transition(state, state.graph_stack, evidence)
         progress = ProgressEvaluation(False, False, 0, 0, (), (), ())
         reach = ReachEvaluation(False, mechanical.failure_reasons, 0, 0, 0)
         avoid = AvoidEvaluation(AvoidKind.HARD_AVOID, mechanical.failure_reasons, (), ())
+        preview = _preview_trial_checkpoint(
+            source_checkpoint, trial_tree=trial_tree, cumulative_diff=cumulative,
+            graph_stack=state.graph_stack, mechanical=mechanical,
+            revision=state.revision_count + 1,
+        )
+        decision = decide_reach_avoid_transition(
+            source_checkpoint, preview, evidence, reach, avoid,
+        )
         state.graph_stack.validate()
         return TrialTransition(
             source_checkpoint.checkpoint_id, str(trial_tree), incremental, cumulative,
@@ -1430,18 +1759,27 @@ def evaluate_trial_transition(
         ProgressEvaluation(False, False, 0, 0, (), (), ()),
         ReachEvaluation(False, (), 0, 0, 0),
         AvoidEvaluation(AvoidKind.NOT_AVOID, (), (), ()),
-        TransitionDecision(Decision.ROLLBACK, (), False, False, False, False, False, None),
+        TransitionVerdict(
+            TransitionDecision.KEEP_REPAIRING, (), False, False,
+            False, False, True, None,
+        ),
         trial_patch_changed=True,
         entered_evaluation=True,
         selected_frontier=selected_frontier, trace_bundle=trace_bundle,
         atomic_obligations=atomic_obligations,
     )
     progress = compare_progress(state, placeholder)
-    decision = decide_reach_avoid_transition(state, trial_stack, evidence)
     placeholder.progress = progress
-    placeholder.transition_decision = decision
     placeholder.avoid = evaluate_avoid(state, placeholder)
     virtual = _virtual_state(state, trial_stack, cumulative, mechanical, challenge_result)
     placeholder.reach = evaluate_reach(virtual)
+    preview = _preview_trial_checkpoint(
+        source_checkpoint, trial_tree=trial_tree, cumulative_diff=cumulative,
+        graph_stack=trial_stack, mechanical=mechanical,
+        revision=state.revision_count + 1,
+    )
+    placeholder.transition_decision = decide_reach_avoid_transition(
+        source_checkpoint, preview, evidence, placeholder.reach, placeholder.avoid,
+    )
     trial_stack.validate()
     return placeholder

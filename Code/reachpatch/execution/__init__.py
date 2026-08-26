@@ -1,4 +1,9 @@
 from .mechanical import run_mechanical_checks
+from .target_recovery import (
+    RejectedTargetCandidate, TargetRecoveryConfig, TargetRecoveryResult,
+    TargetRecoveryAgent, TargetRecoveryToolExecutor,
+    TARGET_RECOVERY_TOOL_SCHEMAS, recover_target_scenarios,
+)
 from .paired import clear_execution_hot_cache, execute_paired, execute_transition_triplet
 from .trace import run_trace
 from .worktree import (

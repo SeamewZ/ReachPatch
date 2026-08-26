@@ -83,7 +83,25 @@ class ObservationContract(SerializableRecord):
                         except (ValueError, SyntaxError):
                             value = last_line
             if self.normalized_comparator == "EXIT_ZERO":
-                return observation.return_code == 0 and observation.status is OutcomeStatus.PASS
+                if observation.return_code != 0 or observation.status is not OutcomeStatus.PASS:
+                    return False
+                if isinstance(self.expected, dict):
+                    expected_payload = {
+                        key: value for key, value in self.expected.items()
+                        if key in {"stdout", "stderr", "value", "exception"}
+                    }
+                    if expected_payload:
+                        observed_payload = {
+                            "stdout": observation.stdout,
+                            "stderr": observation.stderr,
+                            "value": value,
+                            "exception": observation.exception,
+                        }
+                        return all(
+                            observed_payload.get(key) == expected_value
+                            for key, expected_value in expected_payload.items()
+                        )
+                return True
             if self.normalized_comparator in {"RAISES", "NOT_RAISES"}:
                 raised = bool(observation.exception) or observation.status is OutcomeStatus.FAIL
                 return raised if self.normalized_comparator == "RAISES" else not raised
@@ -661,6 +679,21 @@ def extract_issue_witnesses(
                     "traceback lines were excluded from the expected observation",
                 ),
             })
+    # Authority is local to the witness, never inherited from an unrelated
+    # positive sentence elsewhere in the issue.  Only an adjacent normative
+    # clause (or an explicit Expected/Desired section) can promote a witness
+    # to reporter-grounded Authority B.
+    for witness in witnesses:
+        expression = str(witness.get("target_expression", ""))
+        position = content.find(expression) if expression else -1
+        prefix = content[max(0, position - 320):position] if position >= 0 else ""
+        explicit = bool(re.search(
+            r"\b(?:expected|desired|must|should|shall|return|raise|without\s+(?:an?\s+)?(?:error|exception)|support|accept|allow)\b",
+            prefix,
+            re.IGNORECASE,
+        ))
+        if not explicit:
+            witness["authority"] = "PROVISIONAL"
     unique = {str(item["witness_id"]): item for item in witnesses}
     return tuple(unique[key] for key in sorted(unique))
 

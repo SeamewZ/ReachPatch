@@ -740,3 +740,36 @@ def compile_input_recipe(
             f"for binding {binding.binding_id}"
         ),
     )
+
+
+def materialize_diff_challenges(
+    requirement_graph,
+    program_slice,
+    binding_graph,
+    diff,
+    observations=(),
+    previous_challenges=(),
+):
+    """Generate a bounded set of AST-derived adjacent challenge cells."""
+    from dataclasses import replace
+    from reachpatch.models.graphs import ChallengeStatus
+    changed_hunks = tuple(getattr(item, "hunk_id", "") for item in getattr(diff, "hunks", ()))
+    result = list(previous_challenges)
+    seen = {getattr(item, "challenge_id", "") for item in result}
+    for cell in tuple(previous_challenges):
+        if not getattr(cell, "oracle", None) or not cell.oracle.trusted or not cell.oracle.executable:
+            continue
+        recipe = cell.input_recipe
+        for partition in ("BOUNDARY_BEFORE", "BOUNDARY_AT", "BOUNDARY_AFTER"):
+            concrete = _mutate_input(recipe.concrete_input, partition)
+            if concrete == recipe.concrete_input and partition != "BOUNDARY_AT":
+                continue
+            new_recipe = replace(recipe, recipe_id=stable_id("diff-recipe", cell.requirement_id, partition, concrete), concrete_input=concrete, derivation=tuple(dict.fromkeys(recipe.derivation + (partition,))))
+            challenge_id = stable_id("diff-challenge", cell.requirement_id, cell.binding_id, partition, concrete)
+            if challenge_id in seen:
+                continue
+            seen.add(challenge_id)
+            result.append(replace(cell, challenge_id=challenge_id, patch_hash=getattr(diff, "patch_hash", cell.patch_hash), input_recipe=new_recipe, changed_hunk_ids=changed_hunks or cell.changed_hunk_ids, terminal_status=ChallengeStatus.PENDING, baseline_outcome=None, patched_outcome=None, trace_bundle_id=None, stability_runs=0, origin="DIFF_PARTITION"))
+            if len(result) >= 12:
+                return tuple(result)
+    return tuple(result)

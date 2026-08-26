@@ -248,7 +248,7 @@ def test_checkpoint_restores_runtime_failure_and_frontier_state(state_factory, t
     state.confirmed_failures = []
     state.frontier_attempts["frontier"] = 2
     state.challenge_round_count = 4
-    state.repair_revision_count = 3
+    state.revision_count = 3
     state.phase = ReachAvoidPhase.REPAIR
     store = CheckpointStore(state.run_root)
     checkpoint = capture_initial_checkpoint(
@@ -264,12 +264,12 @@ def test_checkpoint_restores_runtime_failure_and_frontier_state(state_factory, t
     )
     state.frontier_attempts = {}
     state.challenge_round_count = 0
-    state.repair_revision_count = 0
+    state.revision_count = 0
     state.phase = ReachAvoidPhase.CHALLENGE
     restore_checkpoint(state, checkpoint, store)
     assert state.frontier_attempts == {"frontier": 2}
     assert state.challenge_round_count == 4
-    assert state.repair_revision_count == 3
+    assert state.revision_count == 3
     assert state.phase is ReachAvoidPhase.REPAIR
 
 
@@ -378,7 +378,7 @@ def test_rollback_transition_restores_source_and_verifies_certificate(state_fact
     trial = evaluate_trial_transition(state, result)
     assert trial.trial_patch_changed and trial.entered_evaluation
     assert trial.decision.value == "ROLLBACK"
-    state.repair_revision_count += 1
+    state.revision_count += 1
     certificate = apply_transition_decision(state, trial, store)
     assert state.working_checkpoint.patch_hash == source.patch_hash
     assert state.graph_stack.graph_hashes() == source.graph_hashes
@@ -446,7 +446,7 @@ def test_rollback_does_not_close_incumbent_failure(state_factory, tmp_path):
         state, trial.graph_stack, trial.evidence,
     )
     assert trial.decision is Decision.ROLLBACK
-    state.repair_revision_count += 1
+    state.revision_count += 1
 
     apply_transition_decision(state, trial, store)
 

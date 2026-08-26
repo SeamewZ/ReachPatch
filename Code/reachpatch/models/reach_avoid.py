@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from enum import StrEnum
+from enum import IntEnum, StrEnum
 from pathlib import Path
 from typing import Any, Literal
 
@@ -17,6 +17,15 @@ from reachpatch.reach_avoid.semantics import (
     observation_contract_semantic_id,
 )
 from reachpatch.reach_avoid.validation_backlog import ValidationBacklogItem
+
+
+class FailureStage(IntEnum):
+    NOT_EXECUTED = 0
+    PATCH_OR_SYNTAX_BLOCKER = 1
+    IMPORT_OR_NAME_BLOCKER = 2
+    PRE_TARGET_RUNTIME_BLOCKER = 3
+    TARGET_CONTRACT_FAILURE = 4
+    TARGET_PASS = 5
 
 
 @dataclass(frozen=True, slots=True)
@@ -36,6 +45,7 @@ class AtomicObligation(SerializableRecord):
     authority: Literal["A", "B", "C", "PROVISIONAL"] = "PROVISIONAL"
     hard: bool = True
     source: str = "graph"
+    binding_id: str | None = None
 
 
 def normalize_input_recipe_semantics(recipe: Any) -> Any:
@@ -75,6 +85,8 @@ class AtomicEvidence(SerializableRecord):
     environment_fingerprint: str = ""
     binding_alignment: str = "UNKNOWN"
     backend: str = "shared-executor"
+    failure_stage: FailureStage = FailureStage.NOT_EXECUTED
+    blocker_ids: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -211,11 +223,75 @@ def build_frontier_measure(frontier: Any, evidence: dict[str, AtomicEvidence],
     )
 
 
-class Decision(StrEnum):
-    COMMIT_WORKING = "COMMIT_WORKING"
-    KEEP_PROVISIONAL = "KEEP_PROVISIONAL"
-    ROLLBACK = "ROLLBACK"
-    SEAL = "SEAL"
+class TransitionDecision(StrEnum):
+    REACHED = "REACHED"
+    ADVANCE_SAFE = "ADVANCE_SAFE"
+    KEEP_REPAIRING = "KEEP_REPAIRING"
+    REJECT_TRIAL = "REJECT_TRIAL"
+    SEAL_BEST = "SEAL_BEST"
+    # Read-only aliases retained for artifact readers from the immediately
+    # preceding release.  They map to the new semantics and are not used as
+    # production decision branches.
+    COMMIT_WORKING = "ADVANCE_SAFE"
+    KEEP_PROVISIONAL = "KEEP_REPAIRING"
+    ROLLBACK = "REJECT_TRIAL"
+    SEAL = "SEAL_BEST"
+
+
+Decision = TransitionDecision
+
+
+@dataclass(frozen=True, slots=True)
+class AtomicProgress(SerializableRecord):
+    obligation_id: str
+    requirement_id: str | None
+    binding_id: str | None
+    before_status: str
+    after_status: str
+    before_stage: FailureStage
+    after_stage: FailureStage
+    stable: bool
+    authority: str
+    entered_target_before: bool
+    entered_target_after: bool
+    strict_fail_to_pass: bool
+    stage_advanced: bool
+    contract_distance_before: float | None
+    contract_distance_after: float | None
+    contract_distance_improved: bool
+    blocker_removed: bool
+    regression: bool
+    reason: str
+
+
+@dataclass(frozen=True, slots=True)
+class CheckpointScore(SerializableRecord):
+    final_eligible: bool = False
+    certified_target_passes: int = 0
+    stable_target_passes: int = 0
+    target_stage_sum: int = 0
+    closed_counterexamples: int = 0
+    removed_mechanical_blockers: int = 0
+    preservation_passes: int = 0
+    confirmed_regressions: int = 0
+    unresolved_mechanical_blockers: int = 0
+    unknown_target_count: int = 0
+    impact_cost: int = 0
+
+    def ordering_key(self) -> tuple[int, ...]:
+        return (
+            int(self.final_eligible),
+            self.certified_target_passes,
+            self.stable_target_passes,
+            self.target_stage_sum,
+            self.closed_counterexamples,
+            self.removed_mechanical_blockers,
+            self.preservation_passes,
+            -self.confirmed_regressions,
+            -self.unresolved_mechanical_blockers,
+            -self.unknown_target_count,
+            -self.impact_cost,
+        )
 
 
 class ReachAvoidPhase(StrEnum):
@@ -273,6 +349,13 @@ class StateCheckpoint(SerializableRecord):
     open_high_challenge_ids: tuple[str, ...]
     status: str
     revision: int
+    score: CheckpointScore = field(default_factory=CheckpointScore)
+    final_eligible: bool = False
+    patch_is_applicable: bool = True
+    mechanical_blockers: tuple[str, ...] = ()
+    confirmed_regressions: tuple[str, ...] = ()
+    target_stage_by_obligation: dict[str, int] = field(default_factory=dict)
+    transition_certificate_id: str | None = None
 
 
 @dataclass(slots=True)
@@ -322,6 +405,7 @@ class RepairObjective(SerializableRecord):
     working_patch_hash: str = ""
     graph_revision: int = 0
     atomic_obligations: tuple[AtomicObligation, ...] = ()
+    mode: str = "EVIDENCE_LIMITED_REVIEW"
 
 
 @dataclass(frozen=True, slots=True)
@@ -368,6 +452,9 @@ class MechanicalResult(SerializableRecord):
     unsafe_api_break: bool
     high_risk_side_effect: bool
     command_results: tuple[dict[str, Any], ...] = ()
+    undefined_name_findings: tuple[Any, ...] = ()
+    import_smoke_failures: tuple[dict[str, Any], ...] = ()
+    static_blocker_ids: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -399,8 +486,8 @@ class AvoidEvaluation(SerializableRecord):
 
 
 @dataclass(frozen=True, slots=True)
-class TransitionDecision(SerializableRecord):
-    decision: Decision
+class TransitionVerdict(SerializableRecord):
+    decision: TransitionDecision
     reasons: tuple[str, ...]
     strict_progress: bool
     causal_progress: bool
@@ -440,6 +527,15 @@ class TransitionEvidence(SerializableRecord):
     material_progress: tuple[str, ...] = ()
     trusted_regressions: tuple[str, ...] = ()
     hard_avoid_violations: tuple[str, ...] = ()
+    atomic_progress_by_obligation: dict[str, AtomicProgress] = field(default_factory=dict)
+    strict_progress_ids: tuple[str, ...] = ()
+    partial_progress_ids: tuple[str, ...] = ()
+    regression_ids: tuple[str, ...] = ()
+    removed_blocker_ids: tuple[str, ...] = ()
+    introduced_blocker_ids: tuple[str, ...] = ()
+    forbidden_path_changes: tuple[str, ...] = ()
+    repository_corruption: bool = False
+    is_exact_duplicate_patch: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -492,7 +588,7 @@ class TrialTransition(SerializableRecord):
     progress: ProgressEvaluation
     reach: ReachEvaluation
     avoid: AvoidEvaluation
-    transition_decision: TransitionDecision
+    transition_decision: TransitionVerdict
     certificate: TransitionCertificate | None = None
     trial_patch_changed: bool = False
     entered_evaluation: bool = False
@@ -501,7 +597,7 @@ class TrialTransition(SerializableRecord):
     atomic_obligations: tuple[AtomicObligation, ...] = ()
 
     @property
-    def decision(self) -> Decision:
+    def decision(self) -> TransitionDecision:
         return self.transition_decision.decision
 
 
@@ -532,15 +628,30 @@ class TransitionCertificate(SerializableRecord):
     progress: ProgressEvaluation
     reach: ReachEvaluation
     avoid: AvoidEvaluation
-    decision: Decision
+    decision: TransitionDecision
     decision_reasons: tuple[str, ...]
-    repair_revision_count_before: int
-    repair_revision_count_after: int
+    revision_count_before: int
+    revision_count_after: int
     generator_attempt_count: int
     challenge_round_count: int
     recomputation_hash: str
     selected_frontier_key: str | None = None
     selected_frontier_kind: str | None = None
+    selected_requirement_id: str | None = None
+    selected_binding_id: str | None = None
+    selected_challenge_id: str | None = None
+    repair_mode: str | None = None
+    model_request_ids: tuple[str, ...] = ()
+    validation_obligation_ids: tuple[str, ...] = ()
+    exact_commands: tuple[tuple[str, ...], ...] = ()
+    observation_hashes: tuple[str, ...] = ()
+    atomic_progress: dict[str, AtomicProgress] = field(default_factory=dict)
+    mechanical_blockers_before: tuple[str, ...] = ()
+    mechanical_blockers_after: tuple[str, ...] = ()
+    locked_successes_before: tuple[str, ...] = ()
+    locked_successes_after: tuple[str, ...] = ()
+    regressions: tuple[str, ...] = ()
+    timestamp: str = ""
 
 
 @dataclass(slots=True)
@@ -561,18 +672,22 @@ class ReachAvoidState(SerializableRecord):
     failure_history: dict[str, FailureHistory]
     generator_session: GeneratorSession
     current_repair_objective: RepairObjective | None
-    repair_revision_count: int
+    revision_count: int
     generator_attempt_count: int
     challenge_round_count: int
-    no_progress_generator_attempts: int
-    frontier_attempts: dict[str, int]
-    phase: ReachAvoidPhase
-    termination_status: str | None
-    execution_budget_seconds: float
-    remaining_wall_seconds: float
+    # Deprecated positional slot retained for loading pre-v2 runtime records.
+    # Production code uses ``consecutive_evidence_limited_steps`` instead.
+    no_progress_generator_attempts: int = 0
+    frontier_attempts: dict[str, int] = field(default_factory=dict)
+    phase: ReachAvoidPhase = ReachAvoidPhase.INITIALIZING
+    termination_status: str | None = None
+    execution_budget_seconds: float = 0.0
+    remaining_wall_seconds: float = 0.0
     # The controller owns graph resource policy; state construction must make
     # that policy explicit rather than silently creating a second default.
-    graph_budget: GraphBudget
+    graph_budget: GraphBudget = field(default_factory=GraphBudget)
+    safe_checkpoint: StateCheckpoint | None = None
+    best_checkpoint: StateCheckpoint | None = None
     repair_frontiers: dict[str, RepairFrontier] = field(default_factory=dict)
     challenge_attempts: dict[str, int] = field(default_factory=dict)
     transition_counts: dict[str, int] = field(default_factory=dict)
@@ -580,8 +695,35 @@ class ReachAvoidState(SerializableRecord):
     atomic_obligations: dict[str, AtomicObligation] = field(default_factory=dict)
     atomic_evidence: dict[str, AtomicEvidence] = field(default_factory=dict)
     probe_registrations: dict[str, ProbeRegistration] = field(default_factory=dict)
-    consecutive_provisional_without_progress: int = 0
+    distinct_patch_hashes: set[str] = field(default_factory=set)
+    consecutive_evidence_limited_steps: int = 0
+    pending_frontier_keys: list[str] = field(default_factory=list)
+    locked_successes: list[str] = field(default_factory=list)
+    rejected_patch_hashes: set[str] = field(default_factory=set)
+    transition_history: list[TransitionCertificate] = field(default_factory=list)
     validation_backlog: dict[str, ValidationBacklogItem] = field(default_factory=dict)
+    # Incremental Reach--Avoid views.  They are rebuilt around the current
+    # cumulative diff and retained across checkpoints; the full GraphStack is
+    # still the executable challenge representation.
+    program_slice: Any | None = None
+    active_binding_graph: Any | None = None
+    target_recovery: Any | None = None
+
+    @property
+    def repair_revision_count(self) -> int:
+        return self.revision_count
+
+    @repair_revision_count.setter
+    def repair_revision_count(self, value: int) -> None:
+        self.revision_count = value
+
+    @property
+    def consecutive_provisional_without_progress(self) -> int:
+        return self.consecutive_evidence_limited_steps
+
+    @consecutive_provisional_without_progress.setter
+    def consecutive_provisional_without_progress(self, value: int) -> None:
+        self.consecutive_evidence_limited_steps = value
 
 
 @dataclass(frozen=True, slots=True)
@@ -616,10 +758,9 @@ class CheckpointRuntimeState(SerializableRecord):
     failure_history: dict[str, FailureHistory]
     generator_session: GeneratorSession
     current_repair_objective: RepairObjective | None
-    repair_revision_count: int
+    revision_count: int
     generator_attempt_count: int
     challenge_round_count: int
-    no_progress_generator_attempts: int
     frontier_attempts: dict[str, int]
     phase: ReachAvoidPhase
     termination_status: str | None
@@ -632,5 +773,16 @@ class CheckpointRuntimeState(SerializableRecord):
     atomic_obligations: dict[str, AtomicObligation] = field(default_factory=dict)
     atomic_evidence: dict[str, AtomicEvidence] = field(default_factory=dict)
     probe_registrations: dict[str, ProbeRegistration] = field(default_factory=dict)
-    consecutive_provisional_without_progress: int = 0
+    distinct_patch_hashes: set[str] = field(default_factory=set)
+    consecutive_evidence_limited_steps: int = 0
+    pending_frontier_keys: list[str] = field(default_factory=list)
+    locked_successes: list[str] = field(default_factory=list)
+    rejected_patch_hashes: set[str] = field(default_factory=set)
+    transition_history: list[TransitionCertificate] = field(default_factory=list)
     validation_backlog: dict[str, ValidationBacklogItem] = field(default_factory=dict)
+    safe_checkpoint_id: str | None = None
+    best_checkpoint_id: str | None = None
+    certified_checkpoint_id: str | None = None
+    program_slice: Any | None = None
+    active_binding_graph: Any | None = None
+    target_recovery: Any | None = None

@@ -36,6 +36,8 @@ def evaluate_reach(state: ReachAvoidState) -> ReachEvaluation:
         reasons.append("working patch is empty")
     if not checkpoint.evidence.mechanical_pass:
         reasons.append("mechanical checks are not passing")
+    if checkpoint.confirmed_regressions:
+        reasons.append("confirmed preservation or locked behavior regression remains")
     requirements = state.graph_stack.requirement_graph.leaves
     cells = _active_cells(state)
     bindings = state.graph_stack.binding_graph.units
