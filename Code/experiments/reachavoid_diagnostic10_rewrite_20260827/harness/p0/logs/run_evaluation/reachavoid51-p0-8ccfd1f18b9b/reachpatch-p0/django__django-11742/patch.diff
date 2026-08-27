@@ -1,0 +1,11 @@
+diff --git a/django/forms/fields.py b/django/forms/fields.py
+--- a/django/forms/fields.py
++++ b/django/forms/fields.py
+@@ -765,6 +765,7 @@
+     def __init__(self, *, choices=(), **kwargs):
+         super().__init__(**kwargs)
+         self.choices = choices
++        self.max_length = kwargs.get('max_length')
+ 
+     def __deepcopy__(self, memo):
+         result = super().__deepcopy__(memo)

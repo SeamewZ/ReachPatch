@@ -1,0 +1,281 @@
+{
+  "ambiguities": [],
+  "claims": [
+    {
+      "claim_id": "fallback-claim-629429975f6257db5717aab9",
+      "domain_constraints": [],
+      "evidence_spans": [
+        {
+          "end": 53,
+          "quote": "Point.vel() should calculate the velocity if possible",
+          "start": 0
+        }
+      ],
+      "exception_contract": null,
+      "expected_observation": {
+        "expected": null,
+        "kind": "RELATION_HOLDS"
+      },
+      "operation": "Point.vel",
+      "preconditions": [],
+      "preservation_contract": null,
+      "quantifier": "CONTRACT",
+      "role": "TARGET",
+      "target_symbols": [
+        "Point.vel"
+      ],
+      "unresolved_terms": [],
+      "variables": [],
+      "witness_ids": []
+    },
+    {
+      "claim_id": "fallback-claim-c21a7b70ae171f0e3224652a",
+      "domain_constraints": [],
+      "evidence_spans": [
+        {
+          "end": 2245,
+          "quote": "The expected result of the `Q.vel(A)` should be:",
+          "start": 2197
+        }
+      ],
+      "exception_contract": null,
+      "expected_observation": {
+        "expected": null,
+        "kind": "RELATION_HOLDS"
+      },
+      "operation": "Q.vel",
+      "preconditions": [],
+      "preservation_contract": null,
+      "quantifier": "CONTRACT",
+      "role": "TARGET",
+      "target_symbols": [
+        "Q.vel"
+      ],
+      "unresolved_terms": [],
+      "variables": [],
+      "witness_ids": []
+    },
+    {
+      "claim_id": "fallback-claim-e882c2af741a65bb05dd2286",
+      "domain_constraints": [],
+      "evidence_spans": [
+        {
+          "end": 2581,
+          "quote": "I think that this is possible. Maybe there is a reason it isn't implemented. But we should try to implement it because it is confusing why this works for orientations and not positions.",
+          "start": 2396
+        }
+      ],
+      "exception_contract": null,
+      "expected_observation": {
+        "expected": {
+          "exit_code": 0
+        },
+        "kind": "EXIT_ZERO"
+      },
+      "operation": "I",
+      "preconditions": [],
+      "preservation_contract": null,
+      "quantifier": "CONTRACT",
+      "role": "TARGET",
+      "target_symbols": [
+        "I"
+      ],
+      "unresolved_terms": [],
+      "variables": [],
+      "witness_ids": []
+    }
+  ],
+  "fallback_used": true,
+  "issue": "Point.vel() should calculate the velocity if possible\nIf you specify the orientation of two reference frames and then ask for the angular velocity between the two reference frames the angular velocity will be calculated. But if you try to do the same thing with velocities, this doesn't work. See below:\r\n\r\n```\r\nIn [1]: import sympy as sm                                                                               \r\n\r\nIn [2]: import sympy.physics.mechanics as me                                                             \r\n\r\nIn [3]: A = me.ReferenceFrame('A')                                                                       \r\n\r\nIn [5]: q = me.dynamicsymbols('q')                                                                       \r\n\r\nIn [6]: B = A.orientnew('B', 'Axis', (q, A.x))                                                           \r\n\r\nIn [7]: B.ang_vel_in(A)                                                                                  \r\nOut[7]: q'*A.x\r\n\r\nIn [9]: P = me.Point('P')                                                                                \r\n\r\nIn [10]: Q = me.Point('Q')                                                                               \r\n\r\nIn [11]: r = q*A.x + 2*q*A.y                                                                             \r\n\r\nIn [12]: Q.set_pos(P, r)                                                                                 \r\n\r\nIn [13]: Q.vel(A)                                                                                        \r\n---------------------------------------------------------------------------\r\nValueError                                Traceback (most recent call last)\r\n<ipython-input-13-0fc8041904cc> in <module>\r\n----> 1 Q.vel(A)\r\n\r\n~/miniconda3/lib/python3.6/site-packages/sympy/physics/vector/point.py in vel(self, frame)\r\n    453         if not (frame in self._vel_dict):\r\n    454             raise ValueError('Velocity of point ' + self.name + ' has not been'\r\n--> 455                              ' defined in ReferenceFrame ' + frame.name)\r\n    456         return self._vel_dict[frame]\r\n    457 \r\n\r\nValueError: Velocity of point Q has not been defined in ReferenceFrame A\r\n```\r\n\r\nThe expected result of the `Q.vel(A)` should be:\r\n\r\n```\r\nIn [14]: r.dt(A)                                                                                         \r\nOut[14]: q'*A.x + 2*q'*A.y\r\n```\r\n\r\nI think that this is possible. Maybe there is a reason it isn't implemented. But we should try to implement it because it is confusing why this works for orientations and not positions.\n\nPublic maintainer hints:\nHi @moorepants, I think I could fix this. It would be implemented as a part of `ReferenceFrame` in `sympy/physics/vector/frame.py`, right?\nNo, it is part of Point. There are some nuances here and likely not a trivial PR to tackle. I'd recommend some simpler ones first if you are new to sympy and dynamics.\nSure, understood. Thank you @moorepants .\n> No, it is part of Point. There are some nuances here and likely not a trivial PR to tackle. I'd recommend some simpler ones first if you are new to sympy and dynamics.\r\n\r\nI would like to work on this issue.\r\n\nThe current Point.vel() returns velocity already defined in a reference frame , it doesn't calculate velocity between two points , so it would require a new function to calculate velocity between two points this would make it fully automatic.\r\n\r\nSo I propose , a change in vel() function to set  velocity of particle from r and a new function to which calculates and returns velocity by calculating displacement vector , this function wouldn't set the velocity of particle but would return it on being called.\nThe idea is that if there is sufficient information about the relative position of points, that Point.vel() can determine there is sufficient information and calculate the velocity. You should study how ReferenceFrame does this with ang_vel().\n> The idea is that if there is sufficient information about the relative position of points, that Point.vel() can determine there is sufficient information and calculate the velocity. You should study how ReferenceFrame does this with ang_vel().\n\nOkay on it!!\n",
+  "raw_tool_arguments": {
+    "ambiguities": [
+      {
+        "source": "issue",
+        "text": "The exact algorithm for determining 'sufficient information' about relative positions of points is not fully specified in the issue. It references studying ReferenceFrame.ang_vel() as a model, but the precise conditions under which Point.vel() can compute velocity from position data are not enumerated."
+      },
+      {
+        "source": "issue",
+        "text": "It is unclear whether the new function that calculates velocity from displacement vector should be a public API method or an internal helper, and what its exact name and signature should be."
+      },
+      {
+        "source": "issue",
+        "text": "The behavior when there is insufficient information (e.g., when position is not fully defined) is not specified - whether it should raise an error, return None, or fall back to the current behavior of raising ValueError."
+      }
+    ],
+    "claims": [
+      {
+        "category": "feature",
+        "claim_type": "behavior",
+        "notes": "The issue requests that Point.vel() be enhanced to calculate velocity from position information when sufficient information exists, similar to how ReferenceFrame.ang_vel() works for orientations.",
+        "original_stmt": "Point.vel() should calculate the velocity if possible. If the relative position of points is sufficiently defined, Point.vel() should determine there is sufficient information and calculate the velocity."
+      },
+      {
+        "category": "feature",
+        "claim_type": "behavior",
+        "notes": "The proposed implementation approach: modify vel() to compute velocity from relative position when possible, and add a new function that calculates and returns velocity from displacement vector without caching/setting it.",
+        "original_stmt": "The current Point.vel() returns velocity already defined in a reference frame; it doesn't calculate velocity between two points. A change is proposed to vel() to set velocity of particle from r, and a new function to calculate and return velocity by calculating displacement vector without setting the velocity."
+      },
+      {
+        "category": "design",
+        "claim_type": "behavior",
+        "notes": "Maintainer explicitly stated the fix is part of Point in sympy/physics/vector/point.py, not in frame.py.",
+        "original_stmt": "The implementation should be part of Point, not ReferenceFrame."
+      },
+      {
+        "category": "design",
+        "claim_type": "behavior",
+        "notes": "Maintainer guidance: study ReferenceFrame.ang_vel() mechanism for determining sufficiency of information and calculating the result.",
+        "original_stmt": "The implementation should study how ReferenceFrame does this with ang_vel() to determine if there is sufficient information to calculate the velocity."
+      }
+    ],
+    "witnesses": [
+      {
+        "source": "issue",
+        "text": "Point.vel() should calculate the velocity if possible. If you specify the orientation of two reference frames and then ask for the angular velocity between the two reference frames the angular velocity will be calculated. But if you try to do the same thing with velocities, this doesn't work."
+      },
+      {
+        "source": "issue",
+        "text": "The expected result of the Q.vel(A) should be: r.dt(A) = q'*A.x + 2*q'*A.y"
+      },
+      {
+        "source": "issue",
+        "text": "No, it is part of Point. There are some nuances here and likely not a trivial PR to tackle."
+      },
+      {
+        "source": "issue",
+        "text": "The current Point.vel() returns velocity already defined in a reference frame, it doesn't calculate velocity between two points, so it would require a new function to calculate velocity between two points this would make it fully automatic."
+      },
+      {
+        "source": "issue",
+        "text": "So I propose, a change in vel() function to set velocity of particle from r and a new function to which calculates and returns velocity by calculating displacement vector, this function wouldn't set the velocity of particle but would return it on being called."
+      },
+      {
+        "source": "issue",
+        "text": "The idea is that if there is sufficient information about the relative position of points, that Point.vel() can determine there is sufficient information and calculate the velocity. You should study how ReferenceFrame does this with ang_vel()."
+      }
+    ]
+  },
+  "validation_rejections": [
+    {
+      "claim": {
+        "category": "feature",
+        "claim_type": "behavior",
+        "notes": "The issue requests that Point.vel() be enhanced to calculate velocity from position information when sufficient information exists, similar to how ReferenceFrame.ang_vel() works for orientations.",
+        "original_stmt": "Point.vel() should calculate the velocity if possible. If the relative position of points is sufficiently defined, Point.vel() should determine there is sufficient information and calculate the velocity."
+      },
+      "errors": [
+        "claim operation is empty"
+      ]
+    },
+    {
+      "claim": {
+        "category": "feature",
+        "claim_type": "behavior",
+        "notes": "The proposed implementation approach: modify vel() to compute velocity from relative position when possible, and add a new function that calculates and returns velocity from displacement vector without caching/setting it.",
+        "original_stmt": "The current Point.vel() returns velocity already defined in a reference frame; it doesn't calculate velocity between two points. A change is proposed to vel() to set velocity of particle from r, and a new function to calculate and return velocity by calculating displacement vector without setting the velocity."
+      },
+      "errors": [
+        "claim operation is empty"
+      ]
+    },
+    {
+      "claim": {
+        "category": "design",
+        "claim_type": "behavior",
+        "notes": "Maintainer explicitly stated the fix is part of Point in sympy/physics/vector/point.py, not in frame.py.",
+        "original_stmt": "The implementation should be part of Point, not ReferenceFrame."
+      },
+      "errors": [
+        "claim operation is empty"
+      ]
+    },
+    {
+      "claim": {
+        "category": "design",
+        "claim_type": "behavior",
+        "notes": "Maintainer guidance: study ReferenceFrame.ang_vel() mechanism for determining sufficiency of information and calculating the result.",
+        "original_stmt": "The implementation should study how ReferenceFrame does this with ang_vel() to determine if there is sufficient information to calculate the velocity."
+      },
+      "errors": [
+        "claim operation is empty"
+      ]
+    }
+  ],
+  "witnesses": [
+    {
+      "authority": "PROVISIONAL",
+      "derivation": [
+        "validated fenced Python witness from evidence-99cc5f0309d29a1978059d35",
+        "target call is vel",
+        "traceback lines were excluded from the expected observation"
+      ],
+      "evidence_id": "evidence-99cc5f0309d29a1978059d35",
+      "expected": {
+        "exit_code": 0,
+        "stdout": "---------------------------------------------------------------------------\nValueError                                Traceback (most recent call last)\n<ipython-input-13-0fc8041904cc> in <module>\n----> 1 Q.vel(A)\n\n~/miniconda3/lib/python3.6/site-packages/sympy/physics/vector/point.py in vel(self, frame)\n    453         if not (frame in self._vel_dict):\n    454             raise ValueError('Velocity of point ' + self.name + ' has not been'\n--> 455                              ' defined in ReferenceFrame ' + frame.name)\n    456         return self._vel_dict[frame]\n    457 \n\nValueError: Velocity of point Q has not been defined in ReferenceFrame A\n"
+      },
+      "expected_relation": "issue witness completes with the displayed stdout",
+      "language": "python",
+      "operation": "vel",
+      "script": "import sympy as sm\nimport sympy.physics.mechanics as me\nA = me.ReferenceFrame('A')\nq = me.dynamicsymbols('q')\nB = A.orientnew('B', 'Axis', (q, A.x))\nP = me.Point('P')\nQ = me.Point('Q')\nr = q * A.x + 2 * q * A.y\nimport builtins\ngetattr(builtins, '__reachpatch_trace_reset__', lambda: None)()\nexec(compile('Q.vel(A)', '<reachpatch-issue-witness>', 'single'))\n",
+      "target_expression": "Q.vel(A)",
+      "witness_id": "witness-0b11ab8d4b9b129b036db86a"
+    },
+    {
+      "authority": "PROVISIONAL",
+      "derivation": [
+        "validated fenced Python witness from evidence-99cc5f0309d29a1978059d35",
+        "target call is set_pos",
+        "traceback lines were excluded from the expected observation"
+      ],
+      "evidence_id": "evidence-99cc5f0309d29a1978059d35",
+      "expected": {
+        "exit_code": 0
+      },
+      "expected_relation": "issue witness completes successfully",
+      "language": "python",
+      "operation": "set_pos",
+      "script": "import sympy as sm\nimport sympy.physics.mechanics as me\nA = me.ReferenceFrame('A')\nq = me.dynamicsymbols('q')\nB = A.orientnew('B', 'Axis', (q, A.x))\nP = me.Point('P')\nQ = me.Point('Q')\nr = q * A.x + 2 * q * A.y\nimport builtins\ngetattr(builtins, '__reachpatch_trace_reset__', lambda: None)()\nexec(compile('Q.set_pos(P, r)', '<reachpatch-issue-witness>', 'single'))\n",
+      "target_expression": "Q.set_pos(P, r)",
+      "witness_id": "witness-0e2e9c7f3f4db0b42149e63f"
+    },
+    {
+      "authority": "PROVISIONAL",
+      "derivation": [
+        "validated fenced Python witness from evidence-99cc5f0309d29a1978059d35",
+        "target call is ang_vel_in",
+        "traceback lines were excluded from the expected observation"
+      ],
+      "evidence_id": "evidence-99cc5f0309d29a1978059d35",
+      "expected": {
+        "exit_code": 0,
+        "stdout": "q'*A.x\n"
+      },
+      "expected_relation": "issue witness completes with the displayed stdout",
+      "language": "python",
+      "operation": "ang_vel_in",
+      "script": "import sympy as sm\nimport sympy.physics.mechanics as me\nA = me.ReferenceFrame('A')\nq = me.dynamicsymbols('q')\nB = A.orientnew('B', 'Axis', (q, A.x))\nimport builtins\ngetattr(builtins, '__reachpatch_trace_reset__', lambda: None)()\nexec(compile('B.ang_vel_in(A)', '<reachpatch-issue-witness>', 'single'))\n",
+      "target_expression": "B.ang_vel_in(A)",
+      "witness_id": "witness-219050a5c94b2b16e10b51ab"
+    },
+    {
+      "authority": "B",
+      "derivation": [
+        "validated fenced Python witness from evidence-99cc5f0309d29a1978059d35",
+        "target call is dt",
+        "traceback lines were excluded from the expected observation"
+      ],
+      "evidence_id": "evidence-99cc5f0309d29a1978059d35",
+      "expected": {
+        "exit_code": 0,
+        "stdout": "q'*A.x + 2*q'*A.y\n"
+      },
+      "expected_relation": "issue witness completes with the displayed stdout",
+      "language": "python",
+      "operation": "dt",
+      "script": "import builtins\ngetattr(builtins, '__reachpatch_trace_reset__', lambda: None)()\nexec(compile('r.dt(A)', '<reachpatch-issue-witness>', 'single'))\n",
+      "target_expression": "r.dt(A)",
+      "witness_id": "witness-2abbdb7a216ef0dea436f424"
+    }
+  ]
+}

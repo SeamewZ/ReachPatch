@@ -1,0 +1,293 @@
+{
+  "ambiguities": [],
+  "claims": [
+    {
+      "claim_id": "fallback-claim-e6c444d03aae794a78ee57ca",
+      "domain_constraints": [],
+      "evidence_spans": [
+        {
+          "end": 884,
+          "quote": "\treturn self.cursor.execute(sql, params)",
+          "start": 844
+        }
+      ],
+      "exception_contract": null,
+      "expected_observation": {
+        "expected": null,
+        "kind": "RELATION_HOLDS"
+      },
+      "operation": "self.cursor.execute",
+      "preconditions": [],
+      "preservation_contract": null,
+      "quantifier": "CONTRACT",
+      "role": "TARGET",
+      "target_symbols": [
+        "self.cursor.execute"
+      ],
+      "unresolved_terms": [],
+      "variables": [],
+      "witness_ids": []
+    },
+    {
+      "claim_id": "fallback-claim-3cbdca5ff31131421b50f481",
+      "domain_constraints": [],
+      "evidence_spans": [
+        {
+          "end": 1473,
+          "quote": "\treturn self._execute_with_wrappers(sql, params, many=False, executor=self._execute)",
+          "start": 1389
+        }
+      ],
+      "exception_contract": null,
+      "expected_observation": {
+        "expected": null,
+        "kind": "RELATION_HOLDS"
+      },
+      "operation": "self._execute_with_wrappers",
+      "preconditions": [],
+      "preservation_contract": null,
+      "quantifier": "CONTRACT",
+      "role": "TARGET",
+      "target_symbols": [
+        "self._execute_with_wrappers"
+      ],
+      "unresolved_terms": [],
+      "variables": [],
+      "witness_ids": []
+    },
+    {
+      "claim_id": "fallback-claim-8528f08bbb85122021821dbd",
+      "domain_constraints": [],
+      "evidence_spans": [
+        {
+          "end": 1629,
+          "quote": "\treturn executor(sql, params, many, context)",
+          "start": 1585
+        }
+      ],
+      "exception_contract": null,
+      "expected_observation": {
+        "expected": null,
+        "kind": "RELATION_HOLDS"
+      },
+      "operation": "executor",
+      "preconditions": [],
+      "preservation_contract": null,
+      "quantifier": "CONTRACT",
+      "role": "TARGET",
+      "target_symbols": [
+        "executor"
+      ],
+      "unresolved_terms": [],
+      "variables": [],
+      "witness_ids": []
+    },
+    {
+      "claim_id": "fallback-claim-e6c444d03aae794a78ee57ca",
+      "domain_constraints": [],
+      "evidence_spans": [
+        {
+          "end": 1767,
+          "quote": "\treturn self.cursor.execute(sql, params)",
+          "start": 1727
+        }
+      ],
+      "exception_contract": null,
+      "expected_observation": {
+        "expected": null,
+        "kind": "RELATION_HOLDS"
+      },
+      "operation": "self.cursor.execute",
+      "preconditions": [],
+      "preservation_contract": null,
+      "quantifier": "CONTRACT",
+      "role": "TARGET",
+      "target_symbols": [
+        "self.cursor.execute"
+      ],
+      "unresolved_terms": [],
+      "variables": [],
+      "witness_ids": []
+    },
+    {
+      "claim_id": "fallback-claim-08c3b3e9f375b9a857e53081",
+      "domain_constraints": [],
+      "evidence_spans": [
+        {
+          "end": 1916,
+          "quote": "\traise dj_exc_value.with_traceback(traceback) from exc_value",
+          "start": 1856
+        }
+      ],
+      "exception_contract": null,
+      "expected_observation": {
+        "expected": true,
+        "kind": "RAISES"
+      },
+      "operation": "dj_exc_value.with_traceback",
+      "preconditions": [],
+      "preservation_contract": null,
+      "quantifier": "CONTRACT",
+      "role": "TARGET",
+      "target_symbols": [
+        "dj_exc_value.with_traceback"
+      ],
+      "unresolved_terms": [],
+      "variables": [],
+      "witness_ids": []
+    },
+    {
+      "claim_id": "fallback-claim-e6c444d03aae794a78ee57ca",
+      "domain_constraints": [],
+      "evidence_spans": [
+        {
+          "end": 2054,
+          "quote": "\treturn self.cursor.execute(sql, params)",
+          "start": 2014
+        }
+      ],
+      "exception_contract": null,
+      "expected_observation": {
+        "expected": null,
+        "kind": "RELATION_HOLDS"
+      },
+      "operation": "self.cursor.execute",
+      "preconditions": [],
+      "preservation_contract": null,
+      "quantifier": "CONTRACT",
+      "role": "TARGET",
+      "target_symbols": [
+        "self.cursor.execute"
+      ],
+      "unresolved_terms": [],
+      "variables": [],
+      "witness_ids": []
+    }
+  ],
+  "fallback_used": true,
+  "issue": "Test runner setup_databases crashes with \"TEST\": {\"MIGRATE\": False}.\nDescription\n\t\nI'm trying to upgrade a project from Django 3.0 to Django 3.1 and wanted to try out the new \"TEST\": {\"MIGRATE\": False} database setting.\nSadly I'm running into an issue immediately when running ./manage.py test.\nRemoving the \"TEST\": {\"MIGRATE\": False} line allows the tests to run. So this is not blocking the upgrade for us, but it would be nice if we were able to use the new feature to skip migrations during testing.\nFor reference, this project was recently upgraded from Django 1.4 all the way to 3.0 so there might be some legacy cruft somewhere that triggers this.\nHere's the trackeback. I'll try to debug this some more.\nTraceback (most recent call last):\n File \"/usr/local/lib/python3.6/site-packages/django/db/backends/utils.py\", line 84, in _execute\n\treturn self.cursor.execute(sql, params)\npsycopg2.errors.UndefinedTable: relation \"django_admin_log\" does not exist\nLINE 1: ...n_flag\", \"django_admin_log\".\"change_message\" FROM \"django_ad...\n\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t ^\nThe above exception was the direct cause of the following exception:\nTraceback (most recent call last):\n File \"/usr/local/lib/python3.6/site-packages/django/db/models/sql/compiler.py\", line 1156, in execute_sql\n\tcursor.execute(sql, params)\n File \"/usr/local/lib/python3.6/site-packages/django/db/backends/utils.py\", line 66, in execute\n\treturn self._execute_with_wrappers(sql, params, many=False, executor=self._execute)\n File \"/usr/local/lib/python3.6/site-packages/django/db/backends/utils.py\", line 75, in _execute_with_wrappers\n\treturn executor(sql, params, many, context)\n File \"/usr/local/lib/python3.6/site-packages/django/db/backends/utils.py\", line 84, in _execute\n\treturn self.cursor.execute(sql, params)\n File \"/usr/local/lib/python3.6/site-packages/django/db/utils.py\", line 90, in __exit__\n\traise dj_exc_value.with_traceback(traceback) from exc_value\n File \"/usr/local/lib/python3.6/site-packages/django/db/backends/utils.py\", line 84, in _execute\n\treturn self.cursor.execute(sql, params)\ndjango.db.utils.ProgrammingError: relation \"django_admin_log\" does not exist\nLINE 1: ...n_flag\", \"django_admin_log\".\"change_message\" FROM \"django_ad...\n\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t ^\nDuring handling of the above exception, another exception occurred:\nTraceback (most recent call last):\n File \"./manage.py\", line 15, in <module>\n\tmain()\n File \"./manage.py\", line 11, in main\n\texecute_from_command_line(sys.argv)\n File \"/usr/local/lib/python3.6/site-packages/django/core/management/__init__.py\", line 401, in execute_from_command_line\n\tutility.execute()\n File \"/usr/local/lib/python3.6/site-packages/django/core/management/__init__.py\", line 395, in execute\n\tself.fetch_command(subcommand).run_from_argv(self.argv)\n File \"/usr/local/lib/python3.6/site-packages/django/core/management/commands/test.py\", line 23, in run_from_argv\n\tsuper().run_from_argv(argv)\n File \"/usr/local/lib/python3.6/site-packages/django/core/management/base.py\", line 330, in run_from_argv\n\tself.execute(*args, **cmd_options)\n File \"/usr/local/lib/python3.6/site-packages/django/core/management/base.py\", line 371, in execute\n\toutput = self.handle(*args, **options)\n File \"/usr/local/lib/python3.6/site-packages/django/core/management/commands/test.py\", line 53, in handle\n\tfailures = test_runner.run_tests(test_labels)\n File \"/usr/local/lib/python3.6/site-packages/django/test/runner.py\", line 695, in run_tests\n\told_config = self.setup_databases(aliases=databases)\n File \"/usr/local/lib/python3.6/site-packages/django/test/runner.py\", line 616, in setup_databases\n\tself.parallel, **kwargs\n File \"/usr/local/lib/python3.6/site-packages/django/test/utils.py\", line 174, in setup_databases\n\tserialize=connection.settings_dict['TEST'].get('SERIALIZE', True),\n File \"/usr/local/lib/python3.6/site-packages/django/db/backends/base/creation.py\", line 78, in create_test_db\n\tself.connection._test_serialized_contents = self.serialize_db_to_string()\n File \"/usr/local/lib/python3.6/site-packages/django/db/backends/base/creation.py\", line 121, in serialize_db_to_string\n\tserializers.serialize(\"json\", get_objects(), indent=None, stream=out)\n File \"/usr/local/lib/python3.6/site-packages/django/core/serializers/__init__.py\", line 128, in serialize\n\ts.serialize(queryset, **options)\n File \"/usr/local/lib/python3.6/site-packages/django/core/serializers/base.py\", line 90, in serialize\n\tfor count, obj in enumerate(queryset, start=1):\n File \"/usr/local/lib/python3.6/site-packages/django/db/backends/base/creation.py\", line 118, in get_objects\n\tyield from queryset.iterator()\n File \"/usr/local/lib/python3.6/site-packages/django/db/models/query.py\", line 360, in _iterator\n\tyield from self._iterable_class(self, chunked_fetch=use_chunked_fetch, chunk_size=chunk_size)\n File \"/usr/local/lib/python3.6/site-packages/django/db/models/query.py\", line 53, in __iter__\n\tresults = compiler.execute_sql(chunked_fetch=self.chunked_fetch, chunk_size=self.chunk_size)\n File \"/usr/local/lib/python3.6/site-packages/django/db/models/sql/compiler.py\", line 1159, in execute_sql\n\tcursor.close()\npsycopg2.errors.InvalidCursorName: cursor \"_django_curs_139860821038912_sync_1\" does not exist\n\nPublic maintainer hints:\nThanks for this report, now I see that we need to synchronize all apps when MIGRATE is False, see comment. I've totally missed this when reviewing f5ebdfce5c417f9844e86bccc2f12577064d4bad. We can remove the feature from 3.1 if fix is not trivial.\nMocking settings.MIGRATION_MODULES to None for all apps sounds like an easier fix, see draft below: diff --git a/django/db/backends/base/creation.py b/django/db/backends/base/creation.py index 503f7f56fd..3c0338d359 100644 --- a/django/db/backends/base/creation.py +++ b/django/db/backends/base/creation.py @@ -69,6 +69,22 @@ class BaseDatabaseCreation: database=self.connection.alias, run_syncdb=True, ) + else: + try: + old = settings.MIGRATION_MODULES + settings.MIGRATION_MODULES = { + app.label: None + for app in apps.get_app_configs() + } + call_command( + 'migrate', + verbosity=max(verbosity - 1, 0), + interactive=False, + database=self.connection.alias, + run_syncdb=True, + ) + finally: + settings.MIGRATION_MODULES = old # We then serialize the current state of the database into a string # and store it on the connection. This slightly horrific process is so people but I'm not convinced.\nThat seems similar to the solution I've been using for a while: class NoMigrations: \"\"\"Disable migrations for all apps\"\"\" def __getitem__(self, item): return None def __contains__(self, item): return True MIGRATION_MODULES = NoMigrations() (Which I also suggested it as a temporary solution in the original ticket https://code.djangoproject.com/ticket/25388#comment:20) I hadn't actually tried this MIGRATION_MODULES override on this project before. I just did a test run with the override and or some reason I had to add a fixtures = ['myapp/initial_data.json'] line to some of the TestCase classes that worked fine without it before. It seems that these test cases really needed this fixture, but for some reason worked fine when migrations are enabled. Is (test) fixture loading somehow tied to migrations? Anyway, the tests work fine (the same 3 failures) with the MIGRATION_MODULES override, so it seems like it would be a reasonable alternative solution.\nIs (test) fixture loading somehow tied to migrations? I don't think so, you've probably have these data somewhere is migrations.\n",
+  "raw_tool_arguments": {
+    "ambiguities": [
+      {
+        "evidence": "The maintainer says 'I'm not convinced' about the draft fix, suggesting the solution may not be final.",
+        "question": "Is the proposed fix (setting MIGRATION_MODULES to None for all apps and running migrate with run_syncdb=True) the final accepted solution, or was a different approach ultimately merged?"
+      },
+      {
+        "evidence": "The maintainer states 'We can remove the feature from 3.1 if fix is not trivial.'",
+        "question": "Was the TEST.MIGRATE=False feature ultimately kept in Django 3.1 or removed?"
+      }
+    ],
+    "claims": [
+      {
+        "claim": "When TEST.MIGRATE is False, the test database setup must synchronize all apps (run syncdb) instead of skipping database creation entirely, because otherwise tables like django_admin_log do not exist and serialization fails.",
+        "evidence": [
+          "Traceback shows relation \"django_admin_log\" does not exist when TEST.MIGRATE is False",
+          "Maintainer hint: 'we need to synchronize all apps when MIGRATE is False'",
+          "Draft fix adds an else branch calling migrate with run_syncdb=True when MIGRATE is False"
+        ]
+      },
+      {
+        "claim": "The proposed fix for the MIGRATE=False crash is to set settings.MIGRATION_MODULES to None for all apps and run migrate with run_syncdb=True in the else branch of create_test_db.",
+        "evidence": [
+          "Maintainer hint: 'Mocking settings.MIGRATION_MODULES to None for all apps sounds like an easier fix'",
+          "Draft diff shows setting settings.MIGRATION_MODULES to {app.label: None for app in apps.get_app_configs()} and calling migrate with run_syncdb=True"
+        ]
+      },
+      {
+        "claim": "The MIGRATION_MODULES override approach (setting MIGRATION_MODULES to a mapping that returns None for all apps) is a viable workaround that allows tests to run when TEST.MIGRATE is False.",
+        "evidence": [
+          "User reports: 'the tests work fine (the same 3 failures) with the MIGRATION_MODULES override'",
+          "User's NoMigrations class returns None for all items and contains all items"
+        ]
+      },
+      {
+        "claim": "Test fixture loading is not tied to migrations; the need for fixtures when using MIGRATION_MODULES override is because the data was previously provided by migrations.",
+        "evidence": [
+          "Maintainer response: 'I don't think so, you've probably have these data somewhere is migrations.'"
+        ]
+      },
+      {
+        "claim": "The feature TEST.MIGRATE=False may be removed from Django 3.1 if the fix is not trivial.",
+        "evidence": [
+          "Maintainer hint: 'We can remove the feature from 3.1 if fix is not trivial.'"
+        ]
+      }
+    ],
+    "witnesses": [
+      {
+        "description": "User upgrading from Django 3.0 to 3.1 reporting crash with TEST.MIGRATE=False",
+        "role": "reporter"
+      },
+      {
+        "description": "Django maintainer acknowledging the bug and proposing a fix",
+        "role": "maintainer"
+      },
+      {
+        "description": "Second maintainer confirming fixture loading is not tied to migrations",
+        "role": "maintainer2"
+      }
+    ]
+  },
+  "validation_rejections": [
+    {
+      "claim": {
+        "claim": "When TEST.MIGRATE is False, the test database setup must synchronize all apps (run syncdb) instead of skipping database creation entirely, because otherwise tables like django_admin_log do not exist and serialization fails.",
+        "evidence": [
+          "Traceback shows relation \"django_admin_log\" does not exist when TEST.MIGRATE is False",
+          "Maintainer hint: 'we need to synchronize all apps when MIGRATE is False'",
+          "Draft fix adds an else branch calling migrate with run_syncdb=True when MIGRATE is False"
+        ]
+      },
+      "errors": [
+        "claim operation is empty"
+      ]
+    },
+    {
+      "claim": {
+        "claim": "The proposed fix for the MIGRATE=False crash is to set settings.MIGRATION_MODULES to None for all apps and run migrate with run_syncdb=True in the else branch of create_test_db.",
+        "evidence": [
+          "Maintainer hint: 'Mocking settings.MIGRATION_MODULES to None for all apps sounds like an easier fix'",
+          "Draft diff shows setting settings.MIGRATION_MODULES to {app.label: None for app in apps.get_app_configs()} and calling migrate with run_syncdb=True"
+        ]
+      },
+      "errors": [
+        "claim operation is empty"
+      ]
+    },
+    {
+      "claim": {
+        "claim": "The MIGRATION_MODULES override approach (setting MIGRATION_MODULES to a mapping that returns None for all apps) is a viable workaround that allows tests to run when TEST.MIGRATE is False.",
+        "evidence": [
+          "User reports: 'the tests work fine (the same 3 failures) with the MIGRATION_MODULES override'",
+          "User's NoMigrations class returns None for all items and contains all items"
+        ]
+      },
+      "errors": [
+        "claim operation is empty"
+      ]
+    },
+    {
+      "claim": {
+        "claim": "Test fixture loading is not tied to migrations; the need for fixtures when using MIGRATION_MODULES override is because the data was previously provided by migrations.",
+        "evidence": [
+          "Maintainer response: 'I don't think so, you've probably have these data somewhere is migrations.'"
+        ]
+      },
+      "errors": [
+        "claim operation is empty"
+      ]
+    },
+    {
+      "claim": {
+        "claim": "The feature TEST.MIGRATE=False may be removed from Django 3.1 if the fix is not trivial.",
+        "evidence": [
+          "Maintainer hint: 'We can remove the feature from 3.1 if fix is not trivial.'"
+        ]
+      },
+      "errors": [
+        "claim operation is empty"
+      ]
+    }
+  ],
+  "witnesses": []
+}

@@ -1,0 +1,14 @@
+diff --git a/sphinx/application.py b/sphinx/application.py
+--- a/sphinx/application.py
++++ b/sphinx/application.py
+@@ -954,6 +954,10 @@
+         if hasattr(self.builder, 'add_js_file'):
+             self.builder.add_js_file(filename, **kwargs)  # type: ignore
+ 
++    def add_js_file_extra(self, filename: str, **kwargs: str) -> None:
++        """Register a JavaScript file to include in the HTML output."""
++        self.add_js_file(filename, **kwargs)
++
+     def add_css_file(self, filename: str, **kwargs: str) -> None:
+         """Register a stylesheet to include in the HTML output.
+ 

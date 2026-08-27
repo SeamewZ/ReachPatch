@@ -1,0 +1,21 @@
+/home/slt/miniconda3/lib/python3.12/site-packages/requests/__init__.py:113: RequestsDependencyWarning: urllib3 (2.2.3) or chardet (7.4.3)/charset_normalizer (3.3.2) doesn't match a supported version!
+  warnings.warn(
+2026-08-27 17:29:22,035 - datasets - INFO - PyTorch version 2.6.0 available.
+<frozen runpy>:128: RuntimeWarning: 'swebench.harness.run_evaluation' found in sys.modules after import of package 'swebench.harness', but prior to execution of 'swebench.harness.run_evaluation'; this may result in unpredictable behaviour
+Found 8 existing instance images. Will reuse them.
+Running 8 instances...
+  0%|          | 0/8 [00:00<?, ?it/s] 12%|█▎        | 1/8 [01:05<07:35, 65.07s/it]1 ran successfully, 0 failed:  12%|█▎        | 1/8 [01:05<07:35, 65.07s/it]1 ran successfully, 0 failed:  25%|██▌       | 2/8 [01:06<03:19, 33.28s/it]2 ran successfully, 0 failed:  25%|██▌       | 2/8 [01:06<03:19, 33.28s/it]2 ran successfully, 0 failed:  38%|███▊      | 3/8 [02:02<03:24, 40.91s/it]3 ran successfully, 0 failed:  38%|███▊      | 3/8 [02:02<03:24, 40.91s/it]3 ran successfully, 0 failed:  50%|█████     | 4/8 [02:04<02:04, 31.04s/it]4 ran successfully, 0 failed:  50%|█████     | 4/8 [02:04<02:04, 31.04s/it]4 ran successfully, 0 failed:  62%|██████▎   | 5/8 [02:51<01:42, 34.28s/it]5 ran successfully, 0 failed:  62%|██████▎   | 5/8 [02:51<01:42, 34.28s/it]5 ran successfully, 0 failed:  75%|███████▌  | 6/8 [02:54<00:58, 29.13s/it]6 ran successfully, 0 failed:  75%|███████▌  | 6/8 [02:54<00:58, 29.13s/it]6 ran successfully, 0 failed:  88%|████████▊ | 7/8 [03:37<00:31, 31.07s/it]7 ran successfully, 0 failed:  88%|████████▊ | 7/8 [03:37<00:31, 31.07s/it]7 ran successfully, 0 failed: 100%|██████████| 8/8 [03:40<00:00, 27.52s/it]8 ran successfully, 0 failed: 100%|██████████| 8/8 [03:40<00:00, 27.52s/it]8 ran successfully, 0 failed: 100%|██████████| 8/8 [03:40<00:00, 27.52s/it]
+All instances run.
+Cleaning cached images...
+Removed 0 images.
+Total instances: 10
+Instances submitted: 10
+Instances completed: 8
+Instances incomplete: 0
+Instances resolved: 3
+Instances unresolved: 5
+Instances with empty patches: 2
+Instances with errors: 0
+Unstopped containers: 0
+Unremoved images: 0
+Report written to reachpatch-p0.reachavoid51-p0-8ccfd1f18b9b.json

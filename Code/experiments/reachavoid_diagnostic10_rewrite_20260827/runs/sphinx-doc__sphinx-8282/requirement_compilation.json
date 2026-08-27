@@ -1,0 +1,100 @@
+{
+  "ambiguities": [],
+  "claims": [
+    {
+      "claim_id": "fallback-claim-9428af6c0954f6d12b57d75c",
+      "domain_constraints": [],
+      "evidence_spans": [
+        {
+          "end": 511,
+          "quote": "**Expected behavior**",
+          "start": 490
+        }
+      ],
+      "exception_contract": null,
+      "expected_observation": {
+        "expected": null,
+        "kind": "RELATION_HOLDS"
+      },
+      "operation": "Expected",
+      "preconditions": [],
+      "preservation_contract": null,
+      "quantifier": "CONTRACT",
+      "role": "TARGET",
+      "target_symbols": [
+        "Expected"
+      ],
+      "unresolved_terms": [],
+      "variables": [],
+      "witness_ids": []
+    }
+  ],
+  "fallback_used": true,
+  "issue": "autodoc_typehints does not effect to overloaded callables\n**Describe the bug**\r\nautodoc_typehints does not effect to overloaded callables.\r\n\r\n**To Reproduce**\r\n\r\n```\r\n# in conf.py\r\nautodoc_typehints = 'none'\r\n```\r\n```\r\n# in index.rst\r\n.. automodule:: example\r\n   :members:\r\n   :undoc-members:\r\n```\r\n```\r\n# in example.py\r\nfrom typing import overload\r\n\r\n\r\n@overload\r\ndef foo(x: int) -> int:\r\n    ...\r\n\r\n\r\n@overload\r\ndef foo(x: float) -> float:\r\n    ...\r\n\r\n\r\ndef foo(x):\r\n    return x\r\n```\r\n\r\n**Expected behavior**\r\nAll typehints for overloaded callables are obeyed `autodoc_typehints` setting.\r\n\r\n**Your project**\r\nNo\r\n\r\n**Screenshots**\r\nNo\r\n\r\n**Environment info**\r\n- OS: Mac\r\n- Python version: 3.8.2\r\n- Sphinx version: 3.1.0dev\r\n- Sphinx extensions: sphinx.ext.autodoc\r\n- Extra tools: No\r\n\r\n**Additional context**\r\nNo\n",
+  "raw_tool_arguments": {
+    "ambiguities": [
+      {
+        "ambiguity": "The bug report does not specify whether the fix should apply to all autodoc_typehints values (e.g., 'none', 'description', 'signature', 'both') or only to the 'none' value.",
+        "evidence": "The report only demonstrates the issue with autodoc_typehints = 'none', but the expected behavior statement says 'All typehints for overloaded callables are obeyed autodoc_typehints setting', which could imply all values should work correctly."
+      },
+      {
+        "ambiguity": "The bug report does not clarify whether the issue affects only the signature display or also the description/documentation of the overloaded callables.",
+        "evidence": "The report shows a minimal reproduction but does not specify which part of the documentation output is incorrect (signature vs. description)."
+      }
+    ],
+    "claims": [
+      {
+        "claim": "When autodoc_typehints is set to 'none', type hints for overloaded callables should also be suppressed, consistent with non-overloaded callables.",
+        "evidence": "The bug report states that autodoc_typehints does not affect overloaded callables, and the expected behavior is that all typehints for overloaded callables are obeyed by the autodoc_typehints setting."
+      },
+      {
+        "claim": "The autodoc_typehints configuration setting should apply uniformly to both overloaded and non-overloaded callables.",
+        "evidence": "The bug report explicitly states 'All typehints for overloaded callables are obeyed autodoc_typehints setting' as the expected behavior, implying the setting should have the same effect on overloaded callables as it does on regular callables."
+      },
+      {
+        "claim": "When autodoc_typehints is set to 'none', the type hints on each @overload-decorated variant of a function should be suppressed in the generated documentation.",
+        "evidence": "The reproduction steps show autodoc_typehints = 'none' with overloaded functions, and the expected behavior is that all typehints for overloaded callables are suppressed."
+      }
+    ],
+    "witnesses": [
+      {
+        "evidence": "The reproduction section shows autodoc_typehints = 'none' configured, and the bug is that overloaded callables are not affected by this setting.",
+        "witness": "The bug report describes that with autodoc_typehints = 'none' in conf.py, overloaded callables still show type hints, which is inconsistent with the expected behavior."
+      },
+      {
+        "evidence": "The 'Expected behavior' section of the bug report explicitly states the desired behavior.",
+        "witness": "The expected behavior section states 'All typehints for overloaded callables are obeyed autodoc_typehints setting.', confirming that the setting should apply to overloaded callables."
+      }
+    ]
+  },
+  "validation_rejections": [
+    {
+      "claim": {
+        "claim": "When autodoc_typehints is set to 'none', type hints for overloaded callables should also be suppressed, consistent with non-overloaded callables.",
+        "evidence": "The bug report states that autodoc_typehints does not affect overloaded callables, and the expected behavior is that all typehints for overloaded callables are obeyed by the autodoc_typehints setting."
+      },
+      "errors": [
+        "claim operation is empty"
+      ]
+    },
+    {
+      "claim": {
+        "claim": "The autodoc_typehints configuration setting should apply uniformly to both overloaded and non-overloaded callables.",
+        "evidence": "The bug report explicitly states 'All typehints for overloaded callables are obeyed autodoc_typehints setting' as the expected behavior, implying the setting should have the same effect on overloaded callables as it does on regular callables."
+      },
+      "errors": [
+        "claim operation is empty"
+      ]
+    },
+    {
+      "claim": {
+        "claim": "When autodoc_typehints is set to 'none', the type hints on each @overload-decorated variant of a function should be suppressed in the generated documentation.",
+        "evidence": "The reproduction steps show autodoc_typehints = 'none' with overloaded functions, and the expected behavior is that all typehints for overloaded callables are suppressed."
+      },
+      "errors": [
+        "claim operation is empty"
+      ]
+    }
+  ],
+  "witnesses": []
+}
