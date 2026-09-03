@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "reachpatch"
 version = "0.1.0"
-description = "Graph-grounded single-incumbent reach-avoid program repair"
+description = "Execution-driven single-working-patch reach-avoid program repair"
 readme = "README.md"
 requires-python = ">=3.11"
 license = {text = "Research-only"}
@@ -24,4 +24,7 @@ include = ["reachpatch*"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 norecursedirs = ["tests/fixtures"]
-addopts = "-ra"
+addopts = '-ra -m "not legacy_graph"'
+markers = [
+    "legacy_graph: retired four-graph controller specifications retained for historical artifact audits",
+]

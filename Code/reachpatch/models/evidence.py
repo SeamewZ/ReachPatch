@@ -103,8 +103,40 @@ class ObservationContract(SerializableRecord):
                         )
                 return True
             if self.normalized_comparator in {"RAISES", "NOT_RAISES"}:
-                raised = bool(observation.exception) or observation.status is OutcomeStatus.FAIL
-                return raised if self.normalized_comparator == "RAISES" else not raised
+                # Exception contracts are typed oracles.  A generic non-zero
+                # exit is not enough for ``RAISES(ValueError)``: matching the
+                # expected exception class (and optional message pattern) is
+                # required, while NOT_RAISES must reject any actual exception.
+                raised_text = "\n".join(
+                    item for item in (observation.exception, observation.stderr)
+                    if item
+                )
+                raised = bool(raised_text) or observation.status is OutcomeStatus.FAIL
+                if self.normalized_comparator == "NOT_RAISES":
+                    return not raised
+                expected = self.expected
+                if isinstance(expected, dict):
+                    expected_type = str(
+                        expected.get("exception_type")
+                        or expected.get("type")
+                        or expected.get("exception")
+                        or ""
+                    )
+                    message_pattern = expected.get("message_pattern", expected.get("message"))
+                else:
+                    expected_type = str(expected or "")
+                    message_pattern = None
+                expected_type = expected_type.rsplit(".", 1)[-1]
+                type_matches = (
+                    not expected_type
+                    or re.search(rf"(?<![A-Za-z0-9_]){re.escape(expected_type)}(?![A-Za-z0-9_])", raised_text)
+                    is not None
+                )
+                message_matches = (
+                    message_pattern is None
+                    or str(message_pattern) in raised_text
+                )
+                return raised and type_matches and message_matches
         comparator = self.normalized_comparator
         expected = self.expected
         if isinstance(observation, RunObservation) and isinstance(expected, dict) and any(
@@ -182,10 +214,21 @@ class ExecutableCheck(SerializableRecord):
     expected: ObservationContract | None = None
     concrete_input: Any = None
     source_evidence_ids: tuple[str, ...] = ()
+    # Execution-driven aliases.  They are data only; graph objects are not
+    # required to create or certify a check.
+    goal_id: str | None = None
+    evidence_ids: tuple[str, ...] = ()
+    target_symbols: tuple[str, ...] = ()
+    input_recipe: Any = None
 
     @property
     def trusted(self) -> bool:
         return self.authority in {"A", "B", "C"}
+
+    @property
+    def comparator(self) -> str:
+        expected = self.expected
+        return expected.normalized_comparator if isinstance(expected, ObservationContract) else "RELATION_HOLDS"
 
 
 @dataclass(frozen=True, slots=True)
@@ -267,11 +310,27 @@ def _repl_expected_outputs(block: str) -> dict[int, str]:
             output_lines.pop(0)
         while output_lines and not output_lines[-1].strip():
             output_lines.pop()
+        # REPL transcripts frequently print an exception banner before the
+        # actual ``Traceback (most recent call last)`` line (for example,
+        # ``ValueError Traceback ...``).  Everything in that output block is
+        # observed failure text, never the expected stdout contract.
         traceback_at = next((
             index for index, line in enumerate(output_lines)
-            if line.lstrip().startswith("Traceback (")
+            if re.search(r"\bTraceback\b|\b(?:Error|Exception|Warning)\s+Traceback", line)
+            or line.lstrip().startswith(("File \"", "---->"))
         ), len(output_lines))
-        output_lines = output_lines[:traceback_at]
+        if traceback_at == len(output_lines) and any(
+            re.search(r"\b(?:Error|Exception)\b", line)
+            for line in output_lines
+        ):
+            # A traceback banner may be rendered without the word
+            # ``Traceback``; do not turn diagnostic exception text into an
+            # exact stdout expectation.
+            output_lines = []
+            return
+        if traceback_at < len(output_lines):
+            output_lines = []
+            return
         while output_lines and not output_lines[-1].strip():
             output_lines.pop()
         if output_lines:
@@ -499,6 +558,26 @@ def _compiled_expected_order(module: ast.Module) -> tuple[Any, ...]:
     return ()
 
 
+def _nearby_expected_exception(content: str, expression: str) -> str | None:
+    """Find an explicit expected exception clause adjacent to a witness."""
+    if not expression:
+        return None
+    position = content.find(expression)
+    if position < 0:
+        # AST-unparsed source may normalize whitespace; use the operation name
+        # only as a conservative fallback and keep the same local window.
+        operation = expression.rsplit(".", 1)[-1].split("(", 1)[0]
+        position = content.find(operation)
+    if position < 0:
+        return None
+    prefix = content[max(0, position - 420):position]
+    match = re.search(
+        r"\b(?:must|should|shall|expected\s+to|expects?\s+the\s+call\s+to)\s+(?:raise|throw)\s+([A-Za-z_]\w*(?:\.[A-Za-z_]\w*)*)",
+        prefix, re.IGNORECASE,
+    )
+    return match.group(1) if match else None
+
+
 def extract_issue_witnesses(
     content: str,
     evidence_id: str,
@@ -518,21 +597,26 @@ def extract_issue_witnesses(
         public_text,
         re.IGNORECASE,
     ))
-    candidates: list[tuple[int, str, dict[int, str], str | None]] = []
+    candidates: list[tuple[int, str, dict[int, str], str | None, str]] = []
     for block_index, match in enumerate(_FENCED_CODE.finditer(content)):
         block = match.group("body")
         source = _repl_source(block)
         repl_outputs = _repl_expected_outputs(block) if source is not None else {}
         if source is None:
             source = block.strip()
-        candidates.append((block_index, source, repl_outputs, None))
+        # Keep only the prose immediately adjacent to this fence.  This lets
+        # a normative sentence such as "should return empty arrays" ground
+        # the following witness without allowing an unrelated positive issue
+        # sentence to promote every code block.
+        adjacent = content[max(0, match.start() - 600):match.start()]
+        candidates.append((block_index, source, repl_outputs, None, adjacent))
     for plain_index, (_, source, trailing) in enumerate(_plain_python_blocks(content)):
         compiled = _plain_witness_source(source, trailing)
         if compiled is not None:
             witness_source, expression = compiled
-            candidates.append((10_000 + plain_index, witness_source, {}, expression))
+            candidates.append((10_000 + plain_index, witness_source, {}, expression, trailing))
 
-    for block_index, source, repl_outputs, operation_expression in candidates:
+    for block_index, source, repl_outputs, operation_expression, adjacent_context in candidates:
         if not source:
             continue
         try:
@@ -571,6 +655,7 @@ def extract_issue_witnesses(
             except SyntaxError:
                 continue
             operation = operation_expression.rsplit(".", 1)[-1]
+            expected_exception = _nearby_expected_exception(content, operation_expression)
             witness_id = stable_id(
                 "witness", evidence_id, block_index, operation_expression, script,
             )
@@ -581,10 +666,17 @@ def extract_issue_witnesses(
                 "script": script,
                 "operation": operation,
                 "target_expression": operation_expression,
-                "expected_relation": "issue witness satisfies its explicit observation",
-                "expected": {"exit_code": 0},
+                "expected_relation": (
+                    f"issue witness raises {expected_exception}"
+                    if expected_exception else "issue witness satisfies its explicit observation"
+                ),
+                "expected": (
+                    {"exception_type": expected_exception}
+                    if expected_exception else {"exit_code": 0}
+                ),
                 "expected_order": _compiled_expected_order(module),
                 "authority": "B" if positive_contract else "PROVISIONAL",
+                "_adjacent_context": adjacent_context,
                 "derivation": (
                     f"validated plain Python witness from {evidence_id}",
                     f"observable expression is {operation_expression}",
@@ -659,6 +751,9 @@ def extract_issue_witnesses(
             expected_output = repl_outputs.get(statement_index)
             if expected_output is not None:
                 expected["stdout"] = expected_output
+            expected_exception = _nearby_expected_exception(content, target_source)
+            if expected_exception:
+                expected = {"exception_type": expected_exception}
             witnesses.append({
                 "witness_id": witness_id,
                 "evidence_id": evidence_id,
@@ -667,12 +762,16 @@ def extract_issue_witnesses(
                 "operation": operation,
                 "target_expression": target_source,
                 "expected_relation": (
-                    "issue witness completes with the displayed stdout"
-                    if expected_output is not None
-                    else "issue witness completes successfully"
+                    f"issue witness raises {expected_exception}"
+                    if expected_exception else (
+                        "issue witness completes with the displayed stdout"
+                        if expected_output is not None
+                        else "issue witness completes successfully"
+                    )
                 ),
                 "expected": expected,
                 "authority": "B" if positive_contract else "PROVISIONAL",
+                "_adjacent_context": adjacent_context,
                 "derivation": (
                     f"validated fenced Python witness from {evidence_id}",
                     f"target call is {operation}",
@@ -686,14 +785,49 @@ def extract_issue_witnesses(
     for witness in witnesses:
         expression = str(witness.get("target_expression", ""))
         position = content.find(expression) if expression else -1
-        prefix = content[max(0, position - 320):position] if position >= 0 else ""
-        explicit = bool(re.search(
-            r"\b(?:expected|desired|must|should|shall|return|raise|without\s+(?:an?\s+)?(?:error|exception)|support|accept|allow)\b",
-            prefix,
-            re.IGNORECASE,
-        ))
-        if not explicit:
+        # Restrict authority inference to the witness-local prose clause. A
+        # positive sentence elsewhere in the issue must not promote every
+        # code block to reporter-grounded evidence.
+        local = ""
+        if position >= 0:
+            line_start = content.rfind("\n", 0, position) + 1
+            line_end = content.find("\n", position)
+            if line_end < 0:
+                line_end = len(content)
+            local = content[line_start:line_end]
+            # Fenced/repl witnesses place the executable expression on a
+            # source-only line.  Include only a bounded adjacent prose window
+            # when that line itself carries no normative clause; the operation
+            # name must still occur in the window, preventing an unrelated
+            # positive sentence from promoting every witness to Authority B.
+            if not local.strip() or local.lstrip().startswith((">>>",)) or not re.search(
+                r"\b(?:expected|desired|must|should|shall|return|raise|without\s+(?:an?\s+)?(?:error|exception)|support|accept|allow)\b",
+                local, re.IGNORECASE,
+            ):
+                local = content[max(0, position - 240):position]
+        operation_name = str(witness.get("operation", "")).rsplit(".", 1)[-1]
+        adjacent = str(witness.pop("_adjacent_context", ""))
+        explicit_heading = bool(re.search(r"(?im)^\s*(?:expected|desired)\s*:", local))
+        explicit = explicit_heading or bool(
+            operation_name and operation_name.casefold() in local.casefold()
+            and re.search(
+                r"\b(?:expected|desired|must|should|shall|return|raise|without\s+(?:an?\s+)?(?:error|exception)|support|accept|allow)\b",
+                local, re.IGNORECASE,
+            )
+        )
+        adjacent_explicit = bool(
+            operation_name
+            and re.search(
+                r"\b(?:expected|desired|must|should|shall|return|raise|without\s+(?:an?\s+)?(?:error|exception)|support|accept|allow)\b",
+                adjacent,
+                re.IGNORECASE,
+            )
+            and not re.search(r"\b(?:for example|e\.g\.|such as)\b", adjacent, re.IGNORECASE)
+        )
+        if not explicit and not adjacent_explicit:
             witness["authority"] = "PROVISIONAL"
+        elif adjacent_explicit:
+            witness["authority"] = "B"
     unique = {str(item["witness_id"]): item for item in witnesses}
     return tuple(unique[key] for key in sorted(unique))
 
@@ -896,7 +1030,7 @@ def discover_diff_public_checks(
                     relation=f"public test {relative}::{node.name} must remain successful",
                     expected={"exit_code": 0},
                     observable="process",
-                    comparator="equals",
+                    comparator="EXIT_ZERO",
                 ),
                 source_evidence_ids=(stable_id(
                     "public-test-evidence", relative, node.name, referenced,
@@ -988,6 +1122,9 @@ class TraceBundle(SerializableRecord):
     cwd: str = "."
     environment: tuple[tuple[str, str], ...] = ()
     backend: str = "shared-executor"
+    # Localization context copied from the first traced run. It is not
+    # certification evidence and is ignored by semantic stability checks.
+    events: tuple[tuple[Any, ...], ...] = ()
 
 
 @dataclass(frozen=True, slots=True)

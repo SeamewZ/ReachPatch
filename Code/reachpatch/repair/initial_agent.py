@@ -1,7 +1,8 @@
 """Initial patch entry point for the single-working-patch controller."""
 from __future__ import annotations
 
-from reachpatch.models.reach_avoid import GeneratorResult, ReachAvoidState, RepairObjective
+from reachpatch.models.execution import GeneratorResult, ReachAvoidState
+from reachpatch.repair.execution_objective import InitialPatchObjective
 
 
 class InitialPatchAgent:
@@ -11,10 +12,8 @@ class InitialPatchAgent:
         self._repair_player = repair_player
 
     def generate(
-        self, state: ReachAvoidState, objective: RepairObjective,
+        self, state: ReachAvoidState, objective: InitialPatchObjective,
     ) -> GeneratorResult:
         if objective.objective_kind != "INITIAL_PATCH":
             raise ValueError("InitialPatchAgent requires an INITIAL_PATCH objective")
-        if objective.selected_frontier is not None:
-            raise ValueError("initial generation must not depend on a RepairFrontier")
         return self._repair_player.revise_working_patch(state, objective, initial=True)

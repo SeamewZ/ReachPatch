@@ -1,4 +1,4 @@
-from pathlib import Path
+import json
 
 from reachpatch.models.core import Instance
 from reachpatch.reach_avoid.controller import ReachAvoidController
@@ -22,7 +22,7 @@ class _ToyRepair:
             return {"summary": "complete", "mechanism": "complete"}
         if initial:
             diff = "diff --git a/calc.py b/calc.py\n--- a/calc.py\n+++ b/calc.py\n@@ -1,2 +1,4 @@\n def calc(value):\n-    return 0\n+    if value == 1:\n+        return 2\n+    return 0\n"
-        elif objective.objective_kind == "PRESERVATION_REGRESSION":
+        elif objective.objective_kind == "FIX_PRESERVATION":
             diff = "diff --git a/calc.py b/calc.py\n--- a/calc.py\n+++ b/calc.py\n@@ -1,2 +1,4 @@\n def calc(value):\n-    return 3\n+    if value == 0:\n+        return 0\n+    return 3\n"
         else:
             diff = "diff --git a/calc.py b/calc.py\n--- a/calc.py\n+++ b/calc.py\n@@ -1,4 +1,2 @@\n def calc(value):\n-    if value == 1:\n-        return 2\n-    return 0\n+    return 3\n"
@@ -45,25 +45,40 @@ def test_revision_keeps_complete_cumulative_working_diff(tmp_path):
     assert "+    if value == 0:" in result.unified_diff
     assert "+    return 3" in result.unified_diff
     assert result.patch_hash
+    summary = json.loads((tmp_path / "run" / "execution_summary.json").read_text(encoding="utf-8"))
+    assert summary["transition_count"] > 0
+    assert summary["p0_patch_hash"] != summary["final_patch_hash"]
+    transitions = tuple((tmp_path / "run" / "transitions").glob("*.json"))
+    assert transitions
+    decisions = {json.loads(path.read_text(encoding="utf-8"))["decision"] for path in transitions}
+    assert "KEEP_REPAIRING" in decisions or "ADVANCE_SAFE" in decisions
 
 
-def test_checkpoint_runtime_round_trip_preserves_working_identity(state_factory, tmp_path):
-    from reachpatch.reach_avoid.checkpoint import CheckpointStore, capture_initial_checkpoint
+def test_no_executable_target_stops_before_repair_revision(tmp_path):
+    repository = tmp_path / "repo-no-target"
+    repository.mkdir()
+    (repository / "calc.py").write_text("def calc(value):\n    return value\n", encoding="utf-8")
 
-    state = state_factory()
-    state.run_root = tmp_path / "run"
-    store = CheckpointStore(state.run_root)
-    checkpoint = capture_initial_checkpoint(
-        store=store, base_repository=state.base_repository,
-        source_tree=Path(state.working_checkpoint.snapshot_tree),
-        graph_stack=state.graph_stack, evidence=state.working_checkpoint.evidence,
-        locked_checks=state.locked_checks, observations=state.observations,
-        status="WORKING", state=state,
+    class Generator:
+        revisions = 0
+
+        def revise(self, objective, tools, initial=False):
+            if initial:
+                tools.apply_patch(
+                    "diff --git a/calc.py b/calc.py\n--- a/calc.py\n+++ b/calc.py\n@@ -1,2 +1,2 @@\n def calc(value):\n-    return value\n+    return value + 1\n"
+                )
+                tools.finish_revision("initial edit", "initial")
+            else:
+                self.revisions += 1
+            return {}
+
+    generator = Generator()
+    instance = Instance(
+        "toy-no-target", str(repository), "base",
+        "The implementation needs improvement.",
     )
-    loaded = store.load(checkpoint.checkpoint_id)
-    runtime = store.runtime_state(checkpoint.checkpoint_id)
-    assert loaded.patch_hash == checkpoint.patch_hash
-    assert loaded.graph_hashes == checkpoint.graph_hashes
-    assert runtime.safe_checkpoint_id is None
-    assert runtime.best_checkpoint_id is None
-    assert runtime.certified_checkpoint_id is None
+    result = ReachAvoidController(RepairPlayer(generator)).run(
+        instance, run_root=tmp_path / "run-no-target"
+    )
+    assert result.status == "EVIDENCE_LIMITED"
+    assert generator.revisions == 0

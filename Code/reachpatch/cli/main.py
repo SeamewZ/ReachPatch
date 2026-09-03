@@ -6,11 +6,10 @@ import os
 from pathlib import Path
 
 from reachpatch.reach_avoid.controller import ReachAvoidConfig, ReachAvoidController
-from reachpatch.reach_avoid.certificates import verify_transition_certificate
-from reachpatch.reach_avoid.checkpoint import (
-    CheckpointStore, IncompatibleArtifactError, record_from_dict,
+from reachpatch.reach_avoid.execution_checkpoint import (
+    ExecutionCheckpointStore, record_from_dict,
 )
-from reachpatch.models.reach_avoid import TransitionCertificate
+from reachpatch.models.execution import TransitionCertificate
 from reachpatch.repair import DeepSeekAgent, DeepSeekConfig, DeepSeekHTTPTransport
 from reachpatch.reach_avoid.repair_player import RepairPlayer
 from reachpatch.reporting import summarize_external_outcomes
@@ -95,30 +94,64 @@ def _export(args) -> int:
 
 def _verify(args) -> int:
     root = Path(args.run_root).resolve()
-    run = json.loads((root / "run.json").read_text(encoding="utf-8"))
-    if run.get("schema") != "reachpatch-reach-avoid-v2":
-        raise IncompatibleArtifactError(
-            "Artifact was produced by the retired pre-integrated architecture."
-        )
-    repository = Path(run["instance"]["repository"]).resolve()
-    store = CheckpointStore(root)
+    store = ExecutionCheckpointStore(root)
+    state = store.read_state()
+    repository = Path(state.base_repository).resolve()
     checkpoint_count = 0
     for path in sorted(store.root.iterdir()):
         if not path.is_dir():
             continue
         checkpoint = store.load(path.name)
-        store.validate(checkpoint, repository)
+        store.validate(checkpoint, repository, clean_snapshot=state.clean_snapshot)
         checkpoint_count += 1
     transition_count = 0
+    checkpoints = {
+        path.name: store.load(path.name)
+        for path in sorted(store.root.iterdir())
+        if path.is_dir() and (path / "checkpoint.json").is_file()
+    }
     for path in sorted((root / "transitions").glob("*.json")):
         raw = json.loads(path.read_text(encoding="utf-8"))
-        certificate = record_from_dict(TransitionCertificate, raw["certificate"])
-        verify_transition_certificate(certificate, store)
+        # Transition files are canonical certificates in execution v2.  The
+        # observation sidecars are intentionally separate and never used for
+        # deciding Reach; hashes in the certificate provide traceability.
+        certificate = record_from_dict(TransitionCertificate, raw)
+        parent = checkpoints.get(certificate.parent_checkpoint_id)
+        trial = checkpoints.get(certificate.trial_checkpoint_id)
+        result_checkpoint = checkpoints.get(certificate.result_checkpoint_id)
+        if parent is None or trial is None or result_checkpoint is None:
+            raise RuntimeError(f"transition {path.name} references a missing checkpoint")
+        if parent.patch_hash != certificate.parent_patch_hash:
+            raise RuntimeError(f"transition {path.name} parent patch hash mismatch")
+        if trial.patch_hash != certificate.trial_patch_hash:
+            raise RuntimeError(f"transition {path.name} trial patch hash mismatch")
+        if result_checkpoint.patch_hash != certificate.result_patch_hash:
+            raise RuntimeError(f"transition {path.name} result patch hash mismatch")
+        if not certificate.exact_failure_command and certificate.active_failure_kind != "MECHANICAL":
+            raise RuntimeError(f"transition {path.name} has no exact failure command")
+        sidecar = root / "transition_observations" / path.name
+        if not sidecar.is_file():
+            raise RuntimeError(f"transition {path.name} is missing observation sidecar")
+        observations = json.loads(sidecar.read_text(encoding="utf-8"))
+        if not isinstance(observations, dict) or not all(
+            isinstance(observations.get(phase), list)
+            for phase in ("clean", "parent", "trial")
+        ):
+            raise RuntimeError(f"transition {path.name} has malformed observation sidecar")
+        if certificate.observation_hashes and len(certificate.observation_hashes) < len(certificate.check_ids):
+            raise RuntimeError(f"transition {path.name} observation trace is incomplete")
         transition_count += 1
     terminal = json.loads((root / "terminal.json").read_text(encoding="utf-8"))
     result = terminal["result"]
     output = Path(result["output_path"])
-    valid = output.is_file() and output.read_text(encoding="utf-8") == result["unified_diff"]
+    selected = checkpoints.get(str(result["checkpoint_id"]))
+    valid = (
+        selected is not None
+        and output.is_file()
+        and output.read_text(encoding="utf-8") == result["unified_diff"]
+        and selected.cumulative_diff == result["unified_diff"]
+        and selected.patch_hash == result["patch_hash"]
+    )
     _json({
         "valid": valid,
         "checkpoint_id": result["checkpoint_id"],

@@ -2,8 +2,6 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
-
-from experiments.reachavoid_51 import runner as experiment_runner
 from reachpatch.models.core import Instance
 from reachpatch.reach_avoid.controller import ReachAvoidController
 from reachpatch.reach_avoid.repair_player import RepairPlayer
@@ -53,7 +51,7 @@ class FakeGenerator:
         self.working_values.append(tools.read_file("calc.py")["content"])
         if initial:
             patch = INITIAL
-        elif objective.primary_requirement.get("preservation"):
+        elif objective.active_failure.kind.value == "PRESERVATION":
             patch = REGRESSION_FIX
         else:
             patch = TARGET_FIX_WITH_REGRESSION
@@ -111,47 +109,23 @@ def test_partial_patch_counterexample_provisional_regression_repair_reaches(tmp_
     assert result.unified_diff.count("diff --git") == 1
     assert "+    if value == 0:" in result.unified_diff
     assert fake.objective_kinds == [
-        "INITIAL_PATCH", "BEHAVIOR_FAILURE", "PRESERVATION_REGRESSION",
+        "INITIAL_PATCH", "FIX_TARGET", "FIX_PRESERVATION",
     ]
     assert "return 2" in fake.working_values[1]
     assert "return 3" in fake.working_values[2]
-    assert not any((tmp_path / "run" / "trials").iterdir())
-    assert not any((tmp_path / "run" / "generator_staging").iterdir())
-    assert tuple((tmp_path / "run" / "execution_cache").glob("*.json"))
-    assert not (tmp_path / "run" / "bootstrap_working").exists()
-    assert not (tmp_path / "run" / "initial_working").exists()
-    performance = tuple(
-        json.loads(line)
-        for line in (tmp_path / "run" / "performance.jsonl").read_text(
-            encoding="utf-8",
-        ).splitlines()
+    run_root = tmp_path / "run"
+    summary = json.loads((run_root / "execution_summary.json").read_text(encoding="utf-8"))
+    assert summary["transition_count"] == 2
+    assert summary["revision_count"] == 2
+    assert summary["p0_patch_hash"] != summary["final_patch_hash"]
+    certificates = tuple(
+        json.loads(path.read_text(encoding="utf-8"))
+        for path in (run_root / "transitions").glob("*.json")
     )
-    assert performance[0]["revision"] == 0
-    # Base-commit AST/index data is intentionally persistent.  A warm cache
-    # is valid initial graph participation and must not be reported as a
-    # failed graph build merely because no file needed reparsing.
-    assert (
-        performance[0]["files_reparsed"]
-        + performance[0]["cache_hit_count"]
-    ) > 0
-    assert performance[0]["program_update_seconds"] > 0
-    assert any(
-        record["revision"] > 0 and record["files_reparsed"] > 0
-        for record in performance
-    )
-    initial = experiment_runner._initial_checkpoint(tmp_path / "run")
-    assert initial["status"] == "INITIAL_WORKING"
-    assert initial["canonical_diff"].strip()
-    evidence = experiment_runner._component_evidence(
-        tmp_path / "run", result.to_dict(),
-    )
-    assert evidence["reach_avoid"]["transition_count"] == 2
-    assert evidence["reach_avoid"]["decision_counts"] == {
-        "COMMIT_WORKING": 1,
-        "KEEP_PROVISIONAL": 1,
-    }
-    assert evidence["requirement_graph"]["participated"]
-    assert evidence["program_graph"]["participated"]
-    assert evidence["binding_graph"]["participated"]
-    assert evidence["challenge_graph"]["participated"]
-    assert evidence["challenge_graph"]["counterexamples_opened"]
+    assert {item["decision"] for item in certificates} == {"KEEP_REPAIRING", "REACHED"}
+    assert all(item["exact_failure_command"] for item in certificates)
+    assert all(item["observation_hashes"] for item in certificates)
+    assert (run_root / "execution_checkpoints").is_dir()
+    assert (run_root / "transition_observations").is_dir()
+    assert not any((run_root / "generator_staging").iterdir())
+    assert not (run_root / "working_bootstrap").exists()

@@ -6,8 +6,9 @@ from reachpatch.execution.worktree import (
     copy_source_tree, diff_between, discard_ephemeral_tree,
 )
 from reachpatch.models.base import content_hash, stable_id
-from reachpatch.models.reach_avoid import GeneratorResult, ReachAvoidState, RepairObjective
-from reachpatch.repair.tools import RepairToolExecutor
+from reachpatch.models.execution import GeneratorResult, ReachAvoidState
+from reachpatch.repair.execution_objective import InitialPatchObjective, RepairObjective
+from reachpatch.repair.execution_tools import RepairToolExecutor
 
 
 class RepairPlayer:
@@ -17,16 +18,24 @@ class RepairPlayer:
     def revise_working_patch(
         self,
         state: ReachAvoidState,
-        objective: RepairObjective,
+        objective: RepairObjective | InitialPatchObjective,
         *,
         initial: bool = False,
     ) -> GeneratorResult:
         source = Path(state.working_checkpoint.snapshot_tree)
+        current = diff_between(state.clean_snapshot, source)
+        if current.patch_hash != state.working_checkpoint.patch_hash:
+            raise RuntimeError(
+                "working tree does not match working checkpoint before repair"
+            )
         staging_root = state.run_root / "generator_staging"
         staging_root.mkdir(parents=True, exist_ok=True)
         staging = staging_root / stable_id(
             "generation", state.generator_session.session_id,
-            state.generator_attempt_count, objective.objective_id,
+            state.generator_attempt_count,
+            len(state.generator_session.conversation),
+            len(state.generator_session.attempt_history),
+            objective.objective_id,
         )
         if staging.exists():
             raise FileExistsError(staging)
@@ -36,14 +45,18 @@ class RepairPlayer:
             "role": "user",
             "objective_id": objective.objective_id,
             "objective_kind": objective.objective_kind,
-            "working_patch_hash": state.graph_stack.patch_hash,
+            "working_patch_hash": state.working_checkpoint.patch_hash,
         })
-        if hasattr(self.generator_agent, "revise"):
-            response = self.generator_agent.revise(objective, tools, initial=initial)
-        elif hasattr(self.generator_agent, "revise_working_patch"):
-            response = self.generator_agent.revise_working_patch(state, objective, staging, tools)
-        else:
-            raise TypeError("generator agent must implement revise or revise_working_patch")
+        try:
+            if hasattr(self.generator_agent, "revise"):
+                response = self.generator_agent.revise(objective, tools, initial=initial)
+            elif hasattr(self.generator_agent, "revise_working_patch"):
+                response = self.generator_agent.revise_working_patch(state, objective, staging, tools)
+            else:
+                raise TypeError("generator agent must implement revise or revise_working_patch")
+        except BaseException:
+            discard_ephemeral_tree(staging, state.run_root)
+            raise
         if isinstance(response, GeneratorResult):
             state.generator_session.structure_recovery_used = (
                 state.generator_session.structure_recovery_used
@@ -98,7 +111,7 @@ class RepairPlayer:
     @staticmethod
     def _record_attempt(
         state: ReachAvoidState,
-        objective: RepairObjective,
+        objective: RepairObjective | InitialPatchObjective,
         result: GeneratorResult,
         source: Path,
         tools: RepairToolExecutor,
@@ -117,15 +130,10 @@ class RepairPlayer:
             ),
             "objective_id": objective.objective_id,
             "objective_kind": objective.objective_kind,
-            "selected_frontier_key": (
-                objective.selected_frontier.semantic_key
-                if objective.selected_frontier is not None else None
+            "active_failure_id": getattr(
+                getattr(objective, "active_failure", None), "failure_id", None,
             ),
-            "selected_frontier_kind": (
-                objective.selected_frontier.kind.value
-                if objective.selected_frontier is not None else None
-            ),
-            "source_patch_hash": state.graph_stack.patch_hash,
+            "source_patch_hash": state.working_checkpoint.patch_hash,
             "incremental_patch_hash": incremental.patch_hash,
             "incremental_diff_hash": content_hash(incremental.canonical_diff),
             "incremental_diff": incremental.canonical_diff,

@@ -56,6 +56,19 @@ def test_agent_contract_stays_provisional_without_public_evidence(tmp_path):
     assert registered["authority"] == "PROVISIONAL"
 
 
+def test_probe_command_is_self_contained_for_isolated_execution(tmp_path):
+    executor = _executor(tmp_path)
+    probe = executor.write_probe(
+        "probe", "from api import value\nprint(value(1))\n",
+    )
+
+    executor.run_probe_on_clean(probe["probe_id"])
+
+    trace = executor.probes[probe["probe_id"]].clean_runs[0]
+    assert trace.command[:2] == ("python", "-c")
+    assert str(executor.probes[probe["probe_id"]].source_path) not in trace.command
+
+
 def test_agent_uses_required_tool_choice_and_finishes(tmp_path):
     executor = _executor(tmp_path)
     transport = _Transport([

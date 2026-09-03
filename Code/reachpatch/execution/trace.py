@@ -98,6 +98,10 @@ def run_trace(
         trace_output = instrumentation / "events.json"
         env = os.environ.copy()
         env.update(dict(environment))
+        # Working snapshots can be revised within the filesystem timestamp
+        # resolution while preserving a module's byte size.  Never create a
+        # timestamp-based .pyc that a later trial could mistake for its source.
+        env["PYTHONDONTWRITEBYTECODE"] = "1"
         search_paths = [str(tree), env.get("PYTHONPATH", "")]
         if trace_enabled:
             (instrumentation / "sitecustomize.py").write_text(_SITECUSTOMIZE, encoding="utf-8")
@@ -199,7 +203,10 @@ def run_trace(
             return_code = result.returncode
             stdout = result.stdout
             stderr = result.stderr
-            exception = None if result.returncode == 0 else result.stderr.splitlines()[-1:] or None
+            stderr_lines = result.stderr.splitlines()
+            exception = None if result.returncode == 0 else (
+                stderr_lines[-1] if stderr_lines else None
+            )
         except subprocess.TimeoutExpired as exc:
             status = OutcomeStatus.BLOCKED
             return_code = None
@@ -257,8 +264,10 @@ def run_trace(
     observation = RunObservation(
         status=status,
         return_code=return_code,
-        stdout=stdout[-10000:],
-        stderr=stderr[-10000:],
+        # Keep a substantial tail for repair diagnostics while bounding
+        # artifacts. The first project traceback is retained separately below.
+        stdout=stdout[-12000:],
+        stderr=stderr[-12000:],
         duration_seconds=time.monotonic() - started,
         exception=str(exception) if exception else None,
     )
@@ -278,4 +287,8 @@ def run_trace(
         cwd=cwd,
         environment=tuple(sorted((str(key), str(value)) for key, value in environment)),
         backend=backend,
+        events=tuple(
+            tuple(item) for item in dynamic_events
+            if isinstance(item, (tuple, list)) and len(item) >= 4
+        ),
     )

@@ -21,6 +21,7 @@ if str(CODE_ROOT) not in sys.path:
 from reachpatch.models.base import SCHEMA_VERSION, canonical_json, content_hash, utc_now
 from reachpatch.models.core import Instance
 from reachpatch.reach_avoid.controller import ReachAvoidConfig, ReachAvoidController
+from reachpatch.reach_avoid.execution_checkpoint import EXECUTION_SCHEMA_NAME
 from reachpatch.reach_avoid.repair_player import RepairPlayer
 from reachpatch.repair import DeepSeekAgent, DeepSeekConfig, DeepSeekHTTPTransport
 from reachpatch.reporting import PatchOutcomeComparison, summarize_patch_outcomes
@@ -29,6 +30,7 @@ from reachpatch.reporting import PatchOutcomeComparison, summarize_patch_outcome
 DATASET_ROOT = CODE_ROOT / "dataset" / "patchpsro_55_unique51"
 PUBLIC_PATH = DATASET_ROOT / "generation_public_instances.jsonl"
 OFFICIAL_PATH = DATASET_ROOT / "official_instances.jsonl"
+DIAGNOSTIC_OFFICIAL_PATH = CODE_ROOT / "dataset" / "diagnostic10_official_instances.jsonl"
 SOURCE_TREE_ROOT = Path(os.environ.get(
     "REACHPATCH_SOURCE_TREE_ROOT",
     CODE_ROOT / "experiments" / "swe51" / "case_trees",
@@ -303,13 +305,33 @@ def _checkpoint_payloads(run_root: Path) -> list[dict[str, Any]]:
 
 
 def _initial_checkpoint(run_root: Path) -> dict[str, Any]:
+    execution_values = []
+    for path in sorted((run_root / "execution_checkpoints").glob("*/checkpoint.json")):
+        raw = _read_json(path) or {}
+        if raw.get("schema") == EXECUTION_SCHEMA_NAME:
+            checkpoint = raw.get("checkpoint")
+            if isinstance(checkpoint, dict):
+                execution_values.append({**checkpoint, "_directory": str(path.parent)})
+    p0_values = [
+        item for item in execution_values
+        if item.get("status") == "P0" and int(item.get("revision", -1)) == 0
+    ]
+    if len(p0_values) == 1:
+        return p0_values[0]
     values = [
         item for item in _checkpoint_payloads(run_root)
         if item.get("status") == "INITIAL_WORKING" and int(item.get("revision", -1)) == 0
     ]
     if len(values) != 1:
-        raise RuntimeError(f"expected one INITIAL_WORKING checkpoint, found {len(values)}")
+        raise RuntimeError(f"expected one initial checkpoint, found execution P0={len(p0_values)}, legacy INITIAL_WORKING={len(values)}")
     return values[0]
+
+
+def _initial_checkpoint_diff(checkpoint: dict[str, Any]) -> str:
+    value = checkpoint.get("cumulative_diff", checkpoint.get("canonical_diff"))
+    if value is None:
+        raise RuntimeError("initial checkpoint has no cumulative diff")
+    return str(value)
 
 
 def _transition_payloads(run_root: Path) -> list[dict[str, Any]]:
@@ -340,6 +362,9 @@ def _objective_evidence(run_root: Path) -> list[dict[str, Any]]:
 
 
 def _component_evidence(run_root: Path, terminal: dict[str, Any]) -> dict[str, Any]:
+    execution_summary = _read_json(run_root / "execution_summary.json")
+    if execution_summary is not None or (run_root / "execution_checkpoints").is_dir():
+        return _execution_component_evidence(run_root, terminal)
     transitions = _transition_payloads(run_root)
     certificates = [item["certificate"] for item in transitions]
     frontier_records = {}
@@ -535,6 +560,92 @@ def _component_evidence(run_root: Path, terminal: dict[str, Any]) -> dict[str, A
     }
 
 
+def _execution_component_evidence(run_root: Path, terminal: dict[str, Any]) -> dict[str, Any]:
+    """Build report facts from execution checkpoints, without graph artifacts."""
+    summary = _read_json(run_root / "execution_summary.json") or {}
+    state_artifact = _read_json(run_root / "execution_state.json") or {}
+    state = (
+        state_artifact.get("state", {})
+        if isinstance(state_artifact.get("state"), dict)
+        else state_artifact
+    )
+    checkpoint_root = run_root / "execution_checkpoints"
+    checkpoints: dict[str, dict[str, Any]] = {}
+    for path in sorted(checkpoint_root.glob("*/checkpoint.json")):
+        raw = _read_json(path) or {}
+        if raw.get("schema") == EXECUTION_SCHEMA_NAME and isinstance(raw.get("checkpoint"), dict):
+            checkpoints[str(raw["checkpoint"].get("checkpoint_id", path.parent.name))] = raw
+    final_id = str(terminal.get("checkpoint_id", ""))
+    final_raw = checkpoints.get(final_id, {})
+    final_checkpoint = final_raw.get("checkpoint", {}) if isinstance(final_raw, dict) else {}
+    target_results = tuple(final_raw.get("target_results", ())) if isinstance(final_raw, dict) else ()
+    preservation_results = tuple(final_raw.get("preservation_results", ())) if isinstance(final_raw, dict) else ()
+    challenge_results = tuple(final_raw.get("challenge_results", ())) if isinstance(final_raw, dict) else ()
+    all_results = (*target_results, *preservation_results, *challenge_results)
+    statuses = Counter(str(item.get("status")) for item in all_results if isinstance(item, dict))
+    target_pass = sum(
+        isinstance(item, dict) and item.get("status") == "PASS" and item.get("stable")
+        for item in target_results
+    )
+    preservation_pass = sum(
+        isinstance(item, dict) and item.get("status") == "PASS" and item.get("stable")
+        for item in preservation_results
+    )
+    transition_files = []
+    for path in sorted((run_root / "transitions").glob("*.json")):
+        raw = _read_json(path)
+        if isinstance(raw, dict) and raw.get("certificate_id"):
+            transition_files.append(raw)
+    decisions = Counter(str(item.get("decision")) for item in transition_files)
+    objective_files = tuple((run_root / "repair_tool_events.jsonl",))
+    return {
+        "requirement_graph": {
+            "leaf_count": len(state.get("goal_contracts", ())),
+            "partition_count": 0,
+            "objective_requirement_ids": sorted({str(item.get("goal_id")) for item in state.get("goal_contracts", ()) if isinstance(item, dict) and item.get("goal_id")}),
+            "requirements_improved": sorted({str(value) for cert in transition_files for value in cert.get("atomic_progress", {}) if cert.get("atomic_progress", {}).get(value, {}).get("strict_progress")}),
+            "participated": bool(state.get("goal_contracts")),
+        },
+        "program_graph": {
+            "node_count": 0, "edge_count": 0, "path_class_count": 0,
+            "dynamic_edge_count": 0, "causal_cut_count": 0,
+            "objective_causal_cut_ids": [], "impact_risk_count": 0,
+            "participated": bool(summary.get("transition_count")),
+        },
+        "binding_graph": {
+            "unit_count": 0, "gap_count": 0,
+            "objective_binding_ids": [], "transition_confirmed_binding_ids": [],
+            "terminal_execution_confirmed_binding_ids": [],
+            "participated": False,
+        },
+        "challenge_graph": {
+            "cell_count": len(all_results),
+            "selected_challenge_ids": sorted(str(item.get("check_id")) for item in all_results if isinstance(item, dict) and item.get("check_id")),
+            "executed_challenge_ids": sorted(str(item.get("check_id")) for item in all_results if isinstance(item, dict) and item.get("status") in {"PASS", "FAIL", "BLOCKED", "UNSUPPORTED"}),
+            "execution_bundle_count": len(all_results),
+            "counterexamples_opened": [], "counterexamples_closed": [],
+            "terminal_status_counts": dict(sorted(statuses.items())),
+            "participated": bool(all_results),
+        },
+        "reach_avoid": {
+            "transition_count": len(transition_files),
+            "decision_counts": dict(sorted(decisions.items())),
+            "strict_progress_count": sum(bool(value.get("strict_progress")) for cert in transition_files for value in cert.get("atomic_progress", {}).values() if isinstance(value, dict)),
+            "causal_progress_count": sum(bool(value.get("partial_progress")) for cert in transition_files for value in cert.get("atomic_progress", {}).values() if isinstance(value, dict)),
+            "rollback_count": 0, "provisional_count": 0, "commit_count": 0,
+            "advance_safe_count": decisions.get("ADVANCE_SAFE", 0),
+            "keep_repairing_count": decisions.get("KEEP_REPAIRING", 0),
+            "reject_trial_count": decisions.get("REJECT_TRIAL", 0),
+            "reached_count": decisions.get("REACHED", 0),
+            "seal_best_count": 1 if str(summary.get("status", "")).startswith("BEST_EFFORT") else 0,
+            "frontier_count": 0, "validation_backlog_count": 0,
+            "evidence_recovery_count": 0, "no_op_count": 0,
+            "frontier_kind_counts": {}, "frontier_status_counts": {},
+            "participated": bool(transition_files),
+        },
+    }
+
+
 def _validate_component_evidence(case_id: str, evidence: dict[str, Any]) -> None:
     # The ten-case diagnostic seals every non-empty controller result, including
     # an evidence-limited terminal patch whose local graph has no executable
@@ -605,9 +716,6 @@ def generate_case(case_id: str, key_path: Path, model: str, max_revisions: int) 
         RepairPlayer(DeepSeekAgent(transport, DeepSeekConfig.from_environment())),
         ReachAvoidConfig(
             max_real_patch_revisions=max_revisions,
-            max_challenge_rounds=max(1, min(24, int(
-                os.environ.get("REACHPATCH_MAX_CHALLENGE_ROUNDS", "24")
-            ))),
         ),
     )
     started = time.monotonic()
@@ -618,7 +726,15 @@ def generate_case(case_id: str, key_path: Path, model: str, max_revisions: int) 
         raise RuntimeError(f"{case_id}: {terminal['status']}: {detail}")
     initial = _initial_checkpoint(run_root)
     p0_path = run_root / "p0.patch"
-    p0_path.write_text(str(initial["canonical_diff"]), encoding="utf-8")
+    # Execution-v2 checkpoints persist the complete clean->checkpoint patch
+    # as ``cumulative_diff``.  The legacy checkpoint schema used
+    # ``canonical_diff``; accepting only the latter would discard a valid P0
+    # after the controller had already completed its execution-backed run.
+    try:
+        initial_diff = _initial_checkpoint_diff(initial)
+    except RuntimeError as exc:
+        raise RuntimeError(f"{case_id}: {exc}") from exc
+    p0_path.write_text(initial_diff, encoding="utf-8")
     final_path = Path(str(terminal["output_path"])).resolve()
     if not p0_path.read_text(encoding="utf-8").strip():
         raise RuntimeError(f"{case_id}: initial p0 is empty")
@@ -683,10 +799,15 @@ def generate(key_path: Path, model: str, max_revisions: int, only: set[str]) -> 
     known = {str(row["instance_id"]) for row in rows}
     if only - known:
         raise ValueError(f"unknown instance IDs: {sorted(only - known)}")
-    _generation_preflight(rows, key_path)
+    selected = [
+        row for row in rows
+        if not only or str(row["instance_id"]) in only
+    ]
+    _generation_preflight(selected, key_path)
     EXPERIMENT_ROOT.mkdir(parents=True, exist_ok=True)
     case_retries = max(1, int(os.environ.get("REACHPATCH_CASE_RETRIES", "3")))
     manifest = _read_json(GENERATION_MANIFEST)
+    diagnostic = os.environ.get("REACHPATCH_DIAGNOSTIC10") == "1"
     expected = {
         "schema": SCHEMA,
         "public_dataset_sha256": _sha256(PUBLIC_PATH),
@@ -694,13 +815,13 @@ def generate(key_path: Path, model: str, max_revisions: int, only: set[str]) -> 
         "model": model,
         "max_revisions": max_revisions,
         "case_retries": case_retries,
+        **({"diagnostic_instance_ids": sorted(only)} if diagnostic else {}),
     }
     if manifest is None:
         manifest = {**expected, "started_at": utc_now()}
         _write_json(GENERATION_MANIFEST, manifest)
     elif any(manifest.get(key) != value for key, value in expected.items()):
         raise RuntimeError("existing generation manifest belongs to a different method run")
-    selected = [row for row in rows if not only or str(row["instance_id"]) in only]
     current_results: dict[str, dict[str, Any]] = {}
     failures = []
     for index, row in enumerate(selected, 1):
@@ -772,17 +893,24 @@ def generate(key_path: Path, model: str, max_revisions: int, only: set[str]) -> 
         result = _read_json(path)
         if result and _generation_result_valid(result, row):
             all_results[str(row["instance_id"])] = result
+    sealed_results = (
+        {str(row["instance_id"]): all_results[str(row["instance_id"])] for row in selected
+         if str(row["instance_id"]) in all_results}
+        if diagnostic else all_results
+    )
+    expected_case_count = len(selected) if diagnostic else len(rows)
     summary = {
         **expected,
-        "case_count": len(rows),
+        "case_count": expected_case_count,
+        "public_case_count": len(rows),
         "selected_count": len(selected),
-        "sealed_case_count": len(all_results),
+        "sealed_case_count": len(sealed_results),
         "current_result_count": len(current_results),
         "failures": failures,
         "status_counts": dict(sorted(Counter(
             str(item["status"]) for item in all_results.values()
         ).items())),
-        "results": [all_results[key] for key in sorted(all_results)],
+        "results": [sealed_results[key] for key in sorted(sealed_results)],
         "updated_at": utc_now(),
     }
     _write_json(EXPERIMENT_ROOT / "generation_summary.json", summary)
@@ -791,16 +919,17 @@ def generate(key_path: Path, model: str, max_revisions: int, only: set[str]) -> 
         raise RuntimeError(
             f"generation incomplete: {len(failures)} case(s) produced no valid patch: {failed_ids}"
         )
-    if len(all_results) == len(rows) and not failures:
+    if len(sealed_results) == expected_case_count and not failures:
         sealed = {
             "schema": SCHEMA,
             "sealed_at": utc_now(),
             "public_dataset_sha256": _sha256(PUBLIC_PATH),
             "implementation_hash": _implementation_hash(),
-            "case_count": len(rows),
-            "p0_predictions_sha256": _seal_predictions(all_results, "p0"),
-            "final_predictions_sha256": _seal_predictions(all_results, "final"),
-            "results_sha256": content_hash(all_results),
+            "case_count": expected_case_count,
+            "instance_ids": sorted(sealed_results),
+            "p0_predictions_sha256": _seal_predictions(sealed_results, "p0"),
+            "final_predictions_sha256": _seal_predictions(sealed_results, "final"),
+            "results_sha256": content_hash(sealed_results),
         }
         _write_json(SEALED_MANIFEST, sealed)
         summary["sealed_generation"] = sealed
@@ -824,12 +953,22 @@ def _seal_predictions(results: dict[str, dict[str, Any]], kind: str) -> str:
 
 def _official_rows_after_seal() -> list[dict[str, Any]]:
     sealed = _read_json(SEALED_MANIFEST)
-    if not sealed or sealed.get("case_count") != 51:
-        raise RuntimeError("all 51 generation results must be sealed before official data is read")
-    rows = _read_jsonl(OFFICIAL_PATH)
-    if len(rows) != 51:
-        raise RuntimeError(f"expected 51 official instances, found {len(rows)}")
-    public_ids = {str(row["instance_id"]) for row in _public_rows()}
+    diagnostic = os.environ.get("REACHPATCH_DIAGNOSTIC10") == "1"
+    expected_count = 10 if diagnostic else 51
+    if not sealed or sealed.get("case_count") != expected_count:
+        raise RuntimeError(
+            f"all {expected_count} generation results must be sealed before official data is read"
+        )
+    source = DIAGNOSTIC_OFFICIAL_PATH if diagnostic else OFFICIAL_PATH
+    rows = _read_jsonl(source)
+    if len(rows) != expected_count:
+        raise RuntimeError(
+            f"expected {expected_count} official instances, found {len(rows)}"
+        )
+    public_ids = (
+        {str(item) for item in sealed.get("instance_ids", ())}
+        if diagnostic else {str(row["instance_id"]) for row in _public_rows()}
+    )
     official_ids = {str(row["instance_id"]) for row in rows}
     if official_ids != public_ids:
         raise RuntimeError("official/public instance sets differ")
@@ -852,9 +991,14 @@ def _run_harness_stage(stage: str, workers: int, timeout: int) -> dict[str, Any]
     stage_root = HARNESS_ROOT / stage
     stage_root.mkdir(parents=True, exist_ok=True)
     run_id = f"reachavoid51-{stage}-{expected_sha[:12]}"
+    official_path = (
+        DIAGNOSTIC_OFFICIAL_PATH
+        if os.environ.get("REACHPATCH_DIAGNOSTIC10") == "1"
+        else OFFICIAL_PATH
+    )
     command = [
         sys.executable, "-m", "swebench.harness.run_evaluation",
-        "--dataset_name", str(OFFICIAL_PATH),
+        "--dataset_name", str(official_path),
         "--split", "test",
         "--predictions_path", str(predictions),
         "--max_workers", str(workers),

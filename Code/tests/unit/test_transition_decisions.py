@@ -3,6 +3,10 @@ from __future__ import annotations
 from dataclasses import replace
 import copy
 
+import pytest
+
+pytestmark = pytest.mark.legacy_graph
+
 from reachpatch.models.evidence import ConfirmedFailure, CounterexamplePacket
 from reachpatch.models.reach_avoid import (
     AtomicEvidence, ChallengeRoundResult, Decision, FrontierDelta, FrontierMeasure, MechanicalResult, RegressionItem,

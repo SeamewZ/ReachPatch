@@ -10,23 +10,23 @@ from dataclasses import dataclass
 from typing import Any
 
 from reachpatch.models.base import canonical_json
-from reachpatch.models.reach_avoid import RepairObjective
+from reachpatch.repair.execution_objective import InitialPatchObjective, RepairMode, RepairObjective
 
-from .tools import RepairToolExecutor, TOOL_SCHEMAS
+from .execution_tools import RepairToolExecutor, TOOL_SCHEMAS
 
 
 @dataclass(frozen=True, slots=True)
 class DeepSeekConfig:
     initial_generator_max_turns: int = 24
-    # Kept at the historical public field value for checkpoint/config
-    # deserialization; the active limit is `revision_generator_turn_limit`.
-    revision_generator_max_turns: int = 12
+    revision_generator_max_turns: int = 20
     revision_generator_turn_limit: int = 20
     root_recovery_max_turns: int = 28
     initial_generator_wall_time_s: float = 1200.0
     revision_generator_wall_time_s: float = 1200.0
+    root_recovery_wall_time_s: float = 1800.0
     initial_generator_token_budget: int = 32768
     revision_generator_token_budget: int = 32768
+    root_recovery_token_budget: int = 32768
 
     @classmethod
     def from_environment(cls) -> "DeepSeekConfig":
@@ -88,6 +88,10 @@ class DeepSeekHTTPTransport:
             ) from exc
         choice = dict(raw["choices"][0])
         message = dict(choice.get("message") or {})
+        # Preserve the provider request identity for transition certificates.
+        # The message itself is still the only model content consumed by the
+        # tool loop; this identifier is audit metadata, never progress input.
+        message["_request_id"] = raw.get("id")
         # Preserve provider termination metadata.  In particular, a length
         # truncated response must not be interpreted as an empty repair and
         # must leave any already-applied working edit intact.
@@ -125,132 +129,85 @@ class DeepSeekAgent:
     @classmethod
     def _repair_context(
         cls,
-        objective: RepairObjective,
+        objective: RepairObjective | InitialPatchObjective,
         attempt_history: tuple[dict[str, Any], ...] = (),
     ) -> dict[str, Any]:
-        primary = objective.primary_requirement
-        public_context = []
-        public_context_total = 0
-        for item in objective.public_context:
-            compacted = cls._compact(item, string_limit=8000)
-            encoded_size = len(canonical_json(compacted))
-            if public_context_total + encoded_size > 20000:
-                break
-            public_context.append(compacted)
-            public_context_total += encoded_size
-        related = tuple(
-            {
-                key: item.get(key)
-                for key in (
-                    "requirement_id", "kind", "preservation", "operation",
-                    "expected_observation", "preconditions", "domain_constraints",
-                )
-                if key in item
+        if isinstance(objective, InitialPatchObjective):
+            return {
+                "objective_id": objective.objective_id,
+                "repair_mode": objective.mode,
+                "goal_contracts": tuple(item.to_dict() for item in objective.goal_contracts),
+                "public_issue_context": cls._compact(objective.public_context, string_limit=10000),
+                "current_full_diff": objective.current_full_diff,
+                "current_patch_hash": objective.current_patch_hash,
             }
-            for item in objective.related_requirements[:16]
-        )
-        executions = tuple(
-            cls._compact({
-                "validation_id": obligation.validation_id,
-                "role": obligation.role,
-                "authority": obligation.authority,
-                "command": obligation.command,
-                "cwd": obligation.cwd,
-                "environment": obligation.environment,
-                "timeout_seconds": obligation.timeout_seconds,
-                "backend": obligation.backend,
-                "input": obligation.concrete_input,
-                "derivation": obligation.input_derivation,
-                "oracle_id": obligation.oracle_id,
-                "expected_relation": obligation.expected_relation,
-                "expected_observation": obligation.expected_observation,
-                "requirement_id": obligation.requirement_id,
-                "binding_id": obligation.binding_id,
-                "challenge_id": obligation.challenge_id,
-            }, string_limit=2200)
-            for obligation in objective.validation_obligations[:24]
-        )
-        slices = []
-        total = 0
-        for item in objective.editable_source_slices:
-            compacted = cls._compact(item, string_limit=2600)
-            encoded_size = len(canonical_json(compacted))
-            if total + encoded_size > 18000:
-                break
-            slices.append(compacted)
-            total += encoded_size
-        compact_attempts = []
-        attempt_total = 0
-        for item in reversed(attempt_history[-8:]):
-            compacted = cls._compact({
-                key: item.get(key)
-                for key in (
-                    "attempt_id", "objective_id", "source_patch_hash",
-                    "incremental_patch_hash", "incremental_diff_hash",
-                    "incremental_diff", "changed_files", "changed_hunk_ids",
-                    "changed_symbols", "tool_calls", "validation", "result_kind",
-                    "error_kind", "transition_decision", "transition_reasons",
-                    "rejection_reasons", "remaining_failure_signature",
-                ) if key in item
-            }, string_limit=900)
-            size = len(canonical_json(compacted))
-            if attempt_total + size > 12000:
-                break
-            compact_attempts.append(compacted)
-            attempt_total += size
+        failure = objective.active_failure
+        graph = objective.dynamic_failure_graph
+        dynamic_context = None
+        if graph is not None:
+            nodes = graph.nodes
+            dynamic_context = {
+                # Only local execution context is exposed. Internal graph IDs,
+                # patch hashes and edge counts are deliberately omitted so the
+                # model cannot treat the locator as certification evidence.
+                "nodes": tuple({
+                    "kind": str(node.kind), "path": node.path,
+                    "symbol": node.symbol, "start_line": node.start_line,
+                    "end_line": node.end_line, "distance": node.distance,
+                } for node in sorted(
+                    nodes.values(), key=lambda item: (item.distance, item.path, item.start_line),
+                )[:32]),
+                "edges": tuple({
+                    "kind": str(edge.kind),
+                    "source": nodes.get(edge.source_id).symbol if nodes.get(edge.source_id) else None,
+                    "target": nodes.get(edge.target_id).symbol if nodes.get(edge.target_id) else None,
+                    "distance": edge.distance,
+                } for edge in graph.edges.values()
+                if nodes.get(edge.source_id) is not None and nodes.get(edge.target_id) is not None)[:64],
+                "frontier": tuple({
+                    "reason": item.reason, "path": item.path,
+                    "symbol": item.symbol, "depth": item.depth,
+                } for item in graph.frontier[:24]),
+                "expanded_depth": graph.expanded_depth,
+            }
         return {
             "objective_id": objective.objective_id,
-            "objective_kind": objective.objective_kind,
             "repair_mode": objective.mode,
-            "selected_frontier": cls._compact(
-                objective.selected_frontier.to_dict()
-                if objective.selected_frontier is not None else None,
-                string_limit=3200,
+            "active_failure": cls._compact(
+                failure.to_dict() if hasattr(failure, "to_dict") else failure,
+                string_limit=12000,
             ),
-            "validation_obligations": cls._compact(
-                tuple(item.to_dict() for item in objective.validation_obligations),
+            "exact_failure_command": objective.exact_failure_command,
+            "comparator": objective.comparator,
+            "expected_observation": objective.expected_observation,
+            "actual_observation": objective.actual_observation,
+            "stdout": cls._compact(objective.stdout, string_limit=8000),
+            "stderr": cls._compact(objective.stderr, string_limit=8000),
+            "traceback_frames": objective.traceback_frames,
+            "current_full_diff": objective.current_full_diff,
+            "parent_patch_hash": objective.parent_patch_hash,
+            "current_patch_hash": objective.current_patch_hash,
+            "relevant_source_slices": cls._compact(
+                tuple(item.to_dict() for item in objective.relevant_source_slices),
                 string_limit=5000,
             ),
-            "atomic_obligations": cls._compact(
-                tuple(item.to_dict() for item in objective.atomic_obligations),
-                string_limit=5000,
+            "changed_hunks": cls._compact(
+                tuple(item.to_dict() for item in objective.changed_hunks),
+                string_limit=3000,
             ),
-            "working_patch_hash": objective.working_patch_hash,
-            "graph_revision": objective.graph_revision,
-            "primary_requirement": cls._compact({
-                key: primary.get(key) for key in (
-                    "requirement_id", "kind", "quantifier", "operation",
-                    "expected_observation", "exception_contract", "preconditions",
-                    "domain_constraints", "preservation", "authority",
-                ) if key in primary
-            }),
-            "public_issue_context": tuple(public_context),
-            "related_requirements": related,
-            "execution_contract": executions,
-            "failure_observations": cls._compact(objective.observations, string_limit=1400),
-            "failure_signatures": objective.failure_signatures,
-            "first_divergences": cls._compact(objective.first_divergences),
-            "bindings": cls._compact(objective.bindings, string_limit=1400),
-            "actual_hunks": cls._compact(objective.actual_hunks, string_limit=1800),
-            "causal_cuts": cls._compact(objective.causal_cuts, string_limit=1600),
-            "impact_cone": cls._compact(objective.impact_cone, string_limit=1200),
-            "causal_guidance": cls._compact(objective.causal_guidance, string_limit=1600),
-            "locked_check_ids": objective.locked_check_ids,
-            "protected_target_ids": objective.protected_target_ids,
-            "protected_preservation_ids": objective.protected_preservation_ids,
-            "allowed_source_slices": slices,
-            "current_cumulative_diff": objective.cumulative_diff,
-            "expected_next_effects": objective.expected_next_effects,
-            "failed_mechanism_records": cls._compact(
-                objective.forbidden_mechanisms, string_limit=1200,
-            ),
-            "attempt_history": tuple(reversed(compact_attempts)),
+            "dynamic_failure_context": cls._compact(dynamic_context, string_limit=5000),
+            "locked_checks": tuple(item.to_dict() for item in objective.locked_checks),
+            "preservation_checks": tuple(item.to_dict() for item in objective.preservation_checks),
+            "mechanical_blockers": tuple(item.to_dict() for item in objective.mechanical_blockers),
+            "previous_attempts": tuple(item.to_dict() for item in objective.previous_attempts),
+            "forbidden_repeated_mechanisms": objective.forbidden_repeated_mechanisms,
+            "attempt_history": cls._compact(attempt_history[-8:], string_limit=1200),
         }
 
     @classmethod
     def _prompt(
         cls,
-        objective: RepairObjective,
+        objective: RepairObjective | InitialPatchObjective,
         attempt_history: tuple[dict[str, Any], ...] = (),
     ) -> str:
         revision = objective.objective_kind != "INITIAL_PATCH"
@@ -263,27 +220,28 @@ class DeepSeekAgent:
             if retry_marker != "1" else ""
         )
         return (
-            "You are the Repair Player in a graph-grounded Reach-Avoid loop. "
+            "You are the Repair Player in an execution-driven Reach-Avoid loop. "
             "Work on the current working tree with the supplied tools and return exactly "
-            "one tool call per turn. The graph-derived causal brief follows first; this "
-            "single repair contract is the source of truth. "
+            "one tool call per turn. The exact executable failure and typed Oracle are the source of truth; any dynamic graph is context only and cannot certify progress. "
             + (
                 "The cumulative diff is already applied to the working tree; submit only "
                 "incremental edits. " if revision else
                 "Inspect the relevant causal slice and execution contract before making "
                 "the initial behavioral edit. "
             )
-            + "Edit the existing working tree and preserve its complete cumulative diff; do not reset to a clean repository or generate an independent patch. Read the exact failure command, Oracle, stdout/stderr, traceback, current diff and causal cut before changing code. "
+            + "Edit the existing working tree and preserve its complete cumulative diff; do not reset to a clean repository or generate an independent patch. Read the exact failure command, Oracle, actual observation, stdout/stderr, traceback and current source before changing code. Close only this one ActiveFailure in the current revision. "
+            + "For apply_patch, send either a complete git unified diff starting with 'diff --git' and containing ---/+++/@@ hunks, or a complete structured action starting with '*** Begin Patch' and ending with '*** End Patch'. Never send a prose explanation, markdown without a patch body, or a partial hunk. "
             + "Use the allowed source slices, reproduce every grounded observation, and "
             "preserve locked target and preservation behavior. A patch must change executable "
             "behavior, not only comments, whitespace, or an unchanged excerpt. Never use "
             "model wording as a mechanism identity: failed mechanism records are keyed by "
-            "actual diff and execution facts. finish_revision is valid only after the current "
-            "diff is inspected and all required validations are SATISFIED; UNKNOWN is not PASS. "
+            "actual diff and execution facts. finish_revision is valid only after every grounded "
+            "validation has executed to a terminal observation; a stable FAIL may be submitted "
+            "for stage/distance comparison, while UNKNOWN or BLOCKED is not progress. "
             "If a protected target passes while preservation fails, make one cumulative edit "
             "that repairs the preservation consumer and retains the target. "
             "Do not delete target behavior, weaken inputs, modify tests, or swallow exceptions to obtain a surface pass. When target progress and a regression coexist, retain the target mechanism and repair the regression in the same cumulative edit. "
-            "read_file, search_symbol, inspect_callers, inspect_trace, and inspect_diff are "
+            "read_file, search_symbol, inspect_diff, and inspect_incremental_diff are "
             "available whenever needed to understand a failed observation.\n"
             + retry_guidance
             + canonical_json(cls._repair_context(objective, attempt_history))
@@ -292,7 +250,7 @@ class DeepSeekAgent:
     @classmethod
     def _convergence_prompt(
         cls,
-        objective: RepairObjective,
+        objective: RepairObjective | InitialPatchObjective,
         current_incremental_diff: dict[str, Any],
         current_cumulative_diff: dict[str, Any],
         source_contexts: dict[str, dict[str, Any]],
@@ -307,7 +265,7 @@ class DeepSeekAgent:
             if retry_marker != "1" else ""
         )
         preferred_paths = {
-            str(item.get("path", "")) for item in objective.editable_source_slices
+            item.path for item in getattr(objective, "relevant_source_slices", ())
         }
         observed = [
             value for path, value in source_contexts.items()
@@ -319,7 +277,7 @@ class DeepSeekAgent:
         # The live tree may have changed since the objective was compiled;
         # replace the objective snapshot instead of serializing two diffs.
         repair_contract["current_cumulative_diff"] = current_cumulative_diff.get(
-            "canonical_diff", objective.cumulative_diff,
+            "canonical_diff", objective.current_full_diff,
         )
         diff_instruction = (
             "The cumulative diff is already present; submit only an incremental hunk "
@@ -334,6 +292,9 @@ class DeepSeekAgent:
             "source slice, inspect a trace/diff, or run a grounded validation before editing. "
             "After a successful edit inspect_diff and finish_revision when validations are "
             "satisfied. "
+            "Any apply_patch call must contain a complete git unified diff or a complete "
+            "*** Begin Patch ... *** End Patch structured action, with exact current-source "
+            "context; never submit prose or a partial hunk. "
             + diff_instruction
             + "\n"
             + retry_guidance
@@ -356,13 +317,13 @@ class DeepSeekAgent:
 
     def revise(
         self,
-        objective: RepairObjective,
+        objective: RepairObjective | InitialPatchObjective,
         tools: RepairToolExecutor,
         *,
         initial: bool = False,
     ) -> dict[str, Any]:
         messages: list[dict[str, Any]] = [
-            {"role": "system", "content": "You are the Repair Player in a graph-grounded Reach-Avoid loop."},
+            {"role": "system", "content": "You are the Repair Player in an execution-driven Reach-Avoid loop. Work only from the exact executable failure and typed Oracle."},
             {"role": "user", "content": self._prompt(
                 objective,
                 tuple(tools.state.generator_session.attempt_history[-8:]),
@@ -371,18 +332,30 @@ class DeepSeekAgent:
         max_turns = (
             self.config.initial_generator_max_turns if initial
             else (
-                self.config.revision_generator_turn_limit
-                if self.config.revision_generator_max_turns == 12
-                else self.config.revision_generator_max_turns
+                self.config.root_recovery_max_turns
+                if getattr(objective, "mode", None) is RepairMode.RECOVER_ROOT_CAUSE
+                else (
+                    self.config.revision_generator_turn_limit
+                    if self.config.revision_generator_max_turns == 12
+                    else self.config.revision_generator_max_turns
+                )
             )
         )
         timeout = (
             self.config.initial_generator_wall_time_s if initial
-            else self.config.revision_generator_wall_time_s
+            else (
+                self.config.root_recovery_wall_time_s
+                if getattr(objective, "mode", None) is RepairMode.RECOVER_ROOT_CAUSE
+                else self.config.revision_generator_wall_time_s
+            )
         )
         tokens = (
             self.config.initial_generator_token_budget if initial
-            else self.config.revision_generator_token_budget
+            else (
+                self.config.root_recovery_token_budget
+                if getattr(objective, "mode", None) is RepairMode.RECOVER_ROOT_CAUSE
+                else self.config.revision_generator_token_budget
+            )
         )
         recovery_used = False
         mechanism = "causal_edit"
@@ -390,8 +363,8 @@ class DeepSeekAgent:
         force_convergence = False
         convergence_prompted = False
         rejected_patches: set[str] = {
-            objective.cumulative_diff
-        } if objective.cumulative_diff.strip() else set()
+            objective.current_full_diff
+        } if objective.current_full_diff.strip() else set()
         duplicate_rejection_count = 0
         no_op_rejection_count = 0
         rejected_finished_revision = False
@@ -425,7 +398,7 @@ class DeepSeekAgent:
                 messages.append({
                     "role": "user",
                     "content": (
-                        "Reach-Avoid deterministically executed the next graph-grounded "
+                        "Reach-Avoid deterministically executed the next executable "
                         "validation for the current cumulative patch. Preserve every "
                         "SATISFIED observation and repair every FAILED observation before "
                         "finishing:\n" + canonical_json(result)
@@ -477,7 +450,7 @@ class DeepSeekAgent:
                 messages = [
                     {
                         "role": "system",
-                        "content": "You are the Repair Player in a graph-grounded Reach-Avoid loop.",
+                        "content": "You are the Repair Player in an execution-driven Reach-Avoid loop. The dynamic failure graph is context only.",
                     },
                     {
                         "role": "user",
@@ -502,8 +475,12 @@ class DeepSeekAgent:
                         ),
                     })
             try:
+                request_tokens = (
+                    self.config.root_recovery_token_budget
+                    if recovery_used else tokens
+                )
                 message = self.transport.complete(
-                    messages, tools=available_tools, max_tokens=tokens,
+                    messages, tools=available_tools, max_tokens=request_tokens,
                     timeout_seconds=max(1.0, deadline - time.monotonic()),
                     tool_choice=tool_choice,
                 )
@@ -512,11 +489,12 @@ class DeepSeekAgent:
                     return {"error_kind": type(exc).__name__, "summary": str(exc), "recovery_used": True}
                 recovery_used = True
                 turn_limit = max(turn_limit, self.config.root_recovery_max_turns)
+                deadline = max(deadline, time.monotonic() + self.config.root_recovery_wall_time_s)
                 if isinstance(exc, urllib.error.HTTPError) and exc.code == 400:
                     messages = [
                         {
                             "role": "system",
-                            "content": "You are the Repair Player in a graph-grounded Reach-Avoid loop.",
+                            "content": "You are the Repair Player in an execution-driven Reach-Avoid loop. The dynamic failure graph is context only.",
                         },
                         {
                             "role": "user",
@@ -537,6 +515,25 @@ class DeepSeekAgent:
                 continue
             force_patch_next = False
             finish_reason = message.pop("_finish_reason", None)
+            request_id = message.pop("_request_id", None)
+            if request_id:
+                phase_name = (
+                    "initial" if initial else
+                    "root_recovery" if recovery_used or getattr(objective, "mode", None) is RepairMode.RECOVER_ROOT_CAUSE
+                    else f"revision:{tools.state.revision_count}"
+                )
+                tools.state.generator_session.conversation.append({
+                    "role": "model_request",
+                    "request_id": str(request_id),
+                    "objective_id": objective.objective_id,
+                    "phase": phase_name,
+                    "phase_key": (
+                        "case:initial" if phase_name == "initial" else
+                        f"case:root_recovery:{tools.state.revision_count + 1}"
+                        if phase_name == "root_recovery" else
+                        f"case:revision:{tools.state.revision_count + 1}"
+                    ),
+                })
             messages.append(message)
             if finish_reason == "length":
                 # The tree is authoritative.  Keep a partial cumulative edit
@@ -544,6 +541,7 @@ class DeepSeekAgent:
                 # recovery turn instead of clearing or sealing the patch.
                 recovery_used = True
                 turn_limit = max(turn_limit, self.config.root_recovery_max_turns)
+                deadline = max(deadline, time.monotonic() + self.config.root_recovery_wall_time_s)
                 messages.append({
                     "role": "user",
                     "content": (
@@ -663,13 +661,12 @@ class DeepSeekAgent:
                         patch = str(arguments.get("patch", ""))
                         force_convergence = True
                         convergence_prompted = True
-                        objective_effect = canonical_json({
-                            "operation": objective.primary_requirement.get("operation"),
-                            "expected_observation": objective.primary_requirement.get(
-                                "expected_observation"
-                            ),
-                            "expected_next_effects": objective.expected_next_effects,
-                        })
+                        objective_effect = canonical_json(
+                            self._repair_context(objective).get(
+                                "active_failure",
+                                self._repair_context(objective).get("goal_contracts", ()),
+                            )
+                        )
                         if duplicate_patch:
                             duplicate_rejection_count += 1
                             refresh_after_apply_failure = False
@@ -685,7 +682,7 @@ class DeepSeekAgent:
                                     "error_kind": "REPEATED_REJECTED_PATCH",
                                     "summary": (
                                         "The generator repeated an unchanged or unappliable "
-                                        "patch after graph-grounded rejection feedback."
+                                        "patch after execution-backed rejection feedback."
                                     ),
                                     "mechanism": "repeated_rejected_patch",
                                     "recovery_used": recovery_used,
@@ -749,7 +746,7 @@ class DeepSeekAgent:
         final_cumulative = tools.inspect_diff()
         # Validation is deterministic evidence collection, not an extra model
         # turn.  A model can consume its final available turn by applying the
-        # edit, so drain the bounded, graph-grounded validation queue before
+        # edit, so drain the bounded executable validation queue before
         # deciding whether that edit may be retained for transition evaluation.
         # This never treats an empty validation set as ready.
         if (
@@ -760,13 +757,21 @@ class DeepSeekAgent:
                 tools.run_allowed_public_check(
                     tools.validation_status()["pending_commands"][0]
                 )
+        final_validation = tools.validation_status()
+        # A stable FAIL is still a valid trial.  Reach-Avoid, rather than the
+        # edit agent, owns the decision to advance, keep repairing, or reject.
+        # Only pending/UNKNOWN execution prevents a trial from being evaluated.
+        validation_observed = bool(
+            not final_validation["pending_commands"]
+            and not final_validation["unknown_validation_ids"]
+        )
         retained_edit = bool(
             final_incremental.get("canonical_diff", "").strip()
             and final_cumulative.get("canonical_diff", "").strip()
             and not tools.cumulative_patch_rejected(
                 str(final_cumulative.get("patch_hash", ""))
             )
-            and tools.validation_status()["ready"]
+            and validation_observed
         )
         if not retained_edit and not tools.finished and mechanism == "causal_edit":
             mechanism = "context_expansion_without_edit"

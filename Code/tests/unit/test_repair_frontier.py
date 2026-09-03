@@ -3,6 +3,10 @@ from __future__ import annotations
 from dataclasses import replace
 from types import SimpleNamespace
 
+import pytest
+
+pytestmark = pytest.mark.legacy_graph
+
 from reachpatch.models.evidence import ObservationContract, OutcomeStatus, RunObservation
 from reachpatch.models.graphs import (
     BindingGraph, BindingStatus, BindingUnit, ChallengeGraph, PathClass,

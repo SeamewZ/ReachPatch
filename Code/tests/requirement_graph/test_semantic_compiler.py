@@ -3,7 +3,7 @@ from pathlib import Path
 from reachpatch.models.evidence import EvidenceRecord, PublicEvidence, public_evidence_from_instance
 from reachpatch.requirement_graph.compiler import (
     ClaimRole, CompiledRequirementClaim, EvidenceSpan, _fallback,
-    validate_compiled_claim,
+    compile_goal_contracts, validate_compiled_claim,
 )
 from reachpatch.requirement_graph.builder import build_requirement_graph
 
@@ -67,3 +67,99 @@ def test_unrelated_positive_sentence_does_not_authorize_all_witnesses():
     evidence = PublicEvidence(records=(record,))
     compilation = _fallback(issue, (), evidence.records)
     assert all("w" not in claim.witness_ids for claim in compilation.claims)
+
+
+def test_goal_tool_validation_feedback_retries_same_conversation(tmp_path):
+    issue = "BoundWidget.id_for_label should return the widget id."
+    quote = issue
+
+    class Transport:
+        def __init__(self):
+            self.calls = 0
+            self.messages = []
+
+        def complete(self, messages, **kwargs):
+            self.calls += 1
+            self.messages.append(tuple(messages))
+            assert kwargs["tool_choice"]["function"]["name"] == "submit_goal_contracts"
+            if self.calls == 1:
+                arguments = {"claim": "bad legacy shape", "evidence": quote}
+            else:
+                arguments = {"goals": [{
+                    "operation": "BoundWidget.id_for_label",
+                    "target_symbols": ["BoundWidget.id_for_label"],
+                    "comparator": "EQUALS",
+                    "expected": "the widget id",
+                    "evidence_spans": [{"start": 0, "end": len(quote), "quote": quote}],
+                    "authority": "B",
+                    "hard": True,
+                    "unresolved_reason": None,
+                }]}
+            import json
+            return {"tool_calls": [{"function": {"name": "submit_goal_contracts", "arguments": json.dumps(arguments)}}]}
+
+    transport = Transport()
+    goals = compile_goal_contracts(issue, (), (), transport, tmp_path)
+    assert transport.calls == 2
+    assert any(message.get("role") == "tool" and "validation_errors" in message.get("content", "") for message in transport.messages[-1])
+    assert goals[0].operation == "BoundWidget.id_for_label"
+    assert goals[0].hard
+
+
+def test_goal_tool_rejects_exception_class_as_operation_and_retries(tmp_path):
+    issue = "The value call must raise ValueError."
+
+    class Transport:
+        def __init__(self):
+            self.calls = 0
+
+        def complete(self, messages, **kwargs):
+            self.calls += 1
+            import json
+            operation = "ValueError" if self.calls == 1 else "value"
+            args = {
+                "goals": [{
+                    "operation": operation, "target_symbols": [operation],
+                    "comparator": "RAISES",
+                    "expected": {"exception_type": "ValueError"},
+                    "evidence_spans": [{"start": 0, "end": len(issue), "quote": issue}],
+                    "authority": "B", "hard": True, "unresolved_reason": None,
+                }]
+            }
+            return {"tool_calls": [{"function": {"name": "submit_goal_contracts", "arguments": json.dumps(args)}}]}
+
+    transport = Transport()
+    goals = compile_goal_contracts(issue, (), (), transport, tmp_path)
+    assert transport.calls == 2
+    assert goals[0].operation == "value"
+    assert goals[0].expected == {"exception_type": "ValueError"}
+
+
+def test_django_style_method_is_not_replaced_by_indented_return():
+    issue = (
+        "BoundWidget.id_for_label should return the id of its first subwidget.\n"
+        "    return self.subwidgets(name, value, attrs)[0].id_for_label(id_)\n"
+        "Actual: the current result points at the container."
+    )
+    compilation = _fallback(issue, (), ())
+    hard = [claim for claim in compilation.claims if claim.role is ClaimRole.TARGET]
+    assert hard and hard[0].operation == "BoundWidget.id_for_label"
+    assert all(claim.operation != "subwidgets" for claim in hard)
+
+
+def test_exception_name_is_oracle_not_fallback_operation():
+    compilation = _fallback("The `value` call must raise `ValueError`.", (), ())
+    target = next(claim for claim in compilation.claims if claim.role is ClaimRole.TARGET)
+    assert target.operation == "value"
+    assert target.target_symbols == ("value",)
+    assert target.expected_observation == {"kind": "RAISES", "expected": {"exception_type": "ValueError"}}
+
+
+def test_unresolved_goal_is_emitted_without_normative_evidence(tmp_path):
+    goals = compile_goal_contracts(
+        "The behavior is surprising. Here is some context only.",
+        (), (), None, tmp_path,
+    )
+    assert len(goals) == 1
+    assert goals[0].operation == "UNRESOLVED_TARGET"
+    assert not goals[0].hard

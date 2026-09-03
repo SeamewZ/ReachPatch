@@ -3,6 +3,10 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+import pytest
+
+pytestmark = pytest.mark.legacy_graph
+
 from reachpatch.models.core import Instance
 from reachpatch.models.reach_avoid import GeneratorResult
 from reachpatch.reach_avoid.controller import ReachAvoidController, incremental_mechanism_hash

@@ -7,6 +7,8 @@ from pathlib import Path
 
 import pytest
 
+pytestmark = pytest.mark.legacy_graph
+
 from reachpatch.models.base import stable_id
 from reachpatch.models.evidence import (
     ConfirmedFailure, CounterexamplePacket, PairedTraceBundle,
@@ -1580,6 +1582,30 @@ def test_revision_apply_patch_cannot_reset_incumbent_to_baseline(state_factory):
     with pytest.raises(RuntimeError, match="removes the complete cumulative diff"):
         tools.apply_patch(undo)
     assert "+    return 3" in tools.inspect_diff()["canonical_diff"]
+
+
+def test_revision_cannot_erase_trial_back_to_parent(state_factory):
+    state = state_factory()
+    state.run_root.mkdir()
+    staging = state.run_root / "generator_staging" / "prevent-trial-erase"
+    copy_source_tree(Path(state.working_checkpoint.snapshot_tree), staging)
+    tools = RepairToolExecutor(staging, state, _objective(state))
+    trial = (
+        "diff --git a/calc.py b/calc.py\n"
+        "--- a/calc.py\n+++ b/calc.py\n@@ -1,2 +1,2 @@\n"
+        " def calc():\n-    return 2\n+    return 3\n"
+    )
+    restore_parent = (
+        "diff --git a/calc.py b/calc.py\n"
+        "--- a/calc.py\n+++ b/calc.py\n@@ -1,2 +1,2 @@\n"
+        " def calc():\n-    return 3\n+    return 2\n"
+    )
+
+    tools.apply_patch(trial)
+    with pytest.raises(RuntimeError, match="restores the parent checkpoint"):
+        tools.apply_patch(restore_parent)
+
+    assert "+    return 3" in tools.inspect_incremental_diff()["canonical_diff"]
 
 
 def test_apply_failure_forces_source_refresh_before_new_hunk(state_factory):

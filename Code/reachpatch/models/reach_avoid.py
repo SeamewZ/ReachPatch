@@ -20,12 +20,16 @@ from reachpatch.reach_avoid.validation_backlog import ValidationBacklogItem
 
 
 class FailureStage(IntEnum):
-    NOT_EXECUTED = 0
-    PATCH_OR_SYNTAX_BLOCKER = 1
-    IMPORT_OR_NAME_BLOCKER = 2
-    PRE_TARGET_RUNTIME_BLOCKER = 3
-    TARGET_CONTRACT_FAILURE = 4
-    TARGET_PASS = 5
+    # Ordered semantic execution stages.  Evidence gaps (UNKNOWN, BLOCKED,
+    # timeout, nondeterminism) are represented as ``None`` by executors and
+    # never enter this ordering.  ``NOT_EXECUTED`` is a compatibility marker
+    # for historical artifacts only.
+    PATCH_OR_SYNTAX_BLOCKER = 0
+    IMPORT_OR_NAME_BLOCKER = 1
+    PRE_TARGET_RUNTIME_BLOCKER = 2
+    TARGET_CONTRACT_FAILURE = 3
+    TARGET_PASS = 4
+    NOT_EXECUTED = -1
 
 
 @dataclass(frozen=True, slots=True)
@@ -228,14 +232,6 @@ class TransitionDecision(StrEnum):
     ADVANCE_SAFE = "ADVANCE_SAFE"
     KEEP_REPAIRING = "KEEP_REPAIRING"
     REJECT_TRIAL = "REJECT_TRIAL"
-    SEAL_BEST = "SEAL_BEST"
-    # Read-only aliases retained for artifact readers from the immediately
-    # preceding release.  They map to the new semantics and are not used as
-    # production decision branches.
-    COMMIT_WORKING = "ADVANCE_SAFE"
-    KEEP_PROVISIONAL = "KEEP_REPAIRING"
-    ROLLBACK = "REJECT_TRIAL"
-    SEAL = "SEAL_BEST"
 
 
 Decision = TransitionDecision
@@ -243,25 +239,87 @@ Decision = TransitionDecision
 
 @dataclass(frozen=True, slots=True)
 class AtomicProgress(SerializableRecord):
-    obligation_id: str
-    requirement_id: str | None
-    binding_id: str | None
-    before_status: str
-    after_status: str
-    before_stage: FailureStage
-    after_stage: FailureStage
-    stable: bool
-    authority: str
-    entered_target_before: bool
-    entered_target_after: bool
-    strict_fail_to_pass: bool
-    stage_advanced: bool
-    contract_distance_before: float | None
-    contract_distance_after: float | None
-    contract_distance_improved: bool
-    blocker_removed: bool
-    regression: bool
-    reason: str
+    """Comparable progress for one semantic executable check.
+
+    ``check_id``/``parent_*``/``trial_*`` are the execution-driven schema.
+    The ``obligation_id`` and ``before_*`` aliases remain in the record so
+    historical artifacts can still be decoded; ``__post_init__`` keeps both
+    views synchronized.  Every boolean is derived from observations by the
+    transition evaluator, never from model prose or graph alignment.
+    """
+    check_id: str = ""
+    parent_status: str = ""
+    trial_status: str = ""
+    parent_stage: FailureStage | None = None
+    trial_stage: FailureStage | None = None
+    parent_distance: float | int | None = None
+    trial_distance: float | int | None = None
+    strict_progress: bool = False
+    partial_progress: bool = False
+    regression: bool = False
+    reason: str = ""
+    obligation_id: str = ""
+    requirement_id: str | None = None
+    binding_id: str | None = None
+    before_status: str = ""
+    after_status: str = ""
+    before_stage: FailureStage | None = None
+    after_stage: FailureStage | None = None
+    stable: bool = False
+    authority: str = "PROVISIONAL"
+    entered_target_before: bool = False
+    entered_target_after: bool = False
+    strict_fail_to_pass: bool = False
+    stage_advanced: bool = False
+    contract_distance_before: float | int | None = None
+    contract_distance_after: float | int | None = None
+    contract_distance_improved: bool = False
+    blocker_removed: bool = False
+
+    def __post_init__(self) -> None:
+        # Populate whichever schema view was omitted by a caller or by an
+        # older JSON artifact.  ``None`` is meaningful for an unavailable
+        # stage/distance and is therefore not replaced with a fabricated
+        # value.
+        if not self.check_id and self.obligation_id:
+            object.__setattr__(self, "check_id", self.obligation_id)
+        if not self.obligation_id and self.check_id:
+            object.__setattr__(self, "obligation_id", self.check_id)
+        if not self.parent_status and self.before_status:
+            object.__setattr__(self, "parent_status", self.before_status)
+        if not self.before_status and self.parent_status:
+            object.__setattr__(self, "before_status", self.parent_status)
+        if not self.trial_status and self.after_status:
+            object.__setattr__(self, "trial_status", self.after_status)
+        if not self.after_status and self.trial_status:
+            object.__setattr__(self, "after_status", self.trial_status)
+        if self.parent_stage is None and self.before_stage is not None:
+            object.__setattr__(self, "parent_stage", self.before_stage)
+        if self.before_stage is None and self.parent_stage is not None:
+            object.__setattr__(self, "before_stage", self.parent_stage)
+        if self.trial_stage is None and self.after_stage is not None:
+            object.__setattr__(self, "trial_stage", self.after_stage)
+        if self.after_stage is None and self.trial_stage is not None:
+            object.__setattr__(self, "after_stage", self.trial_stage)
+        if self.parent_distance is None and self.contract_distance_before is not None:
+            object.__setattr__(self, "parent_distance", self.contract_distance_before)
+        if self.contract_distance_before is None and self.parent_distance is not None:
+            object.__setattr__(self, "contract_distance_before", self.parent_distance)
+        if self.trial_distance is None and self.contract_distance_after is not None:
+            object.__setattr__(self, "trial_distance", self.contract_distance_after)
+        if self.contract_distance_after is None and self.trial_distance is not None:
+            object.__setattr__(self, "contract_distance_after", self.trial_distance)
+        if not self.strict_progress and self.strict_fail_to_pass:
+            object.__setattr__(self, "strict_progress", True)
+        if not self.strict_fail_to_pass and self.strict_progress:
+            object.__setattr__(self, "strict_fail_to_pass", True)
+        inferred_partial = bool(self.stage_advanced or self.contract_distance_improved or self.blocker_removed)
+        if not self.partial_progress and inferred_partial:
+            object.__setattr__(self, "partial_progress", True)
+        if self.partial_progress and not inferred_partial:
+            # A direct execution-schema construction may provide only the
+            # aggregate partial flag. Preserve it without inventing a reason.
+            object.__setattr__(self, "stage_advanced", True)
 
 
 @dataclass(frozen=True, slots=True)
@@ -356,6 +414,16 @@ class StateCheckpoint(SerializableRecord):
     confirmed_regressions: tuple[str, ...] = ()
     target_stage_by_obligation: dict[str, int] = field(default_factory=dict)
     transition_certificate_id: str | None = None
+    repository_corrupted: bool = False
+    forbidden_path_changed: bool = False
+    # Execution evidence is persisted with the checkpoint so a missing
+    # snapshot can be rebuilt from clean + canonical_diff without losing the
+    # selected failure or the observations that justified the transition.
+    active_failure: Any = None
+    target_observation_hashes: dict[str, str] = field(default_factory=dict)
+    preservation_observation_hashes: dict[str, str] = field(default_factory=dict)
+    challenge_observation_hashes: dict[str, str] = field(default_factory=dict)
+    working_tree_hash: str = ""
 
 
 @dataclass(slots=True)
@@ -371,34 +439,34 @@ class GeneratorSession(SerializableRecord):
 
 @dataclass(frozen=True, slots=True)
 class RepairObjective(SerializableRecord):
-    objective_id: str
-    objective_kind: str
-    primary_requirement: dict[str, Any]
-    related_requirements: tuple[dict[str, Any], ...]
-    public_context: tuple[dict[str, Any], ...]
-    related_failures: tuple[dict[str, Any], ...]
-    counterexamples: tuple[CounterexamplePacket, ...]
-    preservation_requirements: tuple[dict[str, Any], ...]
-    observations: tuple[dict[str, Any], ...]
-    failure_signatures: tuple[str, ...]
-    first_divergences: tuple[Any, ...]
-    executed_path_ids: tuple[str, ...]
-    guarded_branch_ids: tuple[str, ...]
-    causal_guidance: dict[str, Any]
-    bindings: tuple[dict[str, Any], ...]
-    actual_hunks: tuple[dict[str, Any], ...]
-    causal_cuts: tuple[dict[str, Any], ...]
-    impact_cone: dict[str, Any] | None
-    impact_risks: tuple[str, ...]
-    protected_target_ids: tuple[str, ...]
-    protected_preservation_ids: tuple[str, ...]
-    suggested_action_families: tuple[str, ...]
-    locked_check_ids: tuple[str, ...]
-    cumulative_diff: str
-    failed_mechanisms: tuple[dict[str, Any], ...]
-    forbidden_mechanisms: tuple[dict[str, Any], ...]
-    editable_source_slices: tuple[dict[str, Any], ...]
-    expected_next_effects: tuple[str, ...]
+    objective_id: str = ""
+    objective_kind: str = "EVIDENCE_LIMITED_REVIEW"
+    primary_requirement: dict[str, Any] = field(default_factory=dict)
+    related_requirements: tuple[dict[str, Any], ...] = ()
+    public_context: tuple[dict[str, Any], ...] = ()
+    related_failures: tuple[dict[str, Any], ...] = ()
+    counterexamples: tuple[CounterexamplePacket, ...] = ()
+    preservation_requirements: tuple[dict[str, Any], ...] = ()
+    observations: tuple[dict[str, Any], ...] = ()
+    failure_signatures: tuple[str, ...] = ()
+    first_divergences: tuple[Any, ...] = ()
+    executed_path_ids: tuple[str, ...] = ()
+    guarded_branch_ids: tuple[str, ...] = ()
+    causal_guidance: dict[str, Any] = field(default_factory=dict)
+    bindings: tuple[dict[str, Any], ...] = ()
+    actual_hunks: tuple[dict[str, Any], ...] = ()
+    causal_cuts: tuple[dict[str, Any], ...] = ()
+    impact_cone: dict[str, Any] | None = None
+    impact_risks: tuple[str, ...] = ()
+    protected_target_ids: tuple[str, ...] = ()
+    protected_preservation_ids: tuple[str, ...] = ()
+    suggested_action_families: tuple[str, ...] = ()
+    locked_check_ids: tuple[str, ...] = ()
+    cumulative_diff: str = ""
+    failed_mechanisms: tuple[dict[str, Any], ...] = ()
+    forbidden_mechanisms: tuple[dict[str, Any], ...] = ()
+    editable_source_slices: tuple[dict[str, Any], ...] = ()
+    expected_next_effects: tuple[str, ...] = ()
     # Every command, input, and oracle travels as one atomic record.
     validation_obligations: tuple["ValidationObligation", ...] = ()
     selected_frontier: RepairFrontier | None = None
@@ -406,6 +474,32 @@ class RepairObjective(SerializableRecord):
     graph_revision: int = 0
     atomic_obligations: tuple[AtomicObligation, ...] = ()
     mode: str = "EVIDENCE_LIMITED_REVIEW"
+    # Execution-driven fields: one selected failure and its executable oracle.
+    active_failure: Any = None
+    exact_failure_command: tuple[str, ...] = ()
+    comparator: str = ""
+    expected_observation: Any = None
+    actual_observation: Any = None
+    stdout: str = ""
+    stderr: str = ""
+    traceback_frames: tuple[str, ...] = ()
+    current_full_diff: str = ""
+    parent_patch_hash: str = ""
+    current_patch_hash: str = ""
+    dynamic_failure_graph: Any = None
+    locked_checks: tuple[Any, ...] = ()
+    preservation_checks: tuple[Any, ...] = ()
+    mechanical_blockers: tuple[Any, ...] = ()
+    previous_attempts: tuple[Any, ...] = ()
+    forbidden_repeated_mechanisms: tuple[str, ...] = ()
+    # Execution-driven aliases.  These are deliberately ordinary data, so a
+    # repair player receives the selected failure context without importing or
+    # traversing any graph stack.
+    selected_requirement: Any = None
+    selected_binding: Any = None
+    selected_counterexample: Any = None
+    relevant_source_slices: tuple[Any, ...] = ()
+    changed_hunks: tuple[Any, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -582,7 +676,7 @@ class TrialTransition(SerializableRecord):
     trial_tree: str | None
     incremental_diff: ActualDiff
     cumulative_diff: ActualDiff
-    graph_stack: GraphStack
+    graph_stack: GraphStack | None
     challenge_result: ChallengeRoundResult | None
     evidence: TransitionEvidence
     progress: ProgressEvaluation
@@ -652,6 +746,32 @@ class TransitionCertificate(SerializableRecord):
     locked_successes_after: tuple[str, ...] = ()
     regressions: tuple[str, ...] = ()
     timestamp: str = ""
+    # Execution-driven certificate aliases.  These fields are populated by
+    # the production controller; legacy graph certificates leave them empty
+    # and remain readable.
+    certificate_id: str = ""
+    case_id: str = ""
+    revision_index: int = 0
+    parent_checkpoint_id: str = ""
+    result_patch_hash: str = ""
+    active_failure_id: str = ""
+    active_failure_kind: str = ""
+    exact_failure_command: tuple[str, ...] = ()
+    check_ids: tuple[str, ...] = ()
+    dynamic_failure_graph_hash: str | None = None
+    decision_reason: str = ""
+    # Explicit parent hash makes the parent -> trial relationship auditable
+    # without dereferencing checkpoint files.
+    parent_patch_hash: str = ""
+
+
+@dataclass(frozen=True, slots=True)
+class LockedCheck(SerializableRecord):
+    """A trusted executable check that must be replayed on every trial."""
+
+    check_id: str
+    passing_observation_hash: str
+    patch_hash_when_locked: str
 
 
 @dataclass(slots=True)
@@ -661,20 +781,23 @@ class ReachAvoidState(SerializableRecord):
     base_repository: Path
     base_commit: str
     run_root: Path
-    graph_stack: GraphStack
-    working_checkpoint: StateCheckpoint
-    certified_checkpoint: StateCheckpoint | None
-    checkpoint_history: dict[str, StateCheckpoint]
-    observations: ObservationBundle
-    counterexamples: list[CounterexamplePacket]
-    locked_checks: LockedCheckSet
-    confirmed_failures: list[ConfirmedFailure]
-    failure_history: dict[str, FailureHistory]
-    generator_session: GeneratorSession
-    current_repair_objective: RepairObjective | None
-    revision_count: int
-    generator_attempt_count: int
-    challenge_round_count: int
+    # ``graph_stack`` and the following compatibility fields are optional for
+    # the execution-driven state. Keeping defaults also lets new callers
+    # construct the minimal state without manufacturing a retired graph.
+    graph_stack: GraphStack | None = None
+    working_checkpoint: StateCheckpoint | None = None
+    certified_checkpoint: StateCheckpoint | None = None
+    checkpoint_history: dict[str, StateCheckpoint] = field(default_factory=dict)
+    observations: ObservationBundle = field(default_factory=ObservationBundle)
+    counterexamples: list[CounterexamplePacket] = field(default_factory=list)
+    locked_checks: LockedCheckSet = field(default_factory=LockedCheckSet)
+    confirmed_failures: list[ConfirmedFailure] = field(default_factory=list)
+    failure_history: dict[str, Any] = field(default_factory=dict)
+    generator_session: GeneratorSession = field(default_factory=lambda: GeneratorSession("execution-session"))
+    current_repair_objective: RepairObjective | None = None
+    revision_count: int = 0
+    generator_attempt_count: int = 0
+    challenge_round_count: int = 0
     # Deprecated positional slot retained for loading pre-v2 runtime records.
     # Production code uses ``consecutive_evidence_limited_steps`` instead.
     no_progress_generator_attempts: int = 0
@@ -708,6 +831,17 @@ class ReachAvoidState(SerializableRecord):
     program_slice: Any | None = None
     active_binding_graph: Any | None = None
     target_recovery: Any | None = None
+    active_failure: Any | None = None
+    dynamic_failure_graph: Any | None = None
+    # Minimal execution specification retained alongside the compatibility
+    # GraphStack field.  The execution controller reads these fields directly.
+    clean_snapshot: Path | None = None
+    goal_contracts: tuple[Any, ...] = ()
+    public_context: tuple[dict[str, Any], ...] = ()
+    target_checks: tuple[Any, ...] = ()
+    preservation_checks: tuple[Any, ...] = ()
+    challenge_checks: tuple[Any, ...] = ()
+    locked_check_records: dict[str, Any] = field(default_factory=dict)
 
     @property
     def repair_revision_count(self) -> int:
@@ -786,3 +920,11 @@ class CheckpointRuntimeState(SerializableRecord):
     program_slice: Any | None = None
     active_binding_graph: Any | None = None
     target_recovery: Any | None = None
+    clean_snapshot: Path | None = None
+    goal_contracts: tuple[Any, ...] = ()
+    target_checks: tuple[Any, ...] = ()
+    preservation_checks: tuple[Any, ...] = ()
+    challenge_checks: tuple[Any, ...] = ()
+    active_failure: Any | None = None
+    dynamic_failure_graph: Any | None = None
+    locked_check_records: dict[str, Any] = field(default_factory=dict)

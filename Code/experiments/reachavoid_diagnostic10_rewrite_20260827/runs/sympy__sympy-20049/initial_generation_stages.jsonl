@@ -1,6 +1,0 @@
-{"generator_attempt_count":1,"patch_hash":null,"stage":"COPY_INITIAL_TREE"}
-{"generator_attempt_count":1,"patch_hash":null,"stage":"APPLY_GENERATOR_RESULT"}
-{"generator_attempt_count":1,"patch_hash":null,"stage":"DISCARD_GENERATOR_STAGING"}
-{"generator_attempt_count":1,"patch_hash":null,"stage":"COMPUTE_INITIAL_DIFF"}
-{"generator_attempt_count":1,"patch_hash":"9e3cd0164c1e5e571b848e9906a33dd7378048a268398d117f42c3888bd52dab","stage":"RUN_INITIAL_MECHANICAL"}
-{"generator_attempt_count":1,"patch_hash":"9e3cd0164c1e5e571b848e9906a33dd7378048a268398d117f42c3888bd52dab","stage":"INITIAL_PATCH_READY"}

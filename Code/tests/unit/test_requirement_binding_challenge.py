@@ -3,6 +3,10 @@ from __future__ import annotations
 from dataclasses import replace
 from pathlib import Path
 
+import pytest
+
+pytestmark = pytest.mark.legacy_graph
+
 from reachpatch.binding_graph import build_binding_graph, confirm_bindings_from_execution
 from reachpatch.challenge_graph.execute import execute_challenge_round
 from reachpatch.challenge_graph.materialize import (

@@ -12,7 +12,9 @@ from pathlib import Path
 from typing import Any, TypeVar, get_args, get_origin, get_type_hints
 
 from reachpatch.challenge_graph.models import open_high_challenge_ids
-from reachpatch.execution.worktree import copy_source_tree, diff_between, tree_hash
+from reachpatch.execution.worktree import (
+    apply_unified_diff, copy_source_tree, diff_between, tree_hash,
+)
 from reachpatch.models.base import canonical_json, content_hash, stable_id
 from reachpatch.models.evidence import (
     ConfirmedFailure, CounterexamplePacket, FailureHistory, LockedCheckSet,
@@ -30,6 +32,7 @@ from reachpatch.models.reach_avoid import (
 
 
 SCHEMA_NAME = "reachpatch-reach-avoid-v2"
+EXECUTION_SCHEMA_NAME = "reachpatch-execution-checkpoint-v1"
 T = TypeVar("T")
 
 
@@ -208,6 +211,188 @@ class CheckpointStore:
         self.runtime_state(checkpoint.checkpoint_id)
 
 
+class _LegacyExecutionCheckpointStore:
+    """Immutable checkpoint storage for the production execution loop.
+
+    Historical GraphStack artifacts remain readable through ``CheckpointStore``.
+    This store deliberately has no graph reader: its certification payload is
+    made only of the cumulative patch and executed mechanical/semantic checks.
+    """
+
+    def __init__(self, run_root: Path) -> None:
+        self.run_root = Path(run_root).resolve()
+        self.root = self.run_root / "execution_checkpoints"
+        self.root.mkdir(parents=True, exist_ok=True)
+
+    def path(self, checkpoint_id: str) -> Path:
+        return self.root / checkpoint_id
+
+    def load(self, checkpoint_id: str) -> StateCheckpoint:
+        path = self.path(checkpoint_id) / "checkpoint.json"
+        if not path.is_file():
+            raise FileNotFoundError(path)
+        raw = json.loads(path.read_text(encoding="utf-8"))
+        if raw.get("schema") != EXECUTION_SCHEMA_NAME:
+            raise IncompatibleArtifactError(
+                "Artifact is not an execution-driven checkpoint."
+            )
+        return record_from_dict(StateCheckpoint, raw["checkpoint"])
+
+    def replace_metadata(self, checkpoint: StateCheckpoint) -> StateCheckpoint:
+        """Update audit-only metadata without changing the immutable tree."""
+        path = self.path(checkpoint.checkpoint_id) / "checkpoint.json"
+        raw = json.loads(path.read_text(encoding="utf-8"))
+        previous = record_from_dict(StateCheckpoint, raw["checkpoint"])
+        if (
+            previous.patch_hash != checkpoint.patch_hash
+            or previous.canonical_diff != checkpoint.canonical_diff
+            or previous.snapshot_tree != checkpoint.snapshot_tree
+            or previous.working_tree_hash != checkpoint.working_tree_hash
+        ):
+            raise RuntimeError("execution checkpoint content cannot be mutated")
+        raw["checkpoint"] = checkpoint.to_dict()
+        _atomic_json(path, raw)
+        return self.load(checkpoint.checkpoint_id)
+
+    def save(
+        self,
+        checkpoint: StateCheckpoint,
+        source_tree: Path,
+        *,
+        mechanical: Any,
+        target_results: tuple[Any, ...] = (),
+        preservation_results: tuple[Any, ...] = (),
+        challenge_results: tuple[Any, ...] = (),
+    ) -> StateCheckpoint:
+        final = self.path(checkpoint.checkpoint_id)
+        expected_snapshot = final / "working_tree"
+        if Path(checkpoint.snapshot_tree) != expected_snapshot:
+            raise ValueError("checkpoint snapshot path is not content-addressed")
+        if final.exists():
+            loaded = self.load(checkpoint.checkpoint_id)
+            if loaded != checkpoint:
+                raise RuntimeError("execution checkpoint identity collision")
+            snapshot = Path(loaded.snapshot_tree)
+            if not snapshot.is_dir():
+                raise FileNotFoundError(snapshot)
+            if loaded.working_tree_hash and tree_hash(snapshot) != loaded.working_tree_hash:
+                raise RuntimeError("execution checkpoint working tree hash mismatch")
+            return loaded
+        source_tree = Path(source_tree).resolve()
+        source_hash = tree_hash(source_tree)
+        if checkpoint.working_tree_hash and checkpoint.working_tree_hash != source_hash:
+            raise RuntimeError("checkpoint source tree hash mismatch")
+        temporary = Path(tempfile.mkdtemp(prefix=f".{checkpoint.checkpoint_id}.", dir=self.root))
+        try:
+            copy_source_tree(source_tree, temporary / "working_tree", hardlink_files=True)
+            _atomic_json(temporary / "checkpoint.json", {
+                "schema": EXECUTION_SCHEMA_NAME,
+                "checkpoint": checkpoint.to_dict(),
+                "tree_hash": source_hash,
+                "mechanical": mechanical.to_dict() if hasattr(mechanical, "to_dict") else mechanical,
+                "target_results": [item.to_dict() if hasattr(item, "to_dict") else item for item in target_results],
+                "preservation_results": [item.to_dict() if hasattr(item, "to_dict") else item for item in preservation_results],
+                "challenge_results": [item.to_dict() if hasattr(item, "to_dict") else item for item in challenge_results],
+            })
+            os.replace(temporary, final)
+        except BaseException:
+            shutil.rmtree(temporary, ignore_errors=True)
+            raise
+        return self.load(checkpoint.checkpoint_id)
+
+    def recover_snapshot(
+        self, checkpoint: StateCheckpoint, clean_snapshot: Path,
+    ) -> Path:
+        """Rebuild a missing immutable tree from clean + cumulative diff."""
+        destination = Path(checkpoint.snapshot_tree)
+        if destination.is_dir():
+            return destination
+        root = self.path(checkpoint.checkpoint_id)
+        root.mkdir(parents=True, exist_ok=True)
+        temporary = Path(tempfile.mkdtemp(prefix=".rebuild-", dir=root))
+        rebuilt = temporary / "working_tree"
+        try:
+            copy_source_tree(Path(clean_snapshot), rebuilt)
+            apply_unified_diff(rebuilt, checkpoint.canonical_diff)
+            actual = diff_between(clean_snapshot, rebuilt)
+            if actual.patch_hash != checkpoint.patch_hash:
+                raise RuntimeError("rebuilt checkpoint patch hash mismatch")
+            rebuilt_hash = tree_hash(rebuilt)
+            if checkpoint.working_tree_hash and rebuilt_hash != checkpoint.working_tree_hash:
+                raise RuntimeError("rebuilt checkpoint tree hash mismatch")
+            os.replace(rebuilt, destination)
+        finally:
+            shutil.rmtree(temporary, ignore_errors=True)
+        return destination
+
+    def validate(
+        self, checkpoint: StateCheckpoint, base_repository: Path | None,
+        *, clean_snapshot: Path | None = None,
+    ) -> None:
+        loaded = self.load(checkpoint.checkpoint_id)
+        if loaded != checkpoint:
+            raise RuntimeError("execution checkpoint metadata mismatch")
+        snapshot = Path(checkpoint.snapshot_tree)
+        if not snapshot.is_dir():
+            if clean_snapshot is None:
+                raise FileNotFoundError(snapshot)
+            snapshot = self.recover_snapshot(checkpoint, clean_snapshot)
+        base = Path(base_repository or clean_snapshot or "")
+        actual = diff_between(base, snapshot)
+        if actual.patch_hash != checkpoint.patch_hash or actual.canonical_diff != checkpoint.canonical_diff:
+            raise RuntimeError("execution checkpoint cumulative diff mismatch")
+        if checkpoint.working_tree_hash and tree_hash(snapshot) != checkpoint.working_tree_hash:
+            raise RuntimeError("execution checkpoint working tree hash mismatch")
+
+    def write_state(self, state: ReachAvoidState) -> Path:
+        path = self.run_root / "execution_state.json"
+        _atomic_json(path, {
+            "schema": "reachpatch-execution-state-v1",
+            "working_checkpoint_id": state.working_checkpoint.checkpoint_id,
+            "safe_checkpoint_id": state.safe_checkpoint.checkpoint_id if state.safe_checkpoint else None,
+            "best_checkpoint_id": state.best_checkpoint.checkpoint_id if state.best_checkpoint else None,
+            "certified_checkpoint_id": state.certified_checkpoint.checkpoint_id if state.certified_checkpoint else None,
+            "goal_contracts": [item.to_dict() if hasattr(item, "to_dict") else item for item in state.goal_contracts],
+            "target_checks": [item.to_dict() if hasattr(item, "to_dict") else item for item in state.target_checks],
+            "preservation_checks": [item.to_dict() if hasattr(item, "to_dict") else item for item in state.preservation_checks],
+            "challenge_checks": [item.to_dict() if hasattr(item, "to_dict") else item for item in state.challenge_checks],
+            "locked_check_records": {key: item.to_dict() if hasattr(item, "to_dict") else item for key, item in state.locked_check_records.items()},
+            "active_failure": state.active_failure.to_dict() if hasattr(state.active_failure, "to_dict") else state.active_failure,
+            "dynamic_failure_graph": state.dynamic_failure_graph.to_dict() if hasattr(state.dynamic_failure_graph, "to_dict") else state.dynamic_failure_graph,
+            "failure_history": state.failure_history,
+            "generator_session": state.generator_session.to_dict() if hasattr(state.generator_session, "to_dict") else state.generator_session,
+            "generator_attempt_count": state.generator_attempt_count,
+            "execution_budget_seconds": state.execution_budget_seconds,
+            "remaining_wall_seconds": state.remaining_wall_seconds,
+            "phase": str(state.phase),
+            "termination_status": state.termination_status,
+            "transition_history": [item.to_dict() for item in state.transition_history],
+            "revision_count": state.revision_count,
+            "consecutive_evidence_limited_steps": state.consecutive_evidence_limited_steps,
+            "pending_frontier_keys": list(state.pending_frontier_keys),
+            "distinct_patch_hashes": sorted(state.distinct_patch_hashes),
+            "rejected_patch_hashes": sorted(state.rejected_patch_hashes),
+            "locked_successes": list(state.locked_successes),
+        })
+        return path
+
+    def read_state(self) -> dict[str, Any]:
+        path = self.run_root / "execution_state.json"
+        raw = json.loads(path.read_text(encoding="utf-8"))
+        if raw.get("schema") != "reachpatch-execution-state-v1":
+            raise IncompatibleArtifactError("Artifact is not an execution state.")
+        return raw
+
+
+# Production execution checkpoints live in the graph-free module.  Keep this
+# import as a compatibility export for callers that historically imported the
+# store from ``reach_avoid.checkpoint``; ``CheckpointStore`` above remains the
+# read-only GraphStack artifact adapter.
+from reachpatch.reach_avoid.execution_checkpoint import (  # noqa: E402
+    ExecutionCheckpointStore,
+)
+
+
 def _runtime_state(state: ReachAvoidState | None) -> CheckpointRuntimeState:
     if state is None:
         return CheckpointRuntimeState(
@@ -227,6 +412,9 @@ def _runtime_state(state: ReachAvoidState | None) -> CheckpointRuntimeState:
             program_slice=None,
             active_binding_graph=None,
             target_recovery=None,
+            clean_snapshot=None, goal_contracts=(), target_checks=(),
+            preservation_checks=(), challenge_checks=(), active_failure=None,
+            dynamic_failure_graph=None, locked_check_records={},
         )
     return record_from_dict(CheckpointRuntimeState, {
         "confirmed_failures": [item.to_dict() for item in state.confirmed_failures],
@@ -289,6 +477,14 @@ def _runtime_state(state: ReachAvoidState | None) -> CheckpointRuntimeState:
             state.target_recovery.to_dict()
             if getattr(state, "target_recovery", None) is not None else None
         ),
+        "clean_snapshot": str(state.clean_snapshot) if getattr(state, "clean_snapshot", None) is not None else None,
+        "goal_contracts": [item.to_dict() if hasattr(item, "to_dict") else item for item in getattr(state, "goal_contracts", ())],
+        "target_checks": [item.to_dict() if hasattr(item, "to_dict") else item for item in getattr(state, "target_checks", ())],
+        "preservation_checks": [item.to_dict() if hasattr(item, "to_dict") else item for item in getattr(state, "preservation_checks", ())],
+        "challenge_checks": [item.to_dict() if hasattr(item, "to_dict") else item for item in getattr(state, "challenge_checks", ())],
+        "active_failure": (state.active_failure.to_dict() if hasattr(getattr(state, "active_failure", None), "to_dict") else getattr(state, "active_failure", None)),
+        "dynamic_failure_graph": (state.dynamic_failure_graph.to_dict() if hasattr(getattr(state, "dynamic_failure_graph", None), "to_dict") else getattr(state, "dynamic_failure_graph", None)),
+        "locked_check_records": {key: (value.to_dict() if hasattr(value, "to_dict") else value) for key, value in getattr(state, "locked_check_records", {}).items()},
     })
 
 
@@ -710,6 +906,14 @@ def restore_checkpoint(
     state.program_slice = runtime.program_slice
     state.active_binding_graph = runtime.active_binding_graph
     state.target_recovery = runtime.target_recovery
+    state.clean_snapshot = runtime.clean_snapshot
+    state.goal_contracts = runtime.goal_contracts
+    state.target_checks = runtime.target_checks
+    state.preservation_checks = runtime.preservation_checks
+    state.challenge_checks = runtime.challenge_checks
+    state.active_failure = runtime.active_failure
+    state.dynamic_failure_graph = runtime.dynamic_failure_graph
+    state.locked_check_records = runtime.locked_check_records
 
 
 def update_working_checkpoint(state: ReachAvoidState, checkpoint: StateCheckpoint) -> StateCheckpoint:
@@ -741,15 +945,39 @@ def update_best_checkpoint(state: ReachAvoidState, checkpoint: StateCheckpoint) 
     return state.best_checkpoint or checkpoint
 
 
-def restore_parent_working_checkpoint(state: ReachAvoidState, parent: StateCheckpoint, store: CheckpointStore) -> StateCheckpoint:
+def restore_parent_working_checkpoint(state: ReachAvoidState, parent: StateCheckpoint, store: Any) -> StateCheckpoint:
     """Restore only the parent of a rejected trial, retaining history."""
-    restore_checkpoint(state, parent, store)
+    if isinstance(store, ExecutionCheckpointStore):
+        store.validate(
+            parent, state.base_repository, clean_snapshot=state.clean_snapshot,
+        )
+        update_working_checkpoint(state, parent)
+    else:
+        restore_checkpoint(state, parent, store)
     return state.working_checkpoint
 
 
 def select_final_checkpoint(state: ReachAvoidState) -> StateCheckpoint:
-    """Choose certified, best, safe, or latest applicable working checkpoint."""
-    for candidate in (state.certified_checkpoint, state.best_checkpoint, state.safe_checkpoint, state.working_checkpoint):
-        if candidate is not None and candidate.patch_is_applicable:
-            return candidate
+    """Choose the strongest applicable checkpoint without resurrecting P0.
+
+    ``best`` and ``safe`` may be non-final-eligible when the revision budget is
+    exhausted (for example, a target still has a stable FAIL but its distance
+    improved).  Such a checkpoint is still the required best-effort output; an
+    evidence gap is reported by its metadata rather than silently replacing it
+    with an older bootstrap patch.
+    """
+    if state.certified_checkpoint is not None and state.certified_checkpoint.patch_is_applicable:
+        return state.certified_checkpoint
+    # ``best`` is maintained by CheckpointScore ordering and therefore wins
+    # over a merely newer safe checkpoint.  A newer checkpoint must not hide a
+    # materially stronger earlier candidate just because it was evaluated
+    # later.  Revision is only a deterministic tie-breaker.
+    safe_candidates = tuple(
+        item for item in (state.best_checkpoint, state.safe_checkpoint)
+        if item is not None and item.patch_is_applicable
+    )
+    if safe_candidates:
+        return max(safe_candidates, key=lambda item: (item.score.ordering_key(), item.revision))
+    if state.working_checkpoint.patch_is_applicable:
+        return state.working_checkpoint
     raise RuntimeError("no applicable checkpoint available")

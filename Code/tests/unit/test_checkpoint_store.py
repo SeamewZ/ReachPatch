@@ -7,6 +7,8 @@ from pathlib import Path
 
 import pytest
 
+pytestmark = pytest.mark.legacy_graph
+
 from reachpatch.execution.worktree import (
     apply_generator_result, copy_source_tree, diff_between, register_runtime_root,
 )

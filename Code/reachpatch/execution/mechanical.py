@@ -6,9 +6,8 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from reachpatch.models.evidence import ActualDiff
-from reachpatch.models.graphs import ExecutableScenario
-from reachpatch.models.base import SerializableRecord
-from reachpatch.models.reach_avoid import MechanicalResult
+from reachpatch.models.base import SerializableRecord, stable_id
+from reachpatch.models.execution import MechanicalResult
 from reachpatch.execution.trace import run_trace
 
 
@@ -25,6 +24,14 @@ class UndefinedNameFinding(SerializableRecord):
     source_line: str
     reason: str
     severity: str = "BLOCKER"
+
+
+@dataclass(frozen=True, slots=True)
+class MechanicalCommand(SerializableRecord):
+    command: tuple[str, ...]
+    cwd: str = "."
+    environment: tuple[tuple[str, str], ...] = ()
+    timeout_seconds: float = 120.0
 
 
 def _bound_names(node: ast.AST) -> set[str]:
@@ -72,10 +79,20 @@ class _DirectScopeBindings(ast.NodeVisitor):
     def visit_ClassDef(self, node: ast.ClassDef) -> None:
         self.names.add(node.name)
 
+    def visit_ExceptHandler(self, node: ast.ExceptHandler) -> None:
+        if node.name:
+            self.names.add(node.name)
+        self.generic_visit(node)
+
     def visit_Lambda(self, node: ast.Lambda) -> None:
+        # Lambda bodies form a nested scope; the enclosing scope collector
+        # must not descend into them.
+        del node
         return
 
     def visit_ListComp(self, node: ast.ListComp) -> None:
+        # Comprehensions are handled explicitly by _visit_comprehension.
+        del node
         return
 
     visit_SetComp = visit_ListComp
@@ -95,17 +112,23 @@ class _DirectScopeDirectives(ast.NodeVisitor):
         self.nonlocals.update(node.names)
 
     def visit_FunctionDef(self, node: ast.FunctionDef) -> None:
+        # Nested definitions are bindings of the enclosing scope; their local
+        # names are collected when that scope is visited separately.
+        del node
         return
 
     visit_AsyncFunctionDef = visit_FunctionDef
 
     def visit_ClassDef(self, node: ast.ClassDef) -> None:
+        del node
         return
 
     def visit_Lambda(self, node: ast.Lambda) -> None:
+        del node
         return
 
     def visit_ListComp(self, node: ast.ListComp) -> None:
+        del node
         return
 
     visit_SetComp = visit_ListComp
@@ -147,7 +170,12 @@ def _module_bindings(tree: ast.Module) -> tuple[set[str], bool]:
         elif isinstance(statement, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
             bindings.add(statement.name)
         else:
-            bindings.update(_bound_names(statement))
+            # Only collect bindings owned by the module.  ``ast.walk`` over a
+            # function/class would incorrectly promote its local assignments
+            # to globals and hide a newly introduced NameError.
+            visitor = _DirectScopeBindings()
+            visitor.visit(statement)
+            bindings.update(visitor.names)
     return bindings, star_import
 
 
@@ -316,7 +344,7 @@ def run_mechanical_checks(
     trial_tree: Path,
     cumulative_diff: ActualDiff,
     commands: tuple[tuple[str, ...], ...] = (),
-    command_scenarios: tuple[ExecutableScenario, ...] = (),
+    command_scenarios: tuple[MechanicalCommand, ...] = (),
     oracle_paths: tuple[str, ...] = (),
     source_tree: Path | None = None,
 ) -> MechanicalResult:
@@ -374,11 +402,8 @@ def run_mechanical_checks(
                     relative,
                 ))
     scenarios = tuple(command_scenarios) + tuple(
-        ExecutableScenario(
-            scenario_id=f"mechanical:{index}", command=command, cwd=".",
-            environment=(), timeout_seconds=120.0,
-        )
-        for index, command in enumerate(commands)
+        MechanicalCommand(command=command)
+        for command in commands
     )
     for scenario in scenarios:
         # Mechanical command execution shares the same backend as challenges,
