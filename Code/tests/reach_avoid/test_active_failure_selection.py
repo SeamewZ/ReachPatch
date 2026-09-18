@@ -93,3 +93,23 @@ def test_active_failure_carries_parsed_actual_value():
     )
     assert selected is not None
     assert selected.actual == 3
+
+
+def test_failure_locus_stays_stable_when_actual_value_changes():
+    mechanical = MechanicalResult(True, (), False, False, False, False)
+    first = _failure("target")
+    second = CheckExecution(
+        first.check_id, first.status,
+        RunObservation(OutcomeStatus.FAIL, 1, "different-value\n", "AssertionError", 0.0),
+        first.trace, first.runs, first.stable,
+        "different-semantic-signature", first.entered_project_code,
+        first.failure_stage,
+    )
+    check = _check("target", "TARGET")
+    one = select_active_failure(mechanical, (first,), (), (), {}, target_checks=(check,))
+    two = select_active_failure(
+        mechanical, (second,), (), (), {one.signature: one.same_signature_count},
+        target_checks=(check,),
+    )
+    assert one.signature == two.signature
+    assert two.same_signature_count == 2

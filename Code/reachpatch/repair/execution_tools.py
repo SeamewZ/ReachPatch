@@ -187,7 +187,8 @@ class RepairToolExecutor:
         nodes = graph.nodes
         callers = []
         for edge in graph.edges.values():
-            if str(edge.kind) != "DYNAMIC_CALL":
+            edge_kind = getattr(getattr(edge, "kind", None), "value", getattr(edge, "kind", ""))
+            if str(edge_kind) not in {"DYNAMIC_CALLS", "DYNAMIC_CALL"}:
                 continue
             target = nodes.get(edge.target_id)
             source = nodes.get(edge.source_id)
@@ -197,7 +198,8 @@ class RepairToolExecutor:
                 continue
             callers.append({
                 "caller": source.symbol, "callee": target.symbol,
-                "path": source.path, "distance": edge.distance,
+                "path": getattr(source, "file", getattr(source, "path", None)),
+                "distance": getattr(edge, "distance", 0),
             })
         return {"symbol": symbol, "callers": tuple(callers[:20])}
 

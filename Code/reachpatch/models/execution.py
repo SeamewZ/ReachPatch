@@ -12,7 +12,7 @@ from enum import IntEnum, StrEnum
 from pathlib import Path
 from typing import Any
 
-from reachpatch.reach_avoid.dynamic_failure_graph import DynamicFailureGraph
+from reachpatch.reach_avoid.dynamic_reach_avoid_graph import DynamicReachAvoidGraph
 
 from .base import SerializableRecord
 
@@ -81,6 +81,11 @@ class GoalContract(SerializableRecord):
     authority: str
     hard: bool
     unresolved_reason: str | None = None
+    evidence_span_ids: tuple[str, ...] = ()
+    source_hint_ids: tuple[str, ...] = ()
+    alignment_reason: str = ""
+    parent_goal_id: str | None = None
+    facet_kind: str = "CONTRACT"
 
 
 @dataclass(frozen=True, slots=True)
@@ -124,6 +129,12 @@ class CheckExecution(SerializableRecord):
     # when present they are enforced by Reach certification.
     role: CheckRole | str | None = None
     authority: str | None = None
+    # ``entered_project_code`` describes any repository frame and is useful
+    # for diagnostics. Target certification uses this stricter flag, which is
+    # true only when the bound target symbol/path was executed. Keep it after
+    # the historical positional fields so execution records remain readable.
+    entered_target_code: bool | None = None
+    run_observations: tuple[Any, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -221,6 +232,9 @@ class StateCheckpoint(SerializableRecord):
     dynamic_failure_graph_hash: str | None = None
     working_tree_hash: str = ""
     transition_certificate_id: str | None = None
+    search_score: tuple[Any, ...] = ()
+    certified: bool = False
+    confirmed_preservation_regression: bool = False
 
     @property
     def canonical_diff(self) -> str:
@@ -267,7 +281,8 @@ class ReachAvoidState(SerializableRecord):
     challenge_checks: tuple[ExecutableCheck, ...]
     locked_checks: tuple[LockedCheck, ...]
     active_failure: ActiveFailure | None
-    dynamic_failure_graph: DynamicFailureGraph | None
+    # The live controller supplies the sole unified graph instance.
+    dynamic_failure_graph: DynamicReachAvoidGraph | None
     failure_history: dict[str, FailureHistory]
     transition_history: list["TransitionCertificate"]
     revision_count: int
@@ -287,6 +302,7 @@ class ReachAvoidState(SerializableRecord):
     target_recovery: Any = None
     distinct_patch_hashes: set[str] = field(default_factory=set)
     rejected_patch_hashes: set[str] = field(default_factory=set)
+    checkpoint_history: dict[str, StateCheckpoint] = field(default_factory=dict)
 
 
 @dataclass(frozen=True, slots=True)

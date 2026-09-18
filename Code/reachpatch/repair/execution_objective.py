@@ -71,6 +71,12 @@ class RepairObjective(SerializableRecord):
     mechanical_blockers: tuple[MechanicalBlocker, ...]
     previous_attempts: tuple[RepairAttempt, ...]
     forbidden_repeated_mechanisms: tuple[str, ...]
+    causal_cut_ids: tuple[str, ...] = ()
+    hypothesis_id: str | None = None
+    graph_source_spans: tuple[str, ...] = ()
+    repair_hypothesis: Any = None
+    hypothesis_feedback: tuple[dict[str, Any], ...] = ()
+    exploratory_observations: tuple[dict[str, Any], ...] = ()
 
     @property
     def objective_kind(self) -> str:
@@ -84,6 +90,7 @@ class InitialPatchObjective(SerializableRecord):
     public_context: tuple[dict[str, Any], ...]
     current_full_diff: str
     current_patch_hash: str
+    graph_context: Any = None
     mode: str = "INITIAL_PATCH"
 
     @property
@@ -183,8 +190,10 @@ def compile_execution_repair_objective(
         ActiveFailureKind.PRESERVATION: RepairMode.FIX_PRESERVATION,
         ActiveFailureKind.CHALLENGE: RepairMode.FIX_CHALLENGE,
     }[active_failure.kind]
-    if mode is not RepairMode.FIX_MECHANICAL and active_failure.same_signature_count >= 2:
-        mode = RepairMode.RECOVER_ROOT_CAUSE
+    # Repeated observations update the unified graph's failure-locus history;
+    # they do not silently change the repair contract.  Root-cause recovery is
+    # selected explicitly by the controller when evidence is exhausted, so a
+    # preservation regression remains a preservation repair objective.
     if mode is not RepairMode.FIX_MECHANICAL:
         missing = []
         if not active_failure.command:

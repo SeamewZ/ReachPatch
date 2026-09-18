@@ -9,6 +9,25 @@ from reachpatch.models.evidence import public_evidence_from_instance
 from reachpatch.requirement_graph.compiler import compile_goal_contracts
 
 
+def test_public_discovery_prioritizes_goal_call_over_generic_hint(tmp_path):
+    from reachpatch.models.evidence import discover_diff_public_checks
+    (tmp_path / "test_a_generic.py").write_text(
+        "def test_empty():\n    empty = []\n    assert not empty\n")
+    (tmp_path / "test_z_target.py").write_text(
+        "from api import transform_coordinates\n\ndef test_target():\n    assert transform_coordinates([]) == []\n")
+    checks = discover_diff_public_checks(tmp_path, diff_between(tmp_path, tmp_path),
+        target_symbols=("empty", "transform_coordinates"), preferred_symbols=("transform_coordinates",), max_checks=1)
+    assert len(checks) == 1
+    assert checks[0].command[-1] == "test_z_target.py::test_target"
+
+
+def test_public_discovery_does_not_treat_prose_as_executed_symbol(tmp_path):
+    from reachpatch.models.evidence import discover_diff_public_checks
+    (tmp_path / "test_prose.py").write_text(
+        "def test_target_name():\n    # transform_coordinates should work\n    assert 'transform_coordinates'\n")
+    assert not discover_diff_public_checks(tmp_path, diff_between(tmp_path, tmp_path), target_symbols=("transform_coordinates",))
+
+
 def _recover(tmp_path: Path, issue: str, checks=(), *, max_probes: int = 6):
     repository = tmp_path / "repo"
     repository.mkdir()

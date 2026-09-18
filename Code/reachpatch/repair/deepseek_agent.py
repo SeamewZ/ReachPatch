@@ -27,6 +27,9 @@ class DeepSeekConfig:
     initial_generator_token_budget: int = 32768
     revision_generator_token_budget: int = 32768
     root_recovery_token_budget: int = 32768
+    # Keep the phase wall-clock budgets large enough for recovery while
+    # bounding one stalled provider request so a sibling checkpoint can run.
+    provider_request_timeout_seconds: float = 180.0
 
     @classmethod
     def from_environment(cls) -> "DeepSeekConfig":
@@ -67,6 +70,9 @@ class DeepSeekHTTPTransport:
             "tool_choice": tool_choice,
             "max_tokens": max_tokens,
             "temperature": 0,
+            # Flash defaults to thinking, which rejects forced tool_choice.
+            # This agent uses forced structured submissions for contracts.
+            **({"thinking": {"type": "disabled"}} if self.model == "deepseek-flash" else {}),
         }).encode("utf-8")
         request = urllib.request.Request(
             self.endpoint,
@@ -96,6 +102,7 @@ class DeepSeekHTTPTransport:
         # truncated response must not be interpreted as an empty repair and
         # must leave any already-applied working edit intact.
         message["_finish_reason"] = choice.get("finish_reason")
+        message["_usage"] = dict(raw.get("usage") or {})
         return message
 
 
@@ -127,6 +134,75 @@ class DeepSeekAgent:
         return value
 
     @classmethod
+    def _bound_messages(
+        cls,
+        messages: list[dict[str, Any]],
+        objective: RepairObjective | InitialPatchObjective,
+        tools: RepairToolExecutor,
+        source_contexts: dict[str, dict[str, Any]],
+        *,
+        max_chars: int = 220_000,
+    ) -> list[dict[str, Any]]:
+        """Keep provider requests bounded while retaining executable state.
+
+        Tool transcripts are useful for local diagnosis but are not durable
+        state: the staging tree and the structured objective are authoritative.
+        Once a transcript grows beyond the provider context budget, start a
+        fresh protocol turn with a compact evidence summary.  This also avoids
+        orphaned ``tool`` messages after old assistant tool calls are dropped.
+        """
+        def size(items: list[dict[str, Any]]) -> int:
+            return len(canonical_json(items))
+
+        if size(messages) <= max_chars:
+            return messages
+        current_incremental = tools.inspect_incremental_diff()
+        current_cumulative = tools.inspect_diff()
+        validation = cls._compact(
+            tools.validation_status(), string_limit=1400,
+        )
+        recent_tools: list[dict[str, Any]] = []
+        for item in messages[-12:]:
+            role = item.get("role")
+            if role == "tool":
+                recent_tools.append({
+                    "role": role,
+                    "tool_call_id": item.get("tool_call_id"),
+                    "content": cls._compact(item.get("content", ""), string_limit=1600),
+                })
+            elif role == "assistant":
+                calls = item.get("tool_calls") or ()
+                recent_tools.append({
+                    "role": role,
+                    "tool_calls": tuple({
+                        "id": call.get("id"),
+                        "function": {"name": call.get("function", {}).get("name")},
+                    } for call in calls),
+                })
+            elif role == "user":
+                recent_tools.append({
+                    "role": role,
+                    "content": cls._compact(item.get("content", ""), string_limit=1200),
+                })
+        summary = cls._convergence_prompt(
+            objective,
+            current_incremental,
+            current_cumulative,
+            source_contexts,
+            validation,
+            1,
+            tuple(tools.state.generator_session.attempt_history[-8:]),
+        )
+        compact = [
+            {"role": "system", "content": "You are the Repair Player in an execution-driven Reach-Avoid loop. Work only from the exact executable failure and typed Oracle."},
+            {"role": "user", "content": summary + "\nRecent bounded tool transcript:\n" + canonical_json(recent_tools)},
+        ]
+        # Keep the invariant explicit if future context fields grow.
+        if size(compact) > max_chars:
+            compact[1]["content"] = compact[1]["content"][:max_chars - 256] + "\n[context truncated]"
+        return compact
+
+    @classmethod
     def _repair_context(
         cls,
         objective: RepairObjective | InitialPatchObjective,
@@ -140,52 +216,87 @@ class DeepSeekAgent:
                 "public_issue_context": cls._compact(objective.public_context, string_limit=10000),
                 "current_full_diff": objective.current_full_diff,
                 "current_patch_hash": objective.current_patch_hash,
+                "dynamic_graph_context": cls._compact(objective.graph_context, string_limit=12000),
             }
         failure = objective.active_failure
         graph = objective.dynamic_failure_graph
         dynamic_context = None
         if graph is not None:
             nodes = graph.nodes
+            selected_ids = set(getattr(objective, "causal_cut_ids", ()))
+            for cut_id in tuple(selected_ids):
+                cut = nodes.get(cut_id)
+                if cut is None:
+                    continue
+                metadata = getattr(cut, "metadata", {})
+                for field in ("symbol_ids", "branch_ids", "value_flow_ids", "hunk_ids"):
+                    selected_ids.update(map(str, metadata.get(field, ())))
+            for edge in graph.edges.values():
+                if edge.edge_id in selected_ids:
+                    selected_ids.update((edge.source_id, edge.target_id))
+            selected_nodes = (
+                [node for node in nodes.values() if node.node_id in selected_ids]
+                if selected_ids else list(nodes.values())
+            )
+            selected_node_ids = {node.node_id for node in selected_nodes}
             dynamic_context = {
                 # Only local execution context is exposed. Internal graph IDs,
                 # patch hashes and edge counts are deliberately omitted so the
                 # model cannot treat the locator as certification evidence.
                 "nodes": tuple({
-                    "kind": str(node.kind), "path": node.path,
-                    "symbol": node.symbol, "start_line": node.start_line,
-                    "end_line": node.end_line, "distance": node.distance,
+                    "kind": str(node.kind), "path": getattr(node, "path", getattr(node, "file", None)),
+                    "symbol": getattr(node, "symbol", None), "start_line": getattr(node, "start_line", getattr(node, "line_start", 0)),
+                    "end_line": getattr(node, "end_line", getattr(node, "line_end", 0)), "source_span": getattr(node, "source_span", ""),
+                    "authority": getattr(node, "authority", ""), "status": getattr(node, "status", ""),
+                    "metadata": getattr(node, "metadata", {}),
                 } for node in sorted(
-                    nodes.values(), key=lambda item: (item.distance, item.path, item.start_line),
+                    selected_nodes, key=lambda item: (getattr(item, "distance", 0), getattr(item, "path", getattr(item, "file", "")) or "", getattr(item, "start_line", getattr(item, "line_start", 0))),
                 )[:32]),
                 "edges": tuple({
                     "kind": str(edge.kind),
                     "source": nodes.get(edge.source_id).symbol if nodes.get(edge.source_id) else None,
                     "target": nodes.get(edge.target_id).symbol if nodes.get(edge.target_id) else None,
-                    "distance": edge.distance,
+                    "distance": getattr(edge, "distance", 0),
+                    "static_or_dynamic": edge.static_or_dynamic,
+                    "trace_ids": edge.trace_ids,
+                    "evidence_ids": edge.evidence_ids,
                 } for edge in graph.edges.values()
-                if nodes.get(edge.source_id) is not None and nodes.get(edge.target_id) is not None)[:64],
+                if edge.active and edge.source_id in selected_node_ids and edge.target_id in selected_node_ids)[:64],
                 "frontier": tuple({
-                    "reason": item.reason, "path": item.path,
-                    "symbol": item.symbol, "depth": item.depth,
-                } for item in graph.frontier[:24]),
-                "expanded_depth": graph.expanded_depth,
+                    "reason": getattr(item, "reason", ""), "path": getattr(item, "path", None),
+                    "symbol": getattr(item, "symbol", None), "depth": getattr(item, "depth", 0),
+                    "boundary_node_ids": getattr(item, "boundary_node_ids", ()),
+                    "omitted_relation_kinds": getattr(item, "omitted_relation_kinds", ()),
+                } for item in getattr(graph, "frontier", getattr(graph, "frontiers", ()))[:24]),
+                "expanded_depth": getattr(graph, "expanded_depth", getattr(graph, "revision", 0)),
             }
         return {
+            "exact_failure_command": objective.exact_failure_command,
+            "comparator": objective.comparator,
+            "expected_observation": objective.expected_observation,
+            "actual_observation": objective.actual_observation,
+            "traceback_frames": objective.traceback_frames,
+            "current_full_diff": objective.current_full_diff,
+            "parent_patch_hash": objective.parent_patch_hash,
+            "causal_cut_ids": getattr(objective, "causal_cut_ids", ()),
+            "repair_hypothesis": (
+                objective.repair_hypothesis.to_dict()
+                if getattr(objective, "repair_hypothesis", None) is not None
+                and hasattr(objective.repair_hypothesis, "to_dict")
+                else getattr(objective, "repair_hypothesis", None)
+            ),
+            "graph_source_spans": getattr(objective, "graph_source_spans", ()),
+            "hypothesis_feedback": getattr(objective, "hypothesis_feedback", ()),
+            "exploratory_observations": getattr(objective, "exploratory_observations", ()),
+            "dynamic_failure_context": cls._compact(dynamic_context, string_limit=12000),
             "objective_id": objective.objective_id,
             "repair_mode": objective.mode,
             "active_failure": cls._compact(
                 failure.to_dict() if hasattr(failure, "to_dict") else failure,
                 string_limit=12000,
             ),
-            "exact_failure_command": objective.exact_failure_command,
-            "comparator": objective.comparator,
-            "expected_observation": objective.expected_observation,
-            "actual_observation": objective.actual_observation,
             "stdout": cls._compact(objective.stdout, string_limit=8000),
             "stderr": cls._compact(objective.stderr, string_limit=8000),
-            "traceback_frames": objective.traceback_frames,
-            "current_full_diff": objective.current_full_diff,
-            "parent_patch_hash": objective.parent_patch_hash,
             "current_patch_hash": objective.current_patch_hash,
             "relevant_source_slices": cls._compact(
                 tuple(item.to_dict() for item in objective.relevant_source_slices),
@@ -195,12 +306,12 @@ class DeepSeekAgent:
                 tuple(item.to_dict() for item in objective.changed_hunks),
                 string_limit=3000,
             ),
-            "dynamic_failure_context": cls._compact(dynamic_context, string_limit=5000),
             "locked_checks": tuple(item.to_dict() for item in objective.locked_checks),
             "preservation_checks": tuple(item.to_dict() for item in objective.preservation_checks),
             "mechanical_blockers": tuple(item.to_dict() for item in objective.mechanical_blockers),
             "previous_attempts": tuple(item.to_dict() for item in objective.previous_attempts),
             "forbidden_repeated_mechanisms": objective.forbidden_repeated_mechanisms,
+            "hypothesis_id": getattr(objective, "hypothesis_id", None),
             "attempt_history": cls._compact(attempt_history[-8:], string_limit=1200),
         }
 
@@ -222,14 +333,14 @@ class DeepSeekAgent:
         return (
             "You are the Repair Player in an execution-driven Reach-Avoid loop. "
             "Work on the current working tree with the supplied tools and return exactly "
-            "one tool call per turn. The exact executable failure and typed Oracle are the source of truth; any dynamic graph is context only and cannot certify progress. "
+            "one tool call per turn. The exact executable failure and typed Oracle are the source of truth. The unified dynamic graph selected the causal cut and repair hypothesis for this child; do not substitute a different mechanism without recording why the selected graph evidence is contradicted. The graph never grants Oracle authority. "
             + (
                 "The cumulative diff is already applied to the working tree; submit only "
                 "incremental edits. " if revision else
                 "Inspect the relevant causal slice and execution contract before making "
                 "the initial behavioral edit. "
             )
-            + "Edit the existing working tree and preserve its complete cumulative diff; do not reset to a clean repository or generate an independent patch. Read the exact failure command, Oracle, actual observation, stdout/stderr, traceback and current source before changing code. Close only this one ActiveFailure in the current revision. "
+            + "You are creating an independent child from the specified parent checkpoint. The complete base-to-parent diff is already applied. Do not reset to clean, do not inherit a sibling, and do not overwrite sibling work. Implement only the specified causal hypothesis and return a complete base-to-child diff. Edit the existing working tree and preserve its complete cumulative diff; do not generate an independent patch. Read the exact failure command, Oracle, actual observation, stdout/stderr, traceback and current source before changing code. Close only this one ActiveFailure in the current revision. "
             + "For apply_patch, send either a complete git unified diff starting with 'diff --git' and containing ---/+++/@@ hunks, or a complete structured action starting with '*** Begin Patch' and ending with '*** End Patch'. Never send a prose explanation, markdown without a patch body, or a partial hunk. "
             + "Use the allowed source slices, reproduce every grounded observation, and "
             "preserve locked target and preservation behavior. A patch must change executable "
@@ -241,6 +352,7 @@ class DeepSeekAgent:
             "If a protected target passes while preservation fails, make one cumulative edit "
             "that repairs the preservation consumer and retains the target. "
             "Do not delete target behavior, weaken inputs, modify tests, or swallow exceptions to obtain a surface pass. When target progress and a regression coexist, retain the target mechanism and repair the regression in the same cumulative edit. "
+            "The hypothesis includes predicted path changes, distinguishing input partitions and falsification conditions. Use these to test this mechanism, not to invent expected outputs. Sibling disagreements and oracle mutation survivors are diagnostic evidence, never majority-vote oracles or proof of correctness. Review measured feedback on prior mechanisms before editing. "
             "read_file, search_symbol, inspect_diff, and inspect_incremental_diff are "
             "available whenever needed to understand a failed observation.\n"
             + retry_guidance
@@ -450,7 +562,7 @@ class DeepSeekAgent:
                 messages = [
                     {
                         "role": "system",
-                        "content": "You are the Repair Player in an execution-driven Reach-Avoid loop. The dynamic failure graph is context only.",
+                        "content": "You are the Repair Player in an execution-driven Reach-Avoid loop. Follow the selected causal cut and repair hypothesis from the unified dynamic graph; executable observations remain the only certification evidence.",
                     },
                     {
                         "role": "user",
@@ -479,9 +591,16 @@ class DeepSeekAgent:
                     self.config.root_recovery_token_budget
                     if recovery_used else tokens
                 )
+                request_started = time.monotonic()
+                messages = self._bound_messages(
+                    messages, objective, tools, source_contexts,
+                )
                 message = self.transport.complete(
                     messages, tools=available_tools, max_tokens=request_tokens,
-                    timeout_seconds=max(1.0, deadline - time.monotonic()),
+                    timeout_seconds=min(
+                        self.config.provider_request_timeout_seconds,
+                        max(1.0, deadline - time.monotonic()),
+                    ),
                     tool_choice=tool_choice,
                 )
             except (urllib.error.URLError, TimeoutError, KeyError, ValueError, json.JSONDecodeError) as exc:
@@ -494,7 +613,7 @@ class DeepSeekAgent:
                     messages = [
                         {
                             "role": "system",
-                            "content": "You are the Repair Player in an execution-driven Reach-Avoid loop. The dynamic failure graph is context only.",
+                            "content": "You are the Repair Player in an execution-driven Reach-Avoid loop. Follow the selected causal cut and repair hypothesis from the unified dynamic graph; executable observations remain the only certification evidence.",
                         },
                         {
                             "role": "user",
@@ -516,6 +635,7 @@ class DeepSeekAgent:
             force_patch_next = False
             finish_reason = message.pop("_finish_reason", None)
             request_id = message.pop("_request_id", None)
+            usage = message.pop("_usage", {})
             if request_id:
                 phase_name = (
                     "initial" if initial else
@@ -533,7 +653,31 @@ class DeepSeekAgent:
                         if phase_name == "root_recovery" else
                         f"case:revision:{tools.state.revision_count + 1}"
                     ),
+                    "graph_hash": (
+                        objective.dynamic_failure_graph.digest()
+                        if isinstance(objective, RepairObjective)
+                        and objective.dynamic_failure_graph is not None
+                        and hasattr(objective.dynamic_failure_graph, "digest") else
+                        getattr(objective, "graph_context", {}).get("graph_hash")
+                        if isinstance(getattr(objective, "graph_context", None), dict) else None
+                    ),
+                    "causal_cut_ids": getattr(objective, "causal_cut_ids", ()),
+                    "graph_source_spans": getattr(objective, "graph_source_spans", ()),
+                    "graph_node_ids_used": getattr(objective, "causal_cut_ids", ()),
+                    "source_spans_used": getattr(objective, "graph_source_spans", ()),
+                    "finish_reason": finish_reason,
+                    "token_usage": usage,
+                    "wall_time_seconds": time.monotonic() - request_started,
                 })
+                graph = getattr(tools.state, "dynamic_failure_graph", None)
+                graph_context_used = bool(
+                    getattr(objective, "graph_source_spans", ())
+                    or getattr(objective, "graph_context", None)
+                )
+                if graph is not None and graph_context_used:
+                    graph.metrics["model_calls_with_graph_source_context"] = (
+                        int(graph.metrics.get("model_calls_with_graph_source_context", 0)) + 1
+                    )
             messages.append(message)
             if finish_reason == "length":
                 # The tree is authoritative.  Keep a partial cumulative edit
@@ -591,6 +735,7 @@ class DeepSeekAgent:
                 continue
             executed_call = False
             deferred_calls = False
+            turn_followups: list[str] = []
             for call in tool_calls:
                 function = call.get("function", {})
                 name = str(function.get("name", ""))
@@ -730,7 +875,7 @@ class DeepSeekAgent:
                     "content": canonical_json(result),
                 })
                 if followup:
-                    messages.append({"role": "user", "content": followup})
+                    turn_followups.append(followup)
             if deferred_calls:
                 messages.append({
                     "role": "user",
@@ -740,6 +885,8 @@ class DeepSeekAgent:
                         "one next tool call."
                     ),
                 })
+            for followup in turn_followups:
+                messages.append({"role": "user", "content": followup})
             if tools.finished:
                 break
         final_incremental = tools.inspect_incremental_diff()

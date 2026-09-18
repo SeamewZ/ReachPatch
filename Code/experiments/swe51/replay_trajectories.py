@@ -1,16 +1,21 @@
+"""Render unified graph checkpoint trajectories for archived runs."""
 from __future__ import annotations
 
 import argparse
 import json
-import sys
 from pathlib import Path
 
-# Keep direct script execution usable without requiring an installed package.
-CODE_ROOT = Path(__file__).resolve().parents[2]
-if str(CODE_ROOT) not in sys.path:
-    sys.path.insert(0, str(CODE_ROOT))
 
-from reachpatch.diagnostics import build_revision_trajectory_report
+def _trajectory(run_root: Path) -> dict[str, object]:
+    tree = run_root / "checkpoint_tree_view.json"
+    summary = run_root / "execution_summary.json"
+    if not tree.is_file() or not summary.is_file():
+        raise FileNotFoundError(f"missing unified graph artifacts under {run_root}")
+    return {
+        "run_root": str(run_root.resolve()),
+        "checkpoint_tree": json.loads(tree.read_text(encoding="utf-8")),
+        "execution_summary": json.loads(summary.read_text(encoding="utf-8")),
+    }
 
 
 def main() -> int:
@@ -18,13 +23,7 @@ def main() -> int:
     parser.add_argument("run_roots", nargs="+", type=Path)
     parser.add_argument("--output", type=Path)
     args = parser.parse_args()
-    reports = [
-        build_revision_trajectory_report(path) for path in args.run_roots
-    ]
-    payload = {
-        "case_count": len(reports),
-        "reports": reports,
-    }
+    payload = {"case_count": len(args.run_roots), "reports": [_trajectory(path) for path in args.run_roots]}
     rendered = json.dumps(payload, sort_keys=True, indent=2) + "\n"
     if args.output is None:
         print(rendered, end="")

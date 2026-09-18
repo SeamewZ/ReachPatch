@@ -40,6 +40,16 @@ class RepairPlayer:
         if staging.exists():
             raise FileExistsError(staging)
         copy_source_tree(source, staging)
+        # Checkpoint snapshots are sealed read-only.  The model edits an
+        # isolated staging copy, so restore write permission without ever
+        # mutating the immutable parent snapshot.
+        for current, _, names in __import__("os").walk(staging):
+            for name in names:
+                path = Path(current) / name
+                try:
+                    path.chmod(path.stat().st_mode | 0o200)
+                except OSError:
+                    continue
         tools = RepairToolExecutor(staging, state, objective)
         state.generator_session.conversation.append({
             "role": "user",

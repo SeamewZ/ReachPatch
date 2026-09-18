@@ -128,7 +128,13 @@ def observation_matches_check(observation: RunObservation, check: ExecutableChec
         return _normalize_signature_value(value) == _normalize_signature_value(contract.expected)
     if comparator == "NOT_EQUALS":
         return value != contract.expected
+    if comparator == "INSTANCE_OF":
+        if isinstance(check.input_recipe, dict) and check.input_recipe.get("observation_adapter") == "SAFE_RETURN_SUMMARY_V1":
+            return isinstance(value, dict) and str(contract.expected) in value.get("__reachpatch_return__", {}).get("container_kinds", ())
+        return contract.matches(value)
     if comparator == "TYPE_IS":
+        if isinstance(check.input_recipe, dict) and check.input_recipe.get("observation_adapter") == "SAFE_RETURN_SUMMARY_V1":
+            return isinstance(value, dict) and value.get("__reachpatch_return__", {}).get("type") == str(contract.expected)
         return type(value).__name__ == str(contract.expected).rsplit(".", 1)[-1]
     if comparator == "CONTAINS":
         try:
@@ -136,6 +142,8 @@ def observation_matches_check(observation: RunObservation, check: ExecutableChec
         except TypeError:
             return False
     if comparator == "LENGTH_EQUALS":
+        if isinstance(check.input_recipe, dict) and check.input_recipe.get("observation_adapter") == "SAFE_RETURN_SUMMARY_V1":
+            return isinstance(value, dict) and value.get("__reachpatch_return__", {}).get("length") == contract.expected
         try:
             return len(value) == int(contract.expected)
         except (TypeError, ValueError):
@@ -155,10 +163,13 @@ def semantic_observation_signature(observation: RunObservation, check: Executabl
     elif comparator in {"EQUALS", "NOT_EQUALS", "STATE_DELTA_EQUALS"}:
         payload = _normalize_signature_value(value)
     elif comparator == "LENGTH_EQUALS":
-        try:
-            payload = len(value)
-        except TypeError:
-            payload = None
+        if isinstance(check.input_recipe, dict) and check.input_recipe.get("observation_adapter") == "SAFE_RETURN_SUMMARY_V1":
+            payload = value.get("__reachpatch_return__", {}).get("length") if isinstance(value, dict) else None
+        else:
+            try:
+                payload = len(value)
+            except TypeError:
+                payload = None
     elif comparator == "ORDER_EQUALS":
         try:
             payload = _normalize_signature_value(tuple(value))
@@ -170,7 +181,10 @@ def semantic_observation_signature(observation: RunObservation, check: Executabl
         except TypeError:
             payload = False
     elif comparator == "TYPE_IS":
-        payload = type(value).__name__
+        if isinstance(check.input_recipe, dict) and check.input_recipe.get("observation_adapter") == "SAFE_RETURN_SUMMARY_V1":
+            payload = value.get("__reachpatch_return__", {}).get("type") if isinstance(value, dict) else None
+        else:
+            payload = type(value).__name__
     elif comparator == "RAISES":
         expected_type, expected_message = _expected_exception(contract.expected)
         raised = "\n".join(filter(None, (observation.exception, _clean_text(observation.stderr))))
@@ -202,9 +216,16 @@ def _execution_status(observation: RunObservation, check: ExecutableCheck) -> st
 
 def _environment_blocked(trace) -> bool:
     """Recognize setup/import failures before project code executes."""
+    observation = trace.observation
+    diagnostic = f"{observation.stdout or ''}\n{observation.stderr or ''}"
+    # Pytest can fail in a dependency after it already called the target.
+    # A dependency warning promoted to an error is not target-contract
+    # evidence merely because a target frame was observed earlier.
+    if (re.search(r"(?m)^E\s+\w*Warning:", diagnostic)
+        and re.search(r"(?m)[^\n]*(?:site-packages|dist-packages)/[^\n]+\.py:\d+:\s*\w*Warning\s*$", diagnostic)):
+        return True
     if getattr(trace, "first_project_frame", None):
         return False
-    observation = trace.observation
     text = f"{observation.exception or ''} {observation.stderr or ''}".casefold()
     return any(token in text for token in (
         "modulenotfounderror", "no module named", "cannot import name",
@@ -225,18 +246,30 @@ def execute_check(
         diff_between(Path(base_tree), Path(tree)).changed_files
         if base_tree is not None else ()
     )
-    traces = [
-        run_trace(
-            tree, tuple(check.command), cwd=check.cwd, environment=check.environment,
-            timeout_seconds=check.timeout_seconds, trace_enabled=index == 0,
-            overlay_paths=overlay_paths,
+    traces = []
+    for index in range(count):
+        # Line tracing is localization instrumentation, not part of the
+        # executable contract. Large dependency images may need substantially
+        # longer for a traced cold start than for the same command itself.
+        # Give only the first (traced) member a bounded overhead allowance;
+        # the second semantic run still enforces the configured check timeout,
+        # so a genuinely hanging command cannot be certified as stable PASS.
+        instrumented_timeout = (
+            max(float(check.timeout_seconds), 120.0)
+            if index == 0 else float(check.timeout_seconds)
         )
-        for index in range(count)
-    ]
+        traces.append(run_trace(
+            tree, tuple(check.command), cwd=check.cwd,
+            environment=check.environment,
+            timeout_seconds=instrumented_timeout,
+            trace_enabled=index == 0,
+            target_symbols=tuple(check.target_symbols),
+            overlay_paths=overlay_paths,
+        ))
     signatures = [semantic_observation_signature(item.observation, check) for item in traces]
     statuses = [_execution_status(item.observation, check) for item in traces]
     statuses = [
-        CheckStatus.BLOCKED if _environment_blocked(item) else status
+        CheckStatus.BLOCKED if status is not CheckStatus.PASS and _environment_blocked(item) else status
         for item, status in zip(traces, statuses)
     ]
     stable = len(set(signatures)) == 1 and len(set(statuses)) == 1
@@ -254,12 +287,66 @@ def execute_check(
     if stable and status in {CheckStatus.PASS, CheckStatus.FAIL}:
         from reachpatch.reach_avoid.execution_transition import classify_failure_stage
         failure_stage = classify_failure_stage(observation, check, trace)
-    return CheckExecution(
+    target_names = {
+        str(item).rsplit(".", 1)[-1].casefold()
+        for item in getattr(check, "target_symbols", ()) if str(item).strip()
+    }
+    trace_names = {
+        str(item).rsplit(".", 1)[-1].casefold()
+        for item in getattr(trace, "executed_symbol_ids", ()) if str(item).strip()
+    }
+    trace_events = getattr(trace, "events", ()) or ()
+    def event_value(item: Any, key: str, default: Any = None) -> Any:
+        if isinstance(item, dict):
+            return item.get(key, default)
+        return getattr(item, key, default)
+
+    event_files = {
+        str(event_value(item, "path", event_value(item, "file", "")))
+        for item in trace_events
+    }
+    # A project frame by itself is insufficient: pytest/setup code is also
+    # project code.  Executable target evidence must either name the bound
+    # symbol or be explicitly identified by a public test caller.
+    target_entered = False
+    if target_names and trace_events:
+        for event in trace_events:
+            function = str(event_value(event, "function", event_value(event, "symbol", ""))).casefold()
+            file = str(event_value(event, "path", event_value(event, "file", ""))).replace("\\", "/")
+            if any(part in {"tests", "test", "setup"} for part in file.split("/")) or Path(file).name.startswith("test_"):
+                continue
+            for declared in check.target_symbols:
+                declared = str(declared).casefold()
+                if "." not in declared:
+                    matched = function.rsplit(".", 1)[-1] == declared
+                elif function == declared:
+                    matched = True
+                elif declared.endswith("." + function):
+                    module = declared[:-(len(function) + 1)].replace(".", "/")
+                    matched = file.casefold().endswith((module + ".py", module + "/__init__.py"))
+                else:
+                    matched = False
+                target_entered = target_entered or matched
+    elif target_names:
+        # Older trace adapters without events can establish only an exact
+        # declared symbol, not a substring or an unrelated same-file frame.
+        target_entered = any(str(symbol).casefold() in {str(item).casefold() for item in check.target_symbols}
+                             for symbol in getattr(trace, "executed_symbol_ids", ()))
+    # A test/setup frame alone is not target execution evidence.
+    if event_files and all(any(part in path.split("/") for part in ("tests", "test", "setup")) for path in event_files):
+        target_entered = False
+    result = CheckExecution(
         check_id=check.check_id, status=status, observation=observation, trace=trace,
         runs=count, stable=stable, semantic_signature=content_hash(signatures),
-        entered_project_code=bool(first.first_project_frame or first.executed_symbol_ids or first.executed_path_ids),
+        # Keep the broad frame signal for diagnostics and historical reports;
+        # all target decisions use ``entered_target_code`` below.
+        entered_project_code=bool(getattr(trace, "first_project_frame", None)),
+        entered_target_code=target_entered,
         failure_stage=failure_stage,
         goal_id=check.goal_id,
         role=getattr(check, "role", None),
         authority=getattr(check, "authority", None),
+        run_observations=tuple(item.observation for item in traces),
     )
+    from reachpatch.reach_avoid.execution_transition import _execution_distance
+    return replace(result, distance=_execution_distance(result, check) if stable else None)

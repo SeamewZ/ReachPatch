@@ -23,6 +23,9 @@ from .checks import (
     execute_check, semantic_observation_signature,
 )
 from .worktree import diff_between
+from reachpatch.reach_avoid.dynamic_reach_avoid_graph import (
+    CheckpointState, DynamicReachAvoidGraph, materialize_graph_guided_challenges as _materialize_graph_guided_challenges,
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -35,7 +38,11 @@ class BlockedTargetCandidate(SerializableRecord):
 class TargetRecoveryConfig(SerializableRecord):
     max_probes: int = 6
     stability_runs: int = 2
-    timeout_seconds: float = 120.0
+    timeout_seconds: float = 1200.0
+    max_agent_turns: int = 24
+    provider_request_timeout_seconds: float = 180.0
+    check_timeout_seconds: float = 120.0
+    candidate_allowance: int = 2
 
 
 @dataclass(frozen=True, slots=True)
@@ -53,6 +60,8 @@ class TargetRecoveryResult(SerializableRecord):
     unresolved_goal_ids: tuple[str, ...] = ()
     agent_events: tuple[dict[str, Any], ...] = ()
     timed_out: bool = False
+    attempt_count: int = 0
+    exhausted_reasons: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -81,6 +90,8 @@ class _RecoveryProbe:
     source: str
     clean_runs: list[Any] = field(default_factory=list)
     working_runs: list[Any] = field(default_factory=list)
+    clean_attempts: int = 0
+    working_attempts: int = 0
     contract: ObservationContract | None = None
     requirement_id: str | None = None
     authority: str = "PROVISIONAL"
@@ -156,7 +167,13 @@ class TargetRecoveryToolExecutor:
         for node in getattr(graph, "nodes", {}).values():
             if needle == str(getattr(node, "symbol", "")).rsplit(".", 1)[-1]:
                 matches.append(node.to_dict() if hasattr(node, "to_dict") else dict(node))
-        if not matches:
+        if not matches and graph is not None:
+            from reachpatch.reach_avoid.dynamic_reach_avoid_graph import expand_dynamic_graph_frontier
+            expand_dynamic_graph_frontier(graph, self.repo_root, ())
+            matches = [node.to_dict() for node in graph.nodes.values()
+                       if needle == str(node.symbol or "").rsplit(".", 1)[-1]
+                       and node.status not in {"HISTORICAL_SOURCE", "RETIRED_SOURCE"}]
+        if not matches and graph is None:
             for path in sorted(self.repo_root.rglob("*.py")):
                 if any(part in {".git", "artifacts", "official_harness", "harness"}
                        for part in path.parts):
@@ -222,17 +239,37 @@ class TargetRecoveryToolExecutor:
         runs = getattr(probe, f"{destination}_runs")
         if len(runs) >= self.stability_runs:
             raise RuntimeError("probe stability budget exhausted")
-        # Only the first run carries tracing overhead. The final run supplies
-        # the observation, while trace metadata is copied from the first run
-        # by the shared stability protocol.
+        attempts_name = f"{destination}_attempts"
+        attempts = int(getattr(probe, attempts_name))
+        # A traced cold start can exceed the per-check timeout in a large
+        # dependency image even though the same probe runs normally without
+        # instrumentation. BLOCKED/UNSUPPORTED observations are therefore
+        # execution attempts, not semantic stability samples. Permit two
+        # bounded retries and require ``stability_runs`` actual PASS/FAIL
+        # observations; this avoids both false nondeterminism and an
+        # unbounded recovery loop.
+        if attempts >= self.stability_runs + 2:
+            raise RuntimeError("probe execution attempt budget exhausted")
+        setattr(probe, attempts_name, attempts + 1)
+        # Only the first attempt carries tracing overhead. A retry after a
+        # traced timeout must be untraced or it would reproduce the timeout
+        # instead of measuring the target behaviour.
         command = ("python", "-c", probe.source)
         trace = run_trace(
             tree, command,
-            timeout_seconds=self.timeout_seconds, trace_enabled=not runs,
+            timeout_seconds=self.timeout_seconds, trace_enabled=attempts == 0,
+            target_symbols=tuple(symbol for goal in self.goal_contracts if hasattr(goal, "target_symbols")
+                                 for symbol in goal.target_symbols) if isinstance(self.goal_contracts, (tuple, list)) else (),
         )
-        runs.append(trace)
+        status = getattr(trace.observation.status, "value", trace.observation.status)
+        valid_semantic_sample = str(status) in {"PASS", "FAIL"}
+        if valid_semantic_sample:
+            runs.append(trace)
         observation = trace.observation.to_dict() if hasattr(trace.observation, "to_dict") else dict(trace.observation)
-        result = {"probe_id": probe.probe_id, "tree": destination, "run_index": len(runs),
+        result = {"probe_id": probe.probe_id, "tree": destination,
+                  "attempt_index": attempts + 1,
+                  "run_index": len(runs) if valid_semantic_sample else None,
+                  "counts_toward_stability": valid_semantic_sample,
                   "observation": observation, "first_project_frame": trace.first_project_frame,
                   "trace_bundle_id": trace.trace_bundle_id}
         self._record("run_probe_on_" + destination, {"probe_id": probe_id}, result)
@@ -357,30 +394,114 @@ class TargetRecoveryAgent:
     """Run a bounded DeepSeek recovery conversation with only safe tools."""
 
     def __init__(self, transport: Any, *, max_turns: int = 16, max_tokens: int = 12000,
-                 timeout_seconds: float = 1200.0):
+                 timeout_seconds: float = 1200.0,
+                 provider_request_timeout_seconds: float = 180.0):
         self.transport = transport
         self.max_turns = max(1, int(max_turns))
         self.max_tokens = int(max_tokens)
         self.timeout_seconds = float(timeout_seconds)
+        self.provider_request_timeout_seconds = float(provider_request_timeout_seconds)
 
     def recover(self, executor: TargetRecoveryToolExecutor, context: dict[str, Any]) -> tuple[dict[str, Any], ...]:
         messages = [
             {"role": "system", "content": (
                 "You are a restricted target recovery agent. You may only use the supplied tools. "
                 "Do not edit project files, read hidden files, use the network, or claim an Oracle from prose. "
+                "Use the supplied source_hints and working_diff to identify the target entrypoint before searching broadly. "
+                "After locating it, write one minimal reproduction probe, register its structured observation contract, "
+                "then collect two valid semantic runs on clean and working, and finish. "
+                "A BLOCKED/UNSUPPORTED execution is not a semantic run; retry the same probe when the tool requests it. "
                 "A target scenario is accepted only after two stable clean runs violate its structured contract.")},
             {"role": "user", "content": json.dumps(context, sort_keys=True, default=str)},
         ]
         deadline = time.monotonic() + self.timeout_seconds
+        last_signature: str | None = None
+        repeated_tool_count = 0
+        read_tool_count = 0
         for _ in range(self.max_turns):
             if executor.finished or time.monotonic() >= deadline:
                 break
+            # Recovery is a finite evidence-building protocol.  Models often
+            # reread the same source interval while never producing a probe;
+            # after a bounded number of such turns, expose only the next
+            # state-advancing tool.  This does not create an oracle or invent
+            # an input—the model still has to supply a concrete probe and
+            # contract, but cannot consume the whole turn budget on reads.
+            available_tools = TARGET_RECOVERY_TOOL_SCHEMAS
+            forced_choice: str | dict[str, Any] = "required"
+            # Once a probe exists, use an explicit evidence protocol instead
+            # of allowing the model to spend the remaining turns out of
+            # order. In particular, the contract must be registered before
+            # paired execution; otherwise stable failures still cannot be
+            # aligned to an Authority-A/B/C goal and are discarded.
+            forced_progress_tool: str | None = None
+            if executor.probes:
+                attempt_limit = executor.stability_runs + 2
+                pending = next((
+                    probe for probe in executor.probes.values()
+                    if probe.contract is None
+                    and probe.clean_attempts < attempt_limit
+                    and probe.working_attempts < attempt_limit
+                ), None)
+                if pending is not None:
+                    forced_progress_tool = "register_observation_contract"
+                else:
+                    pending = next((
+                        probe for probe in executor.probes.values()
+                        if probe.contract is not None
+                        and len(probe.clean_runs) < executor.stability_runs
+                        and probe.clean_attempts < attempt_limit
+                    ), None)
+                    if pending is not None:
+                        forced_progress_tool = "run_probe_on_clean"
+                    else:
+                        pending = next((
+                            probe for probe in executor.probes.values()
+                            if probe.contract is not None
+                            and len(probe.clean_runs) >= executor.stability_runs
+                            and len(probe.working_runs) < executor.stability_runs
+                            and probe.working_attempts < attempt_limit
+                        ), None)
+                        if pending is not None:
+                            forced_progress_tool = "run_probe_on_working"
+                        elif any(
+                            probe.contract is not None
+                            and len(probe.clean_runs) >= executor.stability_runs
+                            and len(probe.working_runs) >= executor.stability_runs
+                            for probe in executor.probes.values()
+                        ):
+                            forced_progress_tool = "finish_target_recovery"
+                        elif len(executor.probes) < executor.max_probes:
+                            forced_progress_tool = "write_probe"
+                        else:
+                            forced_progress_tool = "finish_target_recovery"
+            elif repeated_tool_count >= 2 or read_tool_count >= 6:
+                if not executor.probes:
+                    available_tools = tuple(
+                        schema for schema in TARGET_RECOVERY_TOOL_SCHEMAS
+                        if schema["function"]["name"] == "write_probe"
+                    )
+                    forced_choice = {
+                        "type": "function", "function": {"name": "write_probe"},
+                    }
+            if forced_progress_tool is not None:
+                available_tools = tuple(
+                    schema for schema in TARGET_RECOVERY_TOOL_SCHEMAS
+                    if schema["function"]["name"] == forced_progress_tool
+                )
+                forced_choice = {
+                    "type": "function",
+                    "function": {"name": forced_progress_tool},
+                }
             try:
                 message = self.transport.complete(
-                    messages, tools=TARGET_RECOVERY_TOOL_SCHEMAS,
+                    messages, tools=available_tools,
                     max_tokens=self.max_tokens,
-                    timeout_seconds=max(1.0, deadline - time.monotonic()),
-                    tool_choice="required",
+                    timeout_seconds=min(
+                        self.provider_request_timeout_seconds,
+                        max(1.0, deadline - time.monotonic()),
+                    ),
+                    tool_choice=forced_choice,
                 )
             except Exception as exc:
                 executor._record("transport", {}, error=exc)
@@ -394,23 +515,68 @@ class TargetRecoveryAgent:
                     "request_id": str(request_id), "phase": "target_recovery",
                     "phase_key": "case:target_recovery",
                 })
+            # A provider assistant message containing ``tool_calls`` must be
+            # followed by exactly one ``tool`` response for every call before
+            # another assistant turn.  We may execute only the first call in
+            # a recovery turn (the first call can change the probe state), but
+            # all additional calls still receive an explicit deferred result;
+            # omitting them makes the next DeepSeek request invalid (HTTP 400).
             messages.append(message)
             calls = message.get("tool_calls") or ()
             if not calls:
                 continue
-            for call in calls[:1]:
+            executed = False
+            available_tool_names = {
+                schema["function"]["name"] for schema in available_tools
+            }
+            for call in calls:
                 function = call.get("function", {}) if isinstance(call, dict) else {}
                 name = str(function.get("name", ""))
                 raw = function.get("arguments", {})
-                arguments = json.loads(raw) if isinstance(raw, str) else dict(raw or {})
-                try:
-                    result = executor.invoke(name, arguments)
-                except Exception as exc:
-                    result = {"error": type(exc).__name__, "message": str(exc)}
-                messages.append({"role": "tool", "tool_call_id": call.get("id", name),
+                call_id = str(call.get("id", name)) if isinstance(call, dict) else name
+                if executed:
+                    result = {
+                        "error": "DeferredToolCall",
+                        "message": (
+                            "Only the first recovery tool call in a turn is executed; "
+                            "re-evaluate the updated probe state on the next turn."
+                        ),
+                    }
+                else:
+                    try:
+                        if name not in available_tool_names:
+                            raise ValueError(
+                                f"tool {name!r} is not valid in the current recovery state"
+                            )
+                        arguments = json.loads(raw) if isinstance(raw, str) else dict(raw or {})
+                        signature = json.dumps(
+                            {"name": name, "arguments": arguments},
+                            sort_keys=True, default=str,
+                        )
+                        if signature == last_signature:
+                            repeated_tool_count += 1
+                        else:
+                            last_signature = signature
+                            repeated_tool_count = 1
+                        if name in {"read_source", "search_source"}:
+                            read_tool_count += 1
+                        result = executor.invoke(name, arguments)
+                    except Exception as exc:
+                        result = {"error": type(exc).__name__, "message": str(exc)}
+                    executed = True
+                messages.append({"role": "tool", "tool_call_id": call_id,
                                  "name": name, "content": json.dumps(result, default=str)})
-                if executor.finished:
-                    break
+            if repeated_tool_count >= 2 or read_tool_count >= 6:
+                messages.append({
+                    "role": "user",
+                    "content": (
+                        "Stop source exploration. The next turn is restricted to the "
+                        "state-advancing recovery tool shown in the tool list: write one "
+                        "minimal probe, run it on clean/working twice, register the exact "
+                        "structured observation contract, or finish. Do not reread the "
+                        "same source interval."
+                    ),
+                })
         executor.timed_out = time.monotonic() >= deadline
         if not executor.finished:
             executor.finish_target_recovery("bounded recovery budget exhausted")
@@ -582,7 +748,7 @@ def _append_witness_scenarios(
             )
             scenario = ExecutableScenario(
                 stable_id("target-witness-scenario", requirement.requirement_id, witness.get("witness_id"), contract.normalized()),
-                recipe.command, ".", (), config.timeout_seconds,
+                recipe.command, ".", (), config.check_timeout_seconds,
             )
             semantic = scenario_semantic_key(
                 requirement_contract_id=requirement.expected_observation.contract_id,
@@ -655,7 +821,7 @@ def _append_preservation_checks(
         scenario = ExecutableScenario(
             stable_id("preservation-scenario", getattr(check, "check_id", ""), contract.normalized()),
             command, str(getattr(check, "cwd", ".")), tuple(getattr(check, "environment", ())),
-            float(getattr(check, "timeout_seconds", config.timeout_seconds)),
+            min(float(getattr(check, "timeout_seconds", config.check_timeout_seconds)), config.check_timeout_seconds),
         )
         semantic = scenario_semantic_key(
             requirement_contract_id=str(getattr(check, "check_id", "")),
@@ -710,7 +876,7 @@ def _append_agent_scenarios(
         working_snapshot=Path(working_snapshot), requirement_graph=requirement_graph,
         program_slice=program_slice, run_root=Path(run_root),
         max_probes=config.max_probes - len(scenarios),
-        stability_runs=config.stability_runs, timeout_seconds=config.timeout_seconds,
+        stability_runs=config.stability_runs, timeout_seconds=config.check_timeout_seconds,
     )
     leaves = tuple(leaf for leaf in _goal_items(requirement_graph)
                    if not getattr(leaf, "preservation", False) and getattr(leaf, "hard", False))
@@ -759,7 +925,7 @@ def _append_agent_scenarios(
         if requirement is None:
             rejected.append(RejectedTargetCandidate(probe_id, "NO_TARGET_REQUIREMENT"))
             continue
-        command = ("python", str(probe.source_path))
+            command = ("python", str(probe.source_path))
         recipe = InputRecipe(
             stable_id("agent-target-recipe", probe_id, probe.input_recipe),
             "TARGET_RECOVERY_PROBE", probe.input_recipe.get("concrete_input"),
@@ -767,7 +933,7 @@ def _append_agent_scenarios(
         )
         scenario = ExecutableScenario(
             stable_id("agent-target-scenario", probe_id, probe.contract.normalized()),
-            command, ".", (), config.timeout_seconds,
+            command, ".", (), config.check_timeout_seconds,
         )
         semantic = scenario_semantic_key(
             requirement_contract_id=requirement.expected_observation.contract_id,
@@ -823,7 +989,7 @@ def recover_target_scenarios(repo_root: Path, clean_snapshot: Path, working_snap
             rejected.append(RejectedTargetCandidate(stable_id("target-candidate", command), "NO_TARGET_REQUIREMENT"))
             continue
         recipe = InputRecipe(stable_id("target-recipe", requirement.requirement_id, command, getattr(check, "concrete_input", None)), "PUBLIC_REPLAY", getattr(check, "concrete_input", None), ("PUBLIC_CHECK",), command, getattr(check, "check_id", None), tuple(getattr(check, "environment", ())), tuple(getattr(check, "symbol_references", ())), "PUBLIC_CHECK")
-        scenario = ExecutableScenario(stable_id("target-scenario", requirement.requirement_id, command, contract.normalized()), command, str(getattr(check, "cwd", ".")), tuple(getattr(check, "environment", ())), float(getattr(check, "timeout_seconds", config.timeout_seconds)))
+        scenario = ExecutableScenario(stable_id("target-scenario", requirement.requirement_id, command, contract.normalized()), command, str(getattr(check, "cwd", ".")), tuple(getattr(check, "environment", ())), min(float(getattr(check, "timeout_seconds", config.check_timeout_seconds)), config.check_timeout_seconds))
         semantic = scenario_semantic_key(requirement_contract_id=requirement.expected_observation.contract_id, role="TARGET", input_recipe=recipe, observation_contract=contract)
         if semantic in seen:
             continue
@@ -945,6 +1111,23 @@ def _execution_check_from_public(check: Any, goal_id: str | None, goals: tuple[A
     authority = str(getattr(check, "authority", "PROVISIONAL"))
     if authority not in {"A", "B", "C"}:
         authority = "PROVISIONAL"
+    target_symbols = tuple(
+        getattr(check, "target_symbols", ())
+        or getattr(check, "symbol_references", ())
+    )
+    if not target_symbols and goal_id:
+        goal = next(
+            (item for item in goals
+             if str(getattr(item, "goal_id", "")) == str(goal_id)),
+            None,
+        )
+        if goal is not None:
+            target_symbols = tuple(dict.fromkeys(
+                str(item) for item in (
+                    *getattr(goal, "target_symbols", ()),
+                    getattr(goal, "operation", ""),
+                ) if str(item).strip() and str(item) != "UNRESOLVED_TARGET"
+            ))
     return ExecutableCheck(
         check_id=str(getattr(check, "check_id", "") or stable_id("public-check", command)),
         goal_id=goal_id, role=CheckRole.TARGET, authority=authority,
@@ -953,7 +1136,7 @@ def _execution_check_from_public(check: Any, goal_id: str | None, goals: tuple[A
         timeout_seconds=float(getattr(check, "timeout_seconds", 120.0)),
         comparator=comparator, expected=expected,
         evidence_ids=tuple(getattr(check, "evidence_ids", ()) or getattr(check, "source_evidence_ids", ())),
-        target_symbols=tuple(getattr(check, "target_symbols", ()) or getattr(check, "symbol_references", ())),
+        target_symbols=target_symbols,
         input_recipe=getattr(check, "input_recipe", None) or getattr(check, "concrete_input", None),
     )
 
@@ -967,6 +1150,8 @@ def _goal_for_check(goals: tuple[Any, ...], check: Any) -> str | None:
         goal_symbols = {str(item).casefold().rsplit(".", 1)[-1] for item in getattr(goal, "target_symbols", ())}
         if symbols and goal_symbols.intersection(symbols):
             return str(getattr(goal, "goal_id", "")) or None
+    if symbols:
+        return None
     hard = [goal for goal in goals if bool(getattr(goal, "hard", False))]
     return str(getattr(hard[0], "goal_id", "")) if len(hard) == 1 else None
 
@@ -1025,6 +1210,9 @@ def recover_target_checks(
     transport: Any,
     run_root: Path,
     config: TargetRecoveryConfig | None = None,
+    source_hints: tuple[Any, ...] | list[Any] = (),
+    oracle_review: Sequence[dict[str, Any]] = (),
+    dynamic_graph: Any = None,
 ) -> TargetRecoveryResult:
     """Recover real executable TARGET/PRESERVATION checks.
 
@@ -1043,81 +1231,79 @@ def recover_target_checks(
         if not isinstance(public_evidence, (tuple, list)) else tuple(public_evidence)
     )
     current_diff = diff_between(Path(clean_snapshot), Path(working_snapshot))
+    issue_text = "\n".join(
+        str(getattr(record, "content", ""))
+        for record in getattr(public_evidence, "records", ())
+        if getattr(record, "source", "") == "issue"
+    )
+    generic_symbols = {
+        "error", "exception", "assertionerror", "attributeerror",
+        "importerror", "indexerror", "keyerror", "nameerror",
+        "runtimeerror", "typeerror", "valueerror",
+    }
+    issue_symbols = tuple(item for item in dict.fromkeys((
+        *(
+            str(item)
+            for goal in goals
+            for item in (*getattr(goal, "target_symbols", ()), getattr(goal, "operation", ""))
+            if str(item).strip() and str(item) != "UNRESOLVED_TARGET"
+        ),
+        *re.findall(r"\b([A-Za-z_]\w*)\s*\(", issue_text),
+        *re.findall(r"(?m)\bin\s+([A-Za-z_]\w*)\s*$", issue_text),
+        *(str(getattr(hint, "symbol", "")) for hint in source_hints if getattr(hint, "symbol", "")),
+        *(str(symbol) for check in supplied_checks for symbol in (
+            *getattr(check, "target_symbols", ()),
+            *getattr(check, "symbol_references", ()),
+        )),
+    )) if item.casefold().rsplit(".", 1)[-1] not in generic_symbols)[:64]
+    # Discover from the complete evidence symbol set before and after P0.
+    # An empty diff is valid here: the discovery helper still finds bounded
+    # public tests referencing issue/goal/traceback/source-hint symbols.  P0
+    # changed symbols augment this set; they never replace it.
     discovered_checks = discover_diff_public_checks(
         Path(working_snapshot), current_diff, supplied_checks,
         max_checks=max(1, config.max_probes),
+        target_symbols=issue_symbols,
+        preferred_symbols=tuple(symbol for goal in goals if goal.hard for symbol in goal.target_symbols),
     )
-    checks = (*supplied_checks, *discovered_checks)
+    # Probe budget bounds execution work as well as the number of contracts
+    # eventually promoted.  Running every public test twice made recovery
+    # exceed its configured wall budget before the repair loop could start.
+    candidates = (*supplied_checks, *discovered_checks)
+    unique_candidates: list[Any] = []
+    seen_candidate_keys: set[tuple[Any, ...]] = set()
+    duplicate_candidates: list[Any] = []
+    for candidate in candidates:
+        key = (
+            tuple(getattr(candidate, "command", ())),
+            str(getattr(candidate, "cwd", ".")),
+            tuple(getattr(candidate, "environment", ())),
+        )
+        if key in seen_candidate_keys:
+            duplicate_candidates.append(candidate)
+            continue
+        seen_candidate_keys.add(key)
+        unique_candidates.append(candidate)
+    unique_candidates.sort(key=lambda candidate: (
+        _goal_for_check(tuple(goals), candidate) is None,
+        str(getattr(candidate, "role", "")).upper() != "TARGET",
+    ))
+    # Preserve a small allowance for clean baseline candidates.  Preservation
+    # checks do not consume the target quota, and a public list may place one
+    # before the target scenario that establishes the hard goal.
+    checks = tuple(unique_candidates[:max(1, config.max_probes) + max(0, int(config.candidate_allowance))])
     targets: list[ExecutableCheck] = []
     preservation: list[ExecutableCheck] = []
-    rejected: list[RejectedTargetCandidate] = []
+    deterministic_events: list[dict[str, Any]] = []
+    rejected: list[RejectedTargetCandidate] = [
+        RejectedTargetCandidate(
+            str(getattr(item, "check_id", stable_id("duplicate-check", repr(item)))),
+            "DUPLICATE_COMMAND",
+        )
+        for item in duplicate_candidates
+    ]
     blocked: list[BlockedTargetCandidate] = []
     seen: set[tuple[Any, ...]] = set()
-    for raw in checks:
-        goal_id = _goal_for_check(tuple(goals), raw)
-        check = _execution_check_from_public(raw, goal_id, tuple(goals))
-        if check is None:
-            continue
-        # The same command is one executable scenario even if two metadata
-        # records attach different prose expectations.  Run it once and let
-        # the explicit typed contract decide its role.
-        identity = (check.command, check.cwd, check.environment)
-        if identity in seen:
-            rejected.append(RejectedTargetCandidate(check.check_id, "DUPLICATE_COMMAND"))
-            continue
-        seen.add(identity)
-        clean = execute_check(Path(clean_snapshot), check, stability_runs=config.stability_runs)
-        if clean.status in {CheckStatus.BLOCKED, CheckStatus.UNSUPPORTED}:
-            blocked.append(BlockedTargetCandidate(check.check_id, clean.status))
-            continue
-        if not clean.stable:
-            rejected.append(RejectedTargetCandidate(check.check_id, "BASELINE_NONDETERMINISTIC"))
-            continue
-        if clean.status is CheckStatus.FAIL:
-            if check.authority not in {"A", "B", "C"}:
-                rejected.append(RejectedTargetCandidate(check.check_id, "ORACLE_PROVISIONAL"))
-            elif not clean.entered_project_code:
-                blocked.append(BlockedTargetCandidate(check.check_id, "ENVIRONMENT_BLOCKED"))
-            elif not check.goal_id:
-                rejected.append(RejectedTargetCandidate(check.check_id, "NO_MATCHING_GOAL"))
-            elif len(targets) >= config.max_probes:
-                rejected.append(RejectedTargetCandidate(check.check_id, "TARGET_PROBE_QUOTA_EXHAUSTED"))
-            else:
-                targets.append(replace(check, role=CheckRole.TARGET))
-        elif clean.status is CheckStatus.PASS:
-            if check.authority in {"A", "B", "C"}:
-                preservation.append(replace(check, role=CheckRole.PRESERVATION))
-            else:
-                rejected.append(RejectedTargetCandidate(
-                    check.check_id, "PRESERVATION_ORACLE_PROVISIONAL",
-                ))
-        else:
-            rejected.append(RejectedTargetCandidate(check.check_id, clean.status))
-    # Authority-C executable contracts are ordinary public evidence.  They are
-    # baseline-classified exactly like tests, and therefore cannot certify a
-    # target merely because a model described a relation.
-    for record in tuple(getattr(public_evidence, "api_contracts", ())) + tuple(getattr(public_evidence, "baseline_contracts", ())):
-        candidate = _contract_record_check(record, tuple(goals))
-        if candidate is None:
-            continue
-        identity = (candidate.command, candidate.cwd, candidate.environment)
-        if identity in seen:
-            continue
-        seen.add(identity)
-        baseline = execute_check(Path(clean_snapshot), candidate, stability_runs=config.stability_runs)
-        if baseline.status in {CheckStatus.BLOCKED, CheckStatus.UNSUPPORTED}:
-            blocked.append(BlockedTargetCandidate(candidate.check_id, baseline.status)); continue
-        if not baseline.stable:
-            rejected.append(RejectedTargetCandidate(candidate.check_id, "BASELINE_NONDETERMINISTIC")); continue
-        if baseline.status is CheckStatus.FAIL and baseline.entered_project_code and candidate.goal_id:
-            targets.append(replace(candidate, role=CheckRole.TARGET))
-        elif baseline.status is CheckStatus.PASS:
-            if candidate.authority in {"A", "B", "C"}:
-                preservation.append(replace(candidate, role=CheckRole.PRESERVATION))
-            else:
-                rejected.append(RejectedTargetCandidate(
-                    candidate.check_id, "PRESERVATION_ORACLE_PROVISIONAL",
-                ))
     # Issue code/reproduction witnesses are Authority B candidates. Their
     # source script is executable evidence, while the surrounding prose never
     # becomes an implicit expected value.
@@ -1160,7 +1346,11 @@ def recover_target_checks(
             check = ExecutableCheck(
                 check_id=check_id, goal_id=str(goal.goal_id), role=CheckRole.TARGET,
                 authority=authority, command=("python", "-c", script), cwd=".",
-                environment=(), timeout_seconds=float(config.timeout_seconds),
+                # A single executable witness is bounded by the per-check
+                # budget.  The larger ``timeout_seconds`` value is reserved
+                # for the recovery agent session itself; using it here can
+                # stall Stage A before the repair loop ever starts.
+                environment=(), timeout_seconds=float(config.check_timeout_seconds),
                 comparator=contract.normalized_comparator, expected=contract.expected,
                 evidence_ids=(str(record.evidence_id),), target_symbols=(operation,),
                 input_recipe={"witness_id": witness.get("witness_id")},
@@ -1172,9 +1362,23 @@ def recover_target_checks(
             clean = execute_check(Path(clean_snapshot), check, stability_runs=config.stability_runs)
             if clean.status in {CheckStatus.BLOCKED, CheckStatus.UNSUPPORTED} or not clean.stable:
                 rejected.append(RejectedTargetCandidate(check_id, "BASELINE_NONDETERMINISTIC_OR_BLOCKED"))
-            elif clean.status is CheckStatus.FAIL and clean.entered_project_code:
+            elif clean.status is CheckStatus.FAIL and getattr(clean, "entered_target_code", clean.entered_project_code):
                 if len(targets) < config.max_probes:
                     targets.append(replace(check, role=CheckRole.TARGET))
+                    from .facet_probes import materialize_return_facet_checks
+                    for facet_check in materialize_return_facet_checks(check, goals):
+                        if len(targets) >= config.max_probes:
+                            rejected.append(RejectedTargetCandidate(facet_check.check_id, "FACET_PROBE_BUDGET"))
+                            break
+                        facet_run = execute_check(Path(clean_snapshot), facet_check, stability_runs=config.stability_runs)
+                        if facet_run.stable and facet_run.entered_target_code is True and facet_run.status in {CheckStatus.PASS, CheckStatus.FAIL}:
+                            # The same input scenario already stably fails;
+                            # passing facets are required invariants of it.
+                            targets.append(replace(facet_check, role=CheckRole.TARGET))
+                            deterministic_events.append({"event": "FACET_RECOVERED", "check_id": facet_check.check_id,
+                                "source_check_id": check.check_id, "baseline_status": str(facet_run.status)})
+                        else:
+                            rejected.append(RejectedTargetCandidate(facet_check.check_id, "FACET_BASELINE_NOT_STABLE_OR_BLOCKED"))
                 else:
                     rejected.append(RejectedTargetCandidate(check_id, "TARGET_PROBE_QUOTA_EXHAUSTED"))
             elif clean.status is CheckStatus.PASS:
@@ -1186,22 +1390,145 @@ def recover_target_checks(
                     ))
             else:
                 rejected.append(RejectedTargetCandidate(check_id, "BASELINE_NOT_TARGET_FAILURE"))
+    for raw in checks:
+        goal_id = _goal_for_check(tuple(goals), raw)
+        check = _execution_check_from_public(raw, goal_id, tuple(goals))
+        if check is None:
+            continue
+        # The same command is one executable scenario even if two metadata
+        # records attach different prose expectations.  Run it once and let
+        # the explicit typed contract decide its role.
+        identity = (check.command, check.cwd, check.environment)
+        if identity in seen:
+            rejected.append(RejectedTargetCandidate(check.check_id, "DUPLICATE_COMMAND"))
+            continue
+        seen.add(identity)
+        bounded_check = replace(
+            check,
+            timeout_seconds=min(
+                float(check.timeout_seconds), float(config.check_timeout_seconds),
+            ),
+        )
+        clean = execute_check(
+            Path(clean_snapshot), bounded_check,
+            stability_runs=config.stability_runs,
+        )
+        if clean.status in {CheckStatus.BLOCKED, CheckStatus.UNSUPPORTED}:
+            blocked.append(BlockedTargetCandidate(check.check_id, clean.status))
+            continue
+        if not clean.stable:
+            rejected.append(RejectedTargetCandidate(check.check_id, "BASELINE_NONDETERMINISTIC"))
+            continue
+        if clean.status is CheckStatus.FAIL:
+            if check.authority not in {"A", "B", "C"}:
+                rejected.append(RejectedTargetCandidate(check.check_id, "ORACLE_PROVISIONAL"))
+            elif not getattr(clean, "entered_target_code", clean.entered_project_code):
+                blocked.append(BlockedTargetCandidate(check.check_id, "ENVIRONMENT_BLOCKED"))
+            elif not check.goal_id:
+                rejected.append(RejectedTargetCandidate(check.check_id, "NO_MATCHING_GOAL"))
+            elif len(targets) >= config.max_probes:
+                rejected.append(RejectedTargetCandidate(check.check_id, "TARGET_PROBE_QUOTA_EXHAUSTED"))
+            else:
+                targets.append(replace(bounded_check, role=CheckRole.TARGET))
+                # Stage B receives a non-empty clean->P0 diff. Re-execute the
+                # already trusted target on P0 twice and retain the semantic
+                # observation in the recovery artifact. Stage A deliberately
+                # skips this duplicate because working==clean there.
+                if not current_diff.empty:
+                    working_execution = execute_check(
+                        Path(working_snapshot), bounded_check,
+                        stability_runs=config.stability_runs,
+                    )
+                    deterministic_events.append({
+                        "time_ns": time.time_ns(),
+                        "tool": "run_probe_on_working",
+                        "source": "DETERMINISTIC_STAGE_B_REPLAY",
+                        "arguments": {"check_id": bounded_check.check_id},
+                        "result": {
+                            "check_id": bounded_check.check_id,
+                            "stable": working_execution.stable,
+                            "status": working_execution.status.value,
+                            "observation": working_execution.observation.to_dict(),
+                            "trace_bundle_id": working_execution.trace.trace_bundle_id,
+                        },
+                    })
+        elif clean.status is CheckStatus.PASS:
+            if check.authority in {"A", "B", "C"}:
+                preservation.append(replace(bounded_check, role=CheckRole.PRESERVATION))
+            else:
+                rejected.append(RejectedTargetCandidate(
+                    check.check_id, "PRESERVATION_ORACLE_PROVISIONAL",
+                ))
+        else:
+            rejected.append(RejectedTargetCandidate(check.check_id, clean.status))
+    # Authority-C executable contracts are ordinary public evidence.  They are
+    # baseline-classified exactly like tests, and therefore cannot certify a
+    # target merely because a model described a relation.
+    for record in tuple(getattr(public_evidence, "api_contracts", ())) + tuple(getattr(public_evidence, "baseline_contracts", ())):
+        candidate = _contract_record_check(record, tuple(goals))
+        if candidate is None:
+            continue
+        identity = (candidate.command, candidate.cwd, candidate.environment)
+        if identity in seen:
+            continue
+        seen.add(identity)
+        candidate = replace(
+            candidate,
+            timeout_seconds=min(
+                float(candidate.timeout_seconds), float(config.check_timeout_seconds),
+            ),
+        )
+        baseline = execute_check(
+            Path(clean_snapshot), candidate,
+            stability_runs=config.stability_runs,
+        )
+        if baseline.status in {CheckStatus.BLOCKED, CheckStatus.UNSUPPORTED}:
+            blocked.append(BlockedTargetCandidate(candidate.check_id, baseline.status)); continue
+        if not baseline.stable:
+            rejected.append(RejectedTargetCandidate(candidate.check_id, "BASELINE_NONDETERMINISTIC")); continue
+        if baseline.status is CheckStatus.FAIL and getattr(baseline, "entered_target_code", baseline.entered_project_code) and candidate.goal_id:
+            targets.append(replace(candidate, role=CheckRole.TARGET))
+        elif baseline.status is CheckStatus.PASS:
+            if candidate.authority in {"A", "B", "C"}:
+                preservation.append(replace(candidate, role=CheckRole.PRESERVATION))
+            else:
+                rejected.append(RejectedTargetCandidate(
+                    candidate.check_id, "PRESERVATION_ORACLE_PROVISIONAL",
+                ))
     agent_events: list[dict[str, Any]] = []
     agent_timed_out = False
-    if not targets and transport is not None and any(bool(getattr(goal, "hard", False)) for goal in goals):
+    # Recovery must also run for an unresolved/soft goal.  The agent may only
+    # propose probes; authority is still determined by the typed evidence
+    # checks below, so this cannot manufacture an Oracle.
+    missing_facets = tuple(goal for goal in goals if goal.hard
+                           and goal.goal_id not in {check.goal_id for check in targets})
+    if (not targets or oracle_review or missing_facets) and transport is not None:
         try:
             executor = TargetRecoveryToolExecutor(
                 repo_root=Path(clean_snapshot), clean_snapshot=Path(clean_snapshot),
                 working_snapshot=Path(working_snapshot), goal_contracts=goals,
-                program_slice=None, run_root=Path(run_root), max_probes=config.max_probes,
-                stability_runs=config.stability_runs, timeout_seconds=config.timeout_seconds,
+                program_slice=dynamic_graph, run_root=Path(run_root), max_probes=config.max_probes,
+                stability_runs=config.stability_runs, timeout_seconds=config.check_timeout_seconds,
             )
             context = {
                 "goal_contracts": [goal.to_dict() if hasattr(goal, "to_dict") else goal for goal in goals],
                 "issue_evidence": [record.to_dict() if hasattr(record, "to_dict") else record for record in getattr(public_evidence, "records", ())],
-                "instructions": "Generate probes only; an Oracle must cite Authority A/B/C evidence.",
+                "source_hints": [hint.to_dict() if hasattr(hint, "to_dict") else hint for hint in source_hints],
+                "graph_context": dynamic_graph.initial_generation_context() if dynamic_graph is not None else None,
+                "working_diff": current_diff.canonical_diff,
+                "oracle_review": list(oracle_review),
+                "missing_required_facets": [goal.to_dict() for goal in missing_facets],
+                "existing_checks": [check.to_dict() for check in targets],
+                "previous_recovery_decisions": list(dynamic_graph.nodes.get("recovery-history").metadata.get("decisions", ()))
+                    if dynamic_graph is not None and "recovery-history" in dynamic_graph.nodes else [],
+                "instructions": "Generate probes only; an Oracle must cite Authority A/B/C evidence. If oracle_review identifies a surviving incorrect return, recover missing return assertions from the cited requirement. Do not copy the mutant as an expected value or weaken the requirement.",
             }
-            agent_events.extend(TargetRecoveryAgent(transport, max_turns=max(8, config.max_probes * 3), timeout_seconds=config.timeout_seconds).recover(executor, context))
+            agent_events.extend(TargetRecoveryAgent(
+                transport,
+                max_turns=max(8, config.max_agent_turns),
+                timeout_seconds=config.timeout_seconds,
+                provider_request_timeout_seconds=config.provider_request_timeout_seconds,
+            ).recover(executor, context))
             agent_timed_out = executor.timed_out
             for probe_id, probe in executor.probes.items():
                 if probe.contract is None:
@@ -1210,11 +1537,8 @@ def recover_target_checks(
                 # contract exactly matches an existing issue-grounded goal
                 # (Authority B) and the two clean runs stably violate that
                 # contract. Otherwise retain the explicit provisional fate.
-                matching_goal = next((goal for goal in goals
-                    if getattr(goal, "hard", False)
-                    and str(getattr(goal, "authority", "")).upper() in {"A", "B", "C"}
-                    and str(getattr(goal, "comparator", "")).upper() == probe.contract.normalized_comparator
-                    and getattr(goal, "expected", None) == probe.contract.expected), None)
+                from reachpatch.requirement_graph.facets import match_grounded_probe_goal
+                matching_goal = match_grounded_probe_goal(goals, probe)
                 if matching_goal is None or len(probe.clean_runs) < config.stability_runs:
                     rejected.append(RejectedTargetCandidate(probe_id, "ORACLE_PROVISIONAL"))
                     continue
@@ -1223,7 +1547,7 @@ def recover_target_checks(
                     check_id=probe_id, goal_id=str(matching_goal.goal_id),
                     role=CheckRole.TARGET, authority="B",
                     command=("python", "-c", probe.source), cwd=".",
-                    environment=(), timeout_seconds=config.timeout_seconds,
+                    environment=(), timeout_seconds=config.check_timeout_seconds,
                     comparator=probe.contract.normalized_comparator,
                     expected=probe.contract.expected, evidence_ids=(),
                     target_symbols=tuple(matching_goal.target_symbols),
@@ -1246,7 +1570,7 @@ def recover_target_checks(
                     goal_id=str(matching_goal.goal_id), role=CheckRole.TARGET,
                     authority=str(getattr(matching_goal, "authority", "B")),
                     command=command, cwd=".", environment=(),
-                    timeout_seconds=config.timeout_seconds,
+                    timeout_seconds=config.check_timeout_seconds,
                     comparator=probe.contract.normalized_comparator,
                     expected=probe.contract.expected,
                     evidence_ids=tuple(stable_id(
@@ -1255,11 +1579,46 @@ def recover_target_checks(
                     target_symbols=tuple(matching_goal.target_symbols),
                     input_recipe=probe.input_recipe,
                 )
-                targets.append(promoted)
+                verified = execute_check(Path(clean_snapshot), promoted, stability_runs=config.stability_runs)
+                if verified.stable and verified.status is CheckStatus.FAIL and verified.entered_target_code is True:
+                    targets.append(promoted)
+                else:
+                    rejected.append(RejectedTargetCandidate(probe_id, "STRICT_TARGET_BINDING_OR_STABILITY_FAILED"))
         except Exception as exc:
             rejected.append(RejectedTargetCandidate("target-recovery-agent", type(exc).__name__))
     hard_goal_ids = {str(getattr(goal, "goal_id", "")) for goal in goals if bool(getattr(goal, "hard", False))}
     unresolved = tuple(sorted(hard_goal_ids - {item.goal_id for item in targets if item.goal_id}))
+    reasons: list[str] = []
+    if not targets:
+        reasons.append("NO_TRUSTED_TARGET")
+    if blocked:
+        reasons.append("ENVIRONMENT_OR_EXECUTION_BLOCKED")
+    if any(item.reason in {"BASELINE_NONDETERMINISTIC", "BASELINE_NOT_STABLE_OR_NOT_TARGET"}
+           for item in rejected):
+        reasons.append("BASELINE_NOT_STABLE")
+    if any(item.reason in {"ORACLE_PROVISIONAL", "PRESERVATION_ORACLE_PROVISIONAL"}
+           for item in rejected):
+        reasons.append("ORACLE_AUTHORITY_UNSUPPORTED")
+    if any(item.reason == "NO_MATCHING_GOAL" for item in rejected):
+        reasons.append("EVIDENCE_GOAL_ALIGNMENT_MISSING")
+    if agent_timed_out:
+        reasons.append("AGENT_TIMEOUT")
+    if any(event.get("tool") == "transport" and event.get("error") for event in agent_events):
+        reasons.append("AGENT_TRANSPORT_FAILURE")
+    if targets:
+        reasons.append("TARGET_RECOVERY_SUCCEEDED")
+    if dynamic_graph is not None:
+        from reachpatch.reach_avoid.dynamic_reach_avoid_graph import GraphNodeKind
+        prior = dynamic_graph.nodes.get("recovery-history")
+        decisions = tuple(prior.metadata.get("decisions", ())) if prior else ()
+        decision = {"target_discovered": bool(targets), "baseline_stable": bool(targets),
+            "required_facets_covered": not unresolved, "unresolved_goal_ids": unresolved,
+            "rejected": [item.to_dict() for item in rejected], "reasons": reasons,
+            "probe_contracts": [{"goal_id": check.goal_id, "command_hash": stable_id("command", check.command),
+                                 "comparator": check.comparator, "expected": check.expected} for check in targets]}
+        dynamic_graph.add_node(GraphNodeKind.OBSERVATION, node_id="recovery-history",
+            status="RECOVERED" if not unresolved and targets else "EVIDENCE_GAP",
+            metadata={"decisions": (*decisions, decision)})
     return TargetRecoveryResult(
         rejected_candidates=tuple(rejected), blocked_candidates=tuple(blocked),
         target_checks=tuple(targets), preservation_checks=tuple(preservation),
@@ -1270,7 +1629,9 @@ def recover_target_checks(
                 for item in agent_events
             )
         ),
-        agent_events=tuple(agent_events),
+        agent_events=tuple((*deterministic_events, *agent_events)),
+        attempt_count=len(deterministic_events) + len(agent_events),
+        exhausted_reasons=tuple(dict.fromkeys(reasons)),
     )
 
 
@@ -1289,9 +1650,11 @@ def materialize_diff_checks(
     from an existing A/B/C executable contract.  We never invent a target
     oracle or turn static predicates into certification evidence.
     """
-    del working_snapshot, dynamic_graph
+    # The graph is the source of challenge context.  It is intentionally not
+    # discarded: callers can attach branch/value-flow IDs from graph nodes to
+    # each generated executable check for audit and validation scheduling.
     existing = {
-        (tuple(item.command), item.comparator, repr(item.expected))
+        (tuple(item.command), item.comparator, repr(item.expected), repr(getattr(item, "input_recipe", None)))
         for item in previous_checks
     }
     result: list[ExecutableCheck] = list(previous_checks)
@@ -1343,17 +1706,42 @@ def materialize_diff_checks(
                         variants.append(dict(item))
                     elif isinstance(item, (tuple, list)):
                         variants.append({"command": tuple(str(part) for part in item)})
+        if dynamic_graph is not None and not variants:
+            graph_nodes = getattr(dynamic_graph, "nodes", {})
+            for branch in tuple(graph_nodes.values()):
+                branch_kind = getattr(getattr(branch, "kind", None), "value", getattr(branch, "kind", ""))
+                if str(branch_kind).upper() != "BRANCH":
+                    continue
+                predicate = str(getattr(branch, "metadata", {}).get("predicate", getattr(branch, "source_span", "")))
+                if not predicate or (getattr(branch, "file", None) and not any(str(branch.file) == str(path) for path in getattr(check, "evidence_ids", ()) + getattr(check, "target_symbols", ()) )):
+                    # A branch without an explicit file match is still useful
+                    # when the diff contains executable predicate text.
+                    if not any(token in predicate for token in predicate_tokens):
+                        continue
+                variants.extend({
+                    "command": tuple(check.command), "kind": kind,
+                    "source_branch_id": getattr(branch, "node_id", ""),
+                    "source_value_flow_ids": tuple(
+                        edge.edge_id for edge in getattr(dynamic_graph, "edges", {}).values()
+                        if edge.source_id == getattr(branch, "node_id", "") or edge.target_id == getattr(branch, "node_id", "")
+                    ), "variant_value": value,
+                } for value in (("None" if "none" in predicate.casefold() else "0"), "1", "-1"))
         # A challenge must be a genuinely different executable input. The
         # target command itself is already run by the main queue and is never
         # duplicated as a CHALLENGE check.
         for index, variant in enumerate(variants):
+            oracle = variant.get("oracle")
+            if (not isinstance(oracle, dict) or not oracle.get("comparator")
+                or "expected" not in oracle or variant.get("authority") not in {"A", "B", "C"}
+                or not variant.get("evidence_ids")):
+                continue
             raw_command = variant.get("command")
             if not isinstance(raw_command, (tuple, list)) or not raw_command:
                 continue
             variant_command = tuple(str(part) for part in raw_command)
             if variant_command == tuple(check.command):
                 continue
-            key = (variant_command, check.comparator, repr(check.expected))
+            key = (variant_command, check.comparator, repr(check.expected), repr(variant))
             if key in existing:
                 continue
             result.append(replace(
@@ -1364,12 +1752,26 @@ def materialize_diff_checks(
                 ),
                 role=CheckRole.CHALLENGE,
                 command=variant_command,
-                evidence_ids=tuple(getattr(check, "evidence_ids", ())) + (check.check_id,),
+                authority=variant["authority"], comparator=oracle["comparator"], expected=oracle["expected"],
+                evidence_ids=tuple(variant["evidence_ids"]),
                 input_recipe={
                     "kind": str(variant.get("kind", kind)),
                     "source_check_id": check.check_id,
                     "variant_index": index,
+                    "source_branch_id": variant.get("source_branch_id"),
+                    "source_value_flow_ids": tuple(variant.get("source_value_flow_ids", ())),
+                    "input_recipe": variant.get("variant_value", variant),
                 },
             ))
             existing.add(key)
     return tuple(result)
+
+
+def materialize_graph_guided_challenges(
+    repo_root: Path,
+    graph: DynamicReachAvoidGraph,
+    checkpoint: CheckpointState,
+    observations: tuple[Any, ...] | list[Any] = (),
+) -> tuple[Any, ...]:
+    """Public validation/challenge projection owned by the unified graph."""
+    return _materialize_graph_guided_challenges(repo_root, graph, checkpoint, observations)

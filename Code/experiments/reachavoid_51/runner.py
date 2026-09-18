@@ -9,6 +9,7 @@ import subprocess
 import sys
 import time
 import traceback
+from dataclasses import asdict
 from collections import Counter
 from pathlib import Path
 from typing import Any, Iterable
@@ -33,7 +34,12 @@ OFFICIAL_PATH = DATASET_ROOT / "official_instances.jsonl"
 DIAGNOSTIC_OFFICIAL_PATH = CODE_ROOT / "dataset" / "diagnostic10_official_instances.jsonl"
 SOURCE_TREE_ROOT = Path(os.environ.get(
     "REACHPATCH_SOURCE_TREE_ROOT",
-    CODE_ROOT / "experiments" / "swe51" / "case_trees",
+    (
+        CODE_ROOT / "experiments" / "reachavoid_diagnostic10_sources_20260908" / "case_trees"
+        if os.environ.get("REACHPATCH_DIAGNOSTIC10") == "1"
+        and (CODE_ROOT / "experiments" / "reachavoid_diagnostic10_sources_20260908" / "case_trees").is_dir()
+        else CODE_ROOT / "experiments" / "swe51" / "case_trees"
+    ),
 )).resolve()
 EXPERIMENT_ROOT = Path(os.environ.get(
     "REACHPATCH_RA51_ROOT",
@@ -99,7 +105,12 @@ def _archive_failed_attempt(case_id: str) -> None:
             # ``nobody``.  It is still readable evidence, but the invoking
             # user cannot rename it; leave it in place and let the next
             # attempt use an isolated suffixed run directory.
-            pass
+            marker = destination / "run_move_blocked.txt"
+            marker.write_text(
+                "The failed run directory could not be moved because its "
+                "owner is not writable by the coordinator.\n",
+                encoding="utf-8",
+            )
     if source_result.exists():
         source_result.replace(destination / "result.json")
 
@@ -295,382 +306,131 @@ def _sandbox_command(command: list[str], key_path: Path) -> list[str]:
     return [*sandbox, *command]
 
 
-def _checkpoint_payloads(run_root: Path) -> list[dict[str, Any]]:
-    result = []
-    for path in sorted((run_root / "checkpoint_store").glob("*/checkpoint.json")):
-        raw = _read_json(path)
-        if raw and raw.get("schema") == SCHEMA_VERSION:
-            result.append({**raw["checkpoint"], "_directory": str(path.parent)})
-    return result
-
-
 def _initial_checkpoint(run_root: Path) -> dict[str, Any]:
-    execution_values = []
+    values = []
     for path in sorted((run_root / "execution_checkpoints").glob("*/checkpoint.json")):
         raw = _read_json(path) or {}
-        if raw.get("schema") == EXECUTION_SCHEMA_NAME:
-            checkpoint = raw.get("checkpoint")
-            if isinstance(checkpoint, dict):
-                execution_values.append({**checkpoint, "_directory": str(path.parent)})
-    p0_values = [
-        item for item in execution_values
-        if item.get("status") == "P0" and int(item.get("revision", -1)) == 0
-    ]
-    if len(p0_values) == 1:
-        return p0_values[0]
-    values = [
-        item for item in _checkpoint_payloads(run_root)
-        if item.get("status") == "INITIAL_WORKING" and int(item.get("revision", -1)) == 0
-    ]
+        if raw.get("schema") != EXECUTION_SCHEMA_NAME:
+            raise RuntimeError("incompatible execution checkpoint schema")
+        checkpoint = raw.get("checkpoint", {})
+        if checkpoint.get("status") == "P0" and checkpoint.get("revision") == 0:
+            values.append({**checkpoint, "_directory": str(path.parent)})
     if len(values) != 1:
-        raise RuntimeError(f"expected one initial checkpoint, found execution P0={len(p0_values)}, legacy INITIAL_WORKING={len(values)}")
+        raise RuntimeError(f"expected one execution P0, found {len(values)}")
     return values[0]
 
 
 def _initial_checkpoint_diff(checkpoint: dict[str, Any]) -> str:
-    value = checkpoint.get("cumulative_diff", checkpoint.get("canonical_diff"))
-    if value is None:
+    if "cumulative_diff" not in checkpoint:
         raise RuntimeError("initial checkpoint has no cumulative diff")
-    return str(value)
+    return str(checkpoint["cumulative_diff"])
 
 
 def _transition_payloads(run_root: Path) -> list[dict[str, Any]]:
     values = []
     for path in sorted((run_root / "transitions").glob("*.json")):
-        raw = _read_json(path)
-        if raw and raw.get("schema") == SCHEMA_VERSION:
-            values.append(raw)
+        raw = _read_json(path) or {}
+        if not raw.get("certificate_id"):
+            raise RuntimeError("incompatible transition certificate schema")
+        values.append(raw)
     return values
 
 
-def _terminal_graphs(run_root: Path, checkpoint_id: str) -> dict[str, Any]:
-    root = run_root / "checkpoint_store" / checkpoint_id
-    return {
-        name: json.loads((root / f"{name}_graph.json").read_text(encoding="utf-8"))
-        for name in ("requirement", "program", "binding", "challenge")
-    }
-
-
-def _objective_evidence(run_root: Path) -> list[dict[str, Any]]:
-    objectives: dict[str, dict[str, Any]] = {}
-    for path in sorted((run_root / "checkpoint_store").glob("*/runtime_state.json")):
-        raw = _read_json(path) or {}
-        objective = raw.get("current_repair_objective")
-        if isinstance(objective, dict) and objective.get("objective_kind") != "INITIAL_PATCH":
-            objectives[str(objective.get("objective_id"))] = objective
-    return list(objectives.values())
-
-
 def _component_evidence(run_root: Path, terminal: dict[str, Any]) -> dict[str, Any]:
-    execution_summary = _read_json(run_root / "execution_summary.json")
-    if execution_summary is not None or (run_root / "execution_checkpoints").is_dir():
-        return _execution_component_evidence(run_root, terminal)
-    transitions = _transition_payloads(run_root)
-    certificates = [item["certificate"] for item in transitions]
-    frontier_records = {}
-    validation_backlog_records = {}
-    recovery_attempts = 0
-    for path in sorted((run_root / "checkpoint_store").glob("*/runtime_state.json")):
-        runtime = _read_json(path) or {}
-        for frontier_id, frontier in (runtime.get("repair_frontiers") or {}).items():
-            frontier_records[str(frontier_id)] = frontier
-        for backlog_id, item in (runtime.get("validation_backlog") or {}).items():
-            validation_backlog_records[str(backlog_id)] = item
-        recovery_attempts += sum(
-            int(value) for key, value in (runtime.get("frontier_attempts") or {}).items()
-            if str(key).startswith("recovery:")
-        )
-    objectives = _objective_evidence(run_root)
-    graphs = _terminal_graphs(run_root, str(terminal["checkpoint_id"]))
-    requirement = graphs["requirement"]
-    program = graphs["program"]
-    binding = graphs["binding"]
-    challenge = graphs["challenge"]
-    executions = {
-        execution["paired_bundle_id"]: execution
-        for transition in transitions
-        for execution in transition.get("executions", ())
-    }
-    checkpoint_observations = {}
-    for path in (run_root / "checkpoint_store").glob("*/observations.json"):
-        raw = _read_json(path) or {}
-        checkpoint_observations.update(raw.get("by_challenge", {}))
-    checkpoint_counterexamples = {}
-    for path in (run_root / "checkpoint_store").glob("*/counterexamples.json"):
-        raw = json.loads(path.read_text(encoding="utf-8"))
-        for packet in raw if isinstance(raw, list) else ():
-            if isinstance(packet, dict) and packet.get("counterexample_id"):
-                checkpoint_counterexamples[str(packet["counterexample_id"])] = packet
-    objective_cut_ids = sorted({
-        str(cut.get("cut_id"))
-        for objective in objectives for cut in objective.get("causal_cuts", ())
-        if isinstance(cut, dict) and cut.get("cut_id")
-    })
-    objective_binding_ids = sorted({
-        str(unit.get("binding_id"))
-        for objective in objectives for unit in objective.get("bindings", ())
-        if isinstance(unit, dict) and unit.get("binding_id")
-    })
-    objective_requirement_ids = sorted({
-        str(leaf.get("requirement_id"))
-        for objective in objectives
-        for leaf in (
-            objective.get("related_requirements", ())
-            + objective.get("preservation_requirements", ())
-        )
-        if isinstance(leaf, dict) and leaf.get("requirement_id")
-    })
-    improved_requirements = sorted({
-        requirement_id
-        for certificate in certificates
-        for requirement_id in certificate.get("requirements_improved", ())
-    })
-    confirmed_bindings = sorted({
-        binding_id
-        for certificate in certificates
-        for binding_id in certificate.get("bindings_confirmed", ())
-    })
-    selected_challenges = sorted({
-        challenge_id
-        for certificate in certificates
-        for challenge_id in certificate.get("selected_challenge_ids", ())
-    } | set(checkpoint_observations))
-    executed_challenges = sorted({
-        challenge_id
-        for certificate in certificates
-        for challenge_id in certificate.get("executed_challenge_ids", ())
-    } | set(checkpoint_observations))
-    opened_counterexamples = sorted({
-        item
-        for certificate in certificates
-        for item in certificate.get("counterexamples_opened", ())
-    } | set(checkpoint_counterexamples))
-    closed_counterexamples = sorted({
-        item
-        for certificate in certificates
-        for item in certificate.get("counterexamples_closed", ())
-    })
-    decisions = Counter(str(item.get("decision")) for item in certificates)
-    generator_attempts = []
-    attempts_path = run_root / "generator_attempts.jsonl"
-    if attempts_path.is_file():
-        # Keep parsing local and tolerant: malformed audit lines must not erase
-        # the sealed result.
-        generator_attempts = []
-        for line in attempts_path.read_text(encoding="utf-8", errors="replace").splitlines():
-            try:
-                value = json.loads(line)
-            except json.JSONDecodeError:
-                continue
-            if isinstance(value, dict):
-                generator_attempts.append(value)
-    no_op_count = sum(
-        str(item.get("result_kind")) in {"NO_NEW_DIFF", "GENERATOR_ERROR"}
-        for item in generator_attempts
-    )
-    dynamic_edges = sum(
-        bool(edge.get("dynamic_confirmed"))
-        for edge in program.get("edges", {}).values()
-    )
-    confirmed_terminal_bindings = [
-        binding_id for binding_id, unit in binding.get("units", {}).items()
-        if unit.get("status") not in {"UNBOUND", "STATIC_ACTIONABLE", "ORACLE_UNAVAILABLE", "ENVIRONMENT_BLOCKED"}
-    ]
-    terminal_challenge_counts = Counter(
-        str(cell.get("terminal_status"))
-        for cell in challenge.get("cells", {}).values()
-    )
-    execution_bundle_ids = set(executions) | {
-        str(execution["paired_bundle_id"])
-        for execution in checkpoint_observations.values()
-        if isinstance(execution, dict) and execution.get("paired_bundle_id")
-    }
-    impact = program.get("impact_cone") or {}
-    impact_risk_ids = {
-        str(risk_id)
-        for field in (
-            "direct_caller_ids", "return_consumer_ids",
-            "exception_handler_ids", "state_reader_ids",
-            "reverse_dispatch_ids", "rendering_consumer_ids",
-            "public_check_ids",
-        )
-        for risk_id in impact.get(field, ())
-    }
-    return {
-        "requirement_graph": {
-            "leaf_count": len(requirement.get("leaves", {})),
-            "partition_count": len(requirement.get("challenge_partitions", {})),
-            "objective_requirement_ids": objective_requirement_ids,
-            "requirements_improved": improved_requirements,
-            "participated": bool(objective_requirement_ids or improved_requirements),
-        },
-        "program_graph": {
-            "node_count": len(program.get("nodes", {})),
-            "edge_count": len(program.get("edges", {})),
-            "path_class_count": len(program.get("path_classes", {})),
-            "dynamic_edge_count": dynamic_edges,
-            "causal_cut_count": len(program.get("causal_cuts", {})),
-            "objective_causal_cut_ids": objective_cut_ids,
-            "impact_risk_count": len(impact_risk_ids),
-            "participated": bool(objective_cut_ids or dynamic_edges),
-        },
-        "binding_graph": {
-            "unit_count": len(binding.get("units", {})),
-            "gap_count": len(binding.get("gaps", ())),
-            "objective_binding_ids": objective_binding_ids,
-            "transition_confirmed_binding_ids": confirmed_bindings,
-            "terminal_execution_confirmed_binding_ids": sorted(confirmed_terminal_bindings),
-            "participated": bool(objective_binding_ids or confirmed_bindings or confirmed_terminal_bindings),
-        },
-        "challenge_graph": {
-            "cell_count": len(challenge.get("cells", {})),
-            "selected_challenge_ids": selected_challenges,
-            "executed_challenge_ids": executed_challenges,
-            "execution_bundle_count": len(execution_bundle_ids),
-            "counterexamples_opened": opened_counterexamples,
-            "counterexamples_closed": closed_counterexamples,
-            "terminal_status_counts": dict(sorted(terminal_challenge_counts.items())),
-            "participated": bool(executed_challenges),
-        },
-        "reach_avoid": {
-            "transition_count": len(certificates),
-            "decision_counts": dict(sorted(decisions.items())),
-            "strict_progress_count": sum(bool(item.get("progress", {}).get("strict_progress")) for item in certificates),
-            "causal_progress_count": sum(bool(item.get("progress", {}).get("causal_progress")) for item in certificates),
-            "rollback_count": decisions.get("ROLLBACK", 0),
-            "provisional_count": decisions.get("KEEP_PROVISIONAL", 0),
-            "commit_count": decisions.get("COMMIT_WORKING", 0),
-            "advance_safe_count": decisions.get("ADVANCE_SAFE", 0),
-            "keep_repairing_count": decisions.get("KEEP_REPAIRING", 0),
-            "reject_trial_count": decisions.get("REJECT_TRIAL", 0),
-            "reached_count": decisions.get("REACHED", 0),
-            "seal_best_count": decisions.get("SEAL_BEST", 0),
-            "frontier_count": len(frontier_records),
-            "validation_backlog_count": len(validation_backlog_records),
-            "evidence_recovery_count": recovery_attempts,
-            "no_op_count": no_op_count,
-            "frontier_kind_counts": dict(Counter(
-                str(item.get("kind")) for item in frontier_records.values()
-            )),
-            "frontier_status_counts": dict(Counter(
-                str(item.get("status")) for item in frontier_records.values()
-            )),
-            "participated": bool(certificates or executed_challenges),
-        },
-    }
+    return _execution_component_evidence(run_root, terminal)
 
 
 def _execution_component_evidence(run_root: Path, terminal: dict[str, Any]) -> dict[str, Any]:
-    """Build report facts from execution checkpoints, without graph artifacts."""
     summary = _read_json(run_root / "execution_summary.json") or {}
-    state_artifact = _read_json(run_root / "execution_state.json") or {}
-    state = (
-        state_artifact.get("state", {})
-        if isinstance(state_artifact.get("state"), dict)
-        else state_artifact
-    )
-    checkpoint_root = run_root / "execution_checkpoints"
-    checkpoints: dict[str, dict[str, Any]] = {}
-    for path in sorted(checkpoint_root.glob("*/checkpoint.json")):
-        raw = _read_json(path) or {}
-        if raw.get("schema") == EXECUTION_SCHEMA_NAME and isinstance(raw.get("checkpoint"), dict):
-            checkpoints[str(raw["checkpoint"].get("checkpoint_id", path.parent.name))] = raw
-    final_id = str(terminal.get("checkpoint_id", ""))
-    final_raw = checkpoints.get(final_id, {})
-    final_checkpoint = final_raw.get("checkpoint", {}) if isinstance(final_raw, dict) else {}
-    target_results = tuple(final_raw.get("target_results", ())) if isinstance(final_raw, dict) else ()
-    preservation_results = tuple(final_raw.get("preservation_results", ())) if isinstance(final_raw, dict) else ()
-    challenge_results = tuple(final_raw.get("challenge_results", ())) if isinstance(final_raw, dict) else ()
-    all_results = (*target_results, *preservation_results, *challenge_results)
-    statuses = Counter(str(item.get("status")) for item in all_results if isinstance(item, dict))
-    target_pass = sum(
-        isinstance(item, dict) and item.get("status") == "PASS" and item.get("stable")
-        for item in target_results
-    )
-    preservation_pass = sum(
-        isinstance(item, dict) and item.get("status") == "PASS" and item.get("stable")
-        for item in preservation_results
-    )
-    transition_files = []
-    for path in sorted((run_root / "transitions").glob("*.json")):
-        raw = _read_json(path)
-        if isinstance(raw, dict) and raw.get("certificate_id"):
-            transition_files.append(raw)
-    decisions = Counter(str(item.get("decision")) for item in transition_files)
-    objective_files = tuple((run_root / "repair_tool_events.jsonl",))
+    graph = _read_json(run_root / "dynamic_graph.json") or {}
+    nodes = graph.get("nodes", {})
+    metrics = dict(summary.get("graph_metrics", {}))
+    causal_keys = ("graph_localization_decision_count", "graph_generated_hypothesis_count",
+                   "graph_generated_challenge_count", "graph_derived_validation_count")
+    used = any(metrics.get(key, 0) for key in causal_keys)
+    checkpoint_path = run_root / "execution_checkpoints" / str(terminal["checkpoint_id"]) / "checkpoint.json"
+    checkpoint = _read_json(checkpoint_path) or {}
+    if checkpoint.get("schema") != EXECUTION_SCHEMA_NAME:
+        raise RuntimeError("selected checkpoint is missing or incompatible")
+    if graph:
+        from reachpatch.reach_avoid.dynamic_reach_avoid_graph import DynamicReachAvoidGraph
+        from reachpatch.models.base import stable_id
+        manifest = _read_json(run_root / "evidence_manifest.json") or {}
+        actual_hash = DynamicReachAvoidGraph.from_dict(graph).digest()
+        if (manifest.get("consistency") != "VERIFIED" or manifest.get("graph_hash") != actual_hash
+            or summary.get("graph_hash") != actual_hash
+            or manifest.get("checkpoint_id") != terminal["checkpoint_id"]
+            or manifest.get("patch_hash") != checkpoint["checkpoint"].get("patch_hash")):
+            raise RuntimeError("ARTIFACT_INCONSISTENT: evidence seal")
+        for role in ("target", "preservation", "challenge"):
+            results = checkpoint[role + "_results"]
+            refs = {item["check_id"]: stable_id("check-observation", item["check_id"], item["status"], item["semantic_signature"])
+                    for item in results}
+            if refs != manifest.get("observation_references", {}).get(role):
+                raise RuntimeError("ARTIFACT_INCONSISTENT: execution result references")
+    targets = tuple(checkpoint.get("target_results", ()))
+    preservation = tuple(checkpoint.get("preservation_results", ()))
+    challenges = tuple(checkpoint.get("challenge_results", ()))
+    transitions = _transition_payloads(run_root)
+    decisions = Counter(item["decision"] for item in transitions)
+    recovery = _read_json(run_root / "target_recovery.json") or {}
     return {
-        "requirement_graph": {
-            "leaf_count": len(state.get("goal_contracts", ())),
-            "partition_count": 0,
-            "objective_requirement_ids": sorted({str(item.get("goal_id")) for item in state.get("goal_contracts", ()) if isinstance(item, dict) and item.get("goal_id")}),
-            "requirements_improved": sorted({str(value) for cert in transition_files for value in cert.get("atomic_progress", {}) if cert.get("atomic_progress", {}).get(value, {}).get("strict_progress")}),
-            "participated": bool(state.get("goal_contracts")),
+        "dynamic_reach_avoid_graph": {
+            **metrics, "graph_hash": summary.get("graph_hash"),
+            "node_count": len(nodes), "edge_count": len(graph.get("edges", {})),
+            "frontier_count": len(graph.get("frontiers", ())),
+            "status": "GRAPH_CAUSALLY_USED" if used else "GRAPH_PRESENT_BUT_CAUSALLY_UNUSED",
+            "participated": used,
+            "causal_benefit_established": False,
+            "usage_level": "DECISION_RECORDED" if metrics.get("graph_recorded_action_count", 0) else
+                           "CONTEXT_OR_DERIVATION_ONLY" if used else "UNUSED",
+            "requirement_ids": sorted(key for key, node in nodes.items() if node.get("kind") == "REQUIREMENT"),
+            "checkpoint_ids": sorted(key for key, node in nodes.items() if node.get("kind") == "CHECKPOINT"),
         },
-        "program_graph": {
-            "node_count": 0, "edge_count": 0, "path_class_count": 0,
-            "dynamic_edge_count": 0, "causal_cut_count": 0,
-            "objective_causal_cut_ids": [], "impact_risk_count": 0,
-            "participated": bool(summary.get("transition_count")),
+        "validation": {
+            "target_results": targets, "preservation_results": preservation,
+            "challenge_results": challenges,
+            "executed_challenge_ids": sorted(item["check_id"] for item in challenges),
+            "stable_target_pass_count": sum(item.get("stable") and item.get("status") == "PASS" for item in targets),
+            "participated": bool(targets or preservation or challenges),
         },
-        "binding_graph": {
-            "unit_count": 0, "gap_count": 0,
-            "objective_binding_ids": [], "transition_confirmed_binding_ids": [],
-            "terminal_execution_confirmed_binding_ids": [],
-            "participated": False,
-        },
-        "challenge_graph": {
-            "cell_count": len(all_results),
-            "selected_challenge_ids": sorted(str(item.get("check_id")) for item in all_results if isinstance(item, dict) and item.get("check_id")),
-            "executed_challenge_ids": sorted(str(item.get("check_id")) for item in all_results if isinstance(item, dict) and item.get("status") in {"PASS", "FAIL", "BLOCKED", "UNSUPPORTED"}),
-            "execution_bundle_count": len(all_results),
-            "counterexamples_opened": [], "counterexamples_closed": [],
-            "terminal_status_counts": dict(sorted(statuses.items())),
-            "participated": bool(all_results),
+        "target_recovery": {
+            "attempt_count": metrics.get("target_recovery_attempt_count", 0),
+            "success": bool(metrics.get("target_recovery_success")),
+            "exhausted_reasons": recovery.get("exhausted_reasons", ()),
+            "participated": bool(metrics.get("target_recovery_attempt_count")),
         },
         "reach_avoid": {
-            "transition_count": len(transition_files),
-            "decision_counts": dict(sorted(decisions.items())),
-            "strict_progress_count": sum(bool(value.get("strict_progress")) for cert in transition_files for value in cert.get("atomic_progress", {}).values() if isinstance(value, dict)),
-            "causal_progress_count": sum(bool(value.get("partial_progress")) for cert in transition_files for value in cert.get("atomic_progress", {}).values() if isinstance(value, dict)),
-            "rollback_count": 0, "provisional_count": 0, "commit_count": 0,
-            "advance_safe_count": decisions.get("ADVANCE_SAFE", 0),
-            "keep_repairing_count": decisions.get("KEEP_REPAIRING", 0),
-            "reject_trial_count": decisions.get("REJECT_TRIAL", 0),
-            "reached_count": decisions.get("REACHED", 0),
-            "seal_best_count": 1 if str(summary.get("status", "")).startswith("BEST_EFFORT") else 0,
-            "frontier_count": 0, "validation_backlog_count": 0,
-            "evidence_recovery_count": 0, "no_op_count": 0,
-            "frontier_kind_counts": {}, "frontier_status_counts": {},
-            "participated": bool(transition_files),
+            "transition_count": len(transitions), "decision_counts": dict(decisions),
+            "backtrack_count": metrics.get("graph_backtrack_count", 0),
+            "transitions": transitions, "participated": bool(transitions),
         },
+        "case_budget": _read_json(run_root / "case_budget.json") or {},
     }
 
 
 def _validate_component_evidence(case_id: str, evidence: dict[str, Any]) -> None:
-    # The ten-case diagnostic seals every non-empty controller result, including
-    # an evidence-limited terminal patch whose local graph has no executable
-    # challenge.  This opt-in audit mode preserves that run for later official
-    # evaluation; the normal 51-case runner keeps its strict component check.
-    if os.environ.get("REACHPATCH_DIAGNOSTIC10") == "1":
-        return
-    requirement_count = int(evidence["requirement_graph"]["leaf_count"])
-    challenge_count = int(evidence["challenge_graph"]["cell_count"])
-    # A terminal BEST_EFFORT run may legitimately have no materialized cells
-    # after the final graph refresh (for example when all executable recipes
-    # are exhausted or an observation remains provisional).  This is evidence
-    # of an unresolved observation/frontier, not a reason to discard a non-empty
-    # working patch and restart DeepSeek generation.  The terminal state and
-    # frontier records are retained in the result for independent auditing.
-    if requirement_count and not challenge_count and not evidence.get("reach_avoid", {}).get("frontier_count"):
-        raise RuntimeError(f"{case_id}: generated patch has requirements but no Challenge cells")
-    # Older component-evidence records may omit the execution list.  Treat
-    # that as no executed cells while preserving the explicit diagnostic
-    # above; this keeps validation deterministic across schema versions.
-    executed_count = len(evidence["challenge_graph"].get("executed_challenge_ids", ()))
-    if challenge_count and not executed_count and not evidence.get("reach_avoid", {}).get("frontier_count"):
-        raise RuntimeError(
-            f"{case_id}: final checkpoint leaves every Challenge cell unexecuted"
-        )
+    graph = evidence.get("dynamic_reach_avoid_graph", {})
+    if not graph.get("graph_hash"):
+        raise RuntimeError(f"{case_id}: missing unified graph hash")
+    causal_keys = ("graph_localization_decision_count", "graph_generated_hypothesis_count",
+                  "graph_generated_challenge_count", "graph_derived_validation_count")
+    if graph.get("participated") and not any(graph.get(key, 0) for key in causal_keys):
+        raise RuntimeError(f"{case_id}: graph participation has no causal-use evidence")
+    # Evidence-limited patches are sealed honestly, never discarded and
+    # regenerated merely because recovery found no target or adjacent oracle.
+    if "validation" not in evidence or "case_budget" not in evidence:
+        raise RuntimeError(f"{case_id}: missing validation or budget audit")
+
+
+def _case_configuration(max_revisions: int) -> ReachAvoidConfig:
+    return ReachAvoidConfig(
+        max_real_patch_revisions=max_revisions,
+        execution_budget_seconds=float(os.environ.get("REACHPATCH_CASE_WALL_SECONDS", "3600")),
+        max_case_model_calls=int(os.environ.get("REACHPATCH_CASE_MODEL_CALLS", "160")),
+        max_case_tokens=int(os.environ.get("REACHPATCH_CASE_TOKENS", "1000000")),
+        final_validation_reserve_seconds=float(os.environ.get("REACHPATCH_FINAL_VALIDATION_RESERVE", "30")),
+    )
 
 
 def generate_case(case_id: str, key_path: Path, model: str, max_revisions: int) -> dict[str, Any]:
@@ -714,22 +474,17 @@ def generate_case(case_id: str, key_path: Path, model: str, max_revisions: int) 
     )
     controller = ReachAvoidController(
         RepairPlayer(DeepSeekAgent(transport, DeepSeekConfig.from_environment())),
-        ReachAvoidConfig(
-            max_real_patch_revisions=max_revisions,
-        ),
+        _case_configuration(max_revisions),
     )
     started = time.monotonic()
-    terminal = controller.run(_generation_instance(row), run_root=run_root).to_dict()
+    terminal = controller.run_case(_generation_instance(row), run_root=run_root).to_dict()
     if terminal["status"] in {"GENERATOR_BLOCKED_EXTERNAL", "MECHANICAL_BLOCKED"}:
         errors_path = run_root / "controller_errors.jsonl"
         detail = errors_path.read_text(encoding="utf-8")[-8000:] if errors_path.is_file() else ""
         raise RuntimeError(f"{case_id}: {terminal['status']}: {detail}")
     initial = _initial_checkpoint(run_root)
     p0_path = run_root / "p0.patch"
-    # Execution-v2 checkpoints persist the complete clean->checkpoint patch
-    # as ``cumulative_diff``.  The legacy checkpoint schema used
-    # ``canonical_diff``; accepting only the latter would discard a valid P0
-    # after the controller had already completed its execution-backed run.
+    # Only the full base-to-checkpoint diff belongs in a sealed prediction.
     try:
         initial_diff = _initial_checkpoint_diff(initial)
     except RuntimeError as exc:
@@ -756,6 +511,7 @@ def generate_case(case_id: str, key_path: Path, model: str, max_revisions: int) 
         "final_checkpoint_id": terminal["checkpoint_id"],
         "duration_seconds": time.monotonic() - started,
         "implementation_hash": _implementation_hash(),
+        "case_configuration": asdict(_case_configuration(max_revisions)),
         "execution_backend": (
             {"kind": "DEPENDENCY_IMAGE", "image": execution_image}
             if execution_image else {"kind": "HOST"}
@@ -814,6 +570,7 @@ def generate(key_path: Path, model: str, max_revisions: int, only: set[str]) -> 
         "implementation_hash": _implementation_hash(),
         "model": model,
         "max_revisions": max_revisions,
+        "case_configuration": asdict(_case_configuration(max_revisions)),
         "case_retries": case_retries,
         **({"diagnostic_instance_ids": sorted(only)} if diagnostic else {}),
     }
@@ -1065,8 +822,7 @@ def build_effectiveness_report() -> dict[str, Any]:
     outcome_by_id = {item["instance_id"]: item for item in outcome_summary["outcomes"]}
     rows = []
     component_names = (
-        "requirement_graph", "program_graph", "binding_graph",
-        "challenge_graph", "reach_avoid",
+        "dynamic_reach_avoid_graph", "validation", "target_recovery", "reach_avoid",
     )
     component_totals = {
         name: {"participated": 0, "effective_on_improved_case": 0, "present_but_case_regressed": 0}
@@ -1116,8 +872,8 @@ def build_effectiveness_report() -> dict[str, Any]:
     markdown = [
         "# Reach-Avoid 51 Component Effectiveness",
         "",
-        "| Instance | p0 | final | outcome | Requirement | Program | Binding | Challenge | Reach-Avoid |",
-        "|---|---:|---:|---|---:|---:|---:|---:|---:|",
+        "| Instance | p0 | final | outcome | Unified graph | Validation | Recovery | Search |",
+        "|---|---:|---:|---|---:|---:|---:|---:|",
     ]
     for row in rows:
         markdown.append(

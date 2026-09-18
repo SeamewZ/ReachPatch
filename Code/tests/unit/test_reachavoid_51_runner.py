@@ -13,13 +13,13 @@ from reachpatch.repair.deepseek_agent import DeepSeekAgent
 
 def test_runner_reads_current_checkpoint_and_transition_schema(tmp_path):
     assert runner.SCHEMA == "reachpatch-51-reach-avoid-v2"
-    checkpoint = tmp_path / "checkpoint_store" / "checkpoint-current"
+    checkpoint = tmp_path / "execution_checkpoints" / "checkpoint-current"
     checkpoint.mkdir(parents=True)
     (checkpoint / "checkpoint.json").write_text(json.dumps({
-        "schema": SCHEMA_VERSION,
+        "schema": EXECUTION_SCHEMA_NAME,
         "checkpoint": {
             "checkpoint_id": "checkpoint-current",
-            "status": "INITIAL_WORKING",
+            "status": "P0",
             "revision": 0,
         },
     }), encoding="utf-8")
@@ -27,7 +27,7 @@ def test_runner_reads_current_checkpoint_and_transition_schema(tmp_path):
     transitions.mkdir()
     (transitions / "transition-current.json").write_text(json.dumps({
         "schema": SCHEMA_VERSION,
-        "certificate": {"transition_id": "transition-current"},
+        "certificate_id": "transition-current",
     }), encoding="utf-8")
 
     initial = runner._initial_checkpoint(tmp_path)
@@ -35,7 +35,7 @@ def test_runner_reads_current_checkpoint_and_transition_schema(tmp_path):
 
     assert initial["checkpoint_id"] == "checkpoint-current"
     assert initial["_directory"] == str(checkpoint)
-    assert parsed_transitions[0]["certificate"]["transition_id"] == "transition-current"
+    assert parsed_transitions[0]["certificate_id"] == "transition-current"
 
 
 def test_runner_reads_execution_v2_cumulative_diff_for_p0(tmp_path):
@@ -57,8 +57,9 @@ def test_runner_reads_execution_v2_cumulative_diff_for_p0(tmp_path):
     assert runner._initial_checkpoint_diff(initial).startswith("diff --git")
 
 
-def test_runner_keeps_legacy_canonical_diff_for_p0():
-    assert runner._initial_checkpoint_diff({"canonical_diff": "legacy"}) == "legacy"
+def test_runner_rejects_legacy_canonical_diff_for_p0():
+    with pytest.raises(RuntimeError, match="no cumulative diff"):
+        runner._initial_checkpoint_diff({"canonical_diff": "legacy"})
 
 
 def test_runner_rejects_p0_checkpoint_without_diff():
@@ -93,9 +94,9 @@ def test_runner_unwraps_execution_state_for_component_evidence(tmp_path):
         tmp_path, {"checkpoint_id": "final"},
     )
 
-    assert evidence["requirement_graph"]["leaf_count"] == 1
-    assert evidence["requirement_graph"]["objective_requirement_ids"] == ["goal"]
-    assert evidence["challenge_graph"]["executed_challenge_ids"] == ["target"]
+    assert "requirement_graph" not in evidence
+    assert evidence["validation"]["executed_challenge_ids"] == []
+    assert evidence["validation"]["stable_target_pass_count"] == 1
 
 
 def test_diagnostic_official_rows_require_matching_ten_case_seal(
@@ -121,27 +122,25 @@ def test_diagnostic_official_rows_require_matching_ten_case_seal(
     assert [item["instance_id"] for item in rows] == instance_ids
 
 
-def test_runner_rejects_requirement_graph_without_challenge_cells():
-    evidence = {
-        "requirement_graph": {"leaf_count": 3},
-        "challenge_graph": {"cell_count": 0},
-    }
+def test_runner_rejects_missing_unified_graph():
+    with pytest.raises(RuntimeError, match="missing unified graph hash"):
+        runner._validate_component_evidence("case-id", {})
 
-    with pytest.raises(RuntimeError, match="no Challenge cells"):
+
+def test_runner_rejects_false_graph_causal_use():
+    evidence = {"dynamic_reach_avoid_graph": {"graph_hash": "hash", "participated": True}}
+    with pytest.raises(RuntimeError, match="no causal-use evidence"):
         runner._validate_component_evidence("case-id", evidence)
 
 
-def test_runner_rejects_final_checkpoint_without_executed_challenges():
-    evidence = {
-        "requirement_graph": {"leaf_count": 3},
-        "challenge_graph": {
-            "cell_count": 3,
-            "executed_challenge_ids": [],
-        },
-    }
-
-    with pytest.raises(RuntimeError, match="every Challenge cell unexecuted"):
-        runner._validate_component_evidence("case-id", evidence)
+def test_runner_propagates_same_case_budget_configuration(monkeypatch):
+    monkeypatch.setenv("REACHPATCH_CASE_WALL_SECONDS", "1800")
+    monkeypatch.setenv("REACHPATCH_CASE_MODEL_CALLS", "80")
+    monkeypatch.setenv("REACHPATCH_CASE_TOKENS", "200000")
+    config = runner._case_configuration(3)
+    assert config.execution_budget_seconds == 1800
+    assert config.max_case_model_calls == 80
+    assert config.max_case_tokens == 200000
 
 
 def test_deepseek_retry_prompt_requires_a_different_patch(monkeypatch):

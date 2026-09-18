@@ -21,7 +21,10 @@ def _json(value) -> None:
 
 
 def _controller(args) -> ReachAvoidController:
-    key_path = args.deepseek_key_path or os.environ.get("REACHPATCH_DEEPSEEK_KEY_PATH")
+    key_path = (
+        args.deepseek_key_path
+        or os.environ.get("REACHPATCH_DEEPSEEK_KEY_PATH")
+    )
     if not key_path:
         raise RuntimeError("DeepSeek API key is required for the production repair path")
     key = Path(key_path).read_text(encoding="utf-8").strip()

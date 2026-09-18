@@ -43,7 +43,7 @@ class ObservationContract(SerializableRecord):
         "EXIT_ZERO", "EQUALS", "NOT_EQUALS", "RAISES",
         "NOT_RAISES", "TYPE_IS", "CONTAINS", "ORDER_EQUALS",
         "LENGTH_EQUALS", "HAS_ATTR", "STATE_DELTA_EQUALS",
-        "RELATION_HOLDS",
+        "RELATION_HOLDS", "INSTANCE_OF",
     }
 
     @property
@@ -139,6 +139,9 @@ class ObservationContract(SerializableRecord):
                 return raised and type_matches and message_matches
         comparator = self.normalized_comparator
         expected = self.expected
+        if comparator == "INSTANCE_OF":
+            supported = {"list": list, "tuple": tuple, "dict": dict, "set": set, "str": str}
+            return str(expected) in supported and isinstance(value, supported[str(expected)])
         if isinstance(observation, RunObservation) and isinstance(expected, dict) and any(
             key in expected for key in ("exit_code", "stdout", "stderr", "value", "exception")
         ):
@@ -198,6 +201,21 @@ class EvidenceRecord(SerializableRecord):
     content: str
     executable: bool = False
     metadata: dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass(frozen=True, slots=True)
+class SourceHint(SerializableRecord):
+    """A traceable source candidate used before a hard target exists."""
+
+    hint_id: str
+    symbol: str
+    file: str = ""
+    line_start: int = 0
+    line_end: int = 0
+    source_span: str = ""
+    evidence_span_ids: tuple[str, ...] = ()
+    reason: str = ""
+    authority: str = "PROVISIONAL"
 
 
 @dataclass(frozen=True, slots=True)
@@ -817,6 +835,7 @@ def extract_issue_witnesses(
         )
         adjacent_explicit = bool(
             operation_name
+            and operation_name.casefold() in adjacent.casefold()
             and re.search(
                 r"\b(?:expected|desired|must|should|shall|return|raise|without\s+(?:an?\s+)?(?:error|exception)|support|accept|allow)\b",
                 adjacent,
@@ -824,9 +843,27 @@ def extract_issue_witnesses(
             )
             and not re.search(r"\b(?:for example|e\.g\.|such as)\b", adjacent, re.IGNORECASE)
         )
-        if not explicit and not adjacent_explicit:
+        # A short Expected-style clause may refer to the immediately
+        # following fenced witness without spelling out its API name (for
+        # example, "The following should not fail:"). This is a clear
+        # syntactic reference, unlike an unrelated positive sentence elsewhere
+        # in the issue, and is therefore eligible for Authority B.
+        referential_adjacent = bool(
+            re.search(
+                r"\b(?:the|this)\s+(?:following|above|below|call|example)\b",
+                adjacent,
+                re.IGNORECASE,
+            )
+            and re.search(
+                r"\b(?:expected|desired|must|should|shall|return|raise|without\s+(?:an?\s+)?(?:error|exception)|support|accept|allow|not\s+fail)\b",
+                adjacent,
+                re.IGNORECASE,
+            )
+            and not re.search(r"\b(?:for example|e\.g\.|such as)\b", adjacent, re.IGNORECASE)
+        )
+        if not explicit and not adjacent_explicit and not referential_adjacent:
             witness["authority"] = "PROVISIONAL"
-        elif adjacent_explicit:
+        elif adjacent_explicit or referential_adjacent:
             witness["authority"] = "B"
     unique = {str(item["witness_id"]): item for item in witnesses}
     return tuple(unique[key] for key in sorted(unique))
@@ -930,10 +967,16 @@ def discover_diff_public_checks(
     existing_checks: tuple[ExecutableCheck, ...] = (),
     *,
     max_checks: int = 6,
+    target_symbols: tuple[str, ...] = (),
+    preferred_symbols: tuple[str, ...] = (),
 ) -> tuple[ExecutableCheck, ...]:
     """Discover bounded public tests with real AST references to changed symbols."""
 
-    symbols = _changed_public_symbols(repository, actual_diff)
+    symbols = tuple(dict.fromkeys((
+        *target_symbols,
+        *(symbol for check in existing_checks for symbol in getattr(check, "symbol_references", ())),
+        *_changed_public_symbols(repository, actual_diff),
+    )))[:64]
     if not symbols or max_checks <= 0:
         return ()
     pattern = r"\b(?:" + "|".join(map(re.escape, symbols)) + r")\b"
@@ -949,6 +992,16 @@ def discover_diff_public_checks(
     except (OSError, subprocess.TimeoutExpired):
         candidates = []
     existing_ids = {check.check_id for check in existing_checks}
+    preferred = {symbol.rsplit(".", 1)[-1] for symbol in preferred_symbols}
+    preferred_paths: set[str] = set()
+    if preferred:
+        focused_command = list(command)
+        focused_command[-2] = r"\b(?:" + "|".join(map(re.escape, sorted(preferred))) + r")\b"
+        try:
+            focused = subprocess.run(focused_command, capture_output=True, text=True, check=False, timeout=20)
+            preferred_paths = set(focused.stdout.splitlines()) if focused.returncode in {0, 1} else set()
+        except (OSError, subprocess.TimeoutExpired):
+            preferred_paths = set()
     discovered: list[tuple[tuple[int, ...], ExecutableCheck]] = []
     changed_parents = tuple(Path(path).parent.parts for path in actual_diff.changed_files)
     changed_stems = {Path(path).stem.casefold() for path in actual_diff.changed_files}
@@ -960,7 +1013,7 @@ def discover_diff_public_checks(
         for token in re.findall(r"[A-Za-z0-9]+", part)
     }
 
-    def candidate_priority(path: Path) -> tuple[int, int, int, str]:
+    def candidate_priority(path: Path) -> tuple[Any, ...]:
         path_tokens = {
             token.casefold()
             for part in path.parts
@@ -970,6 +1023,7 @@ def discover_diff_public_checks(
             token.casefold() for token in re.findall(r"[A-Za-z0-9]+", path.stem)
         }
         return (
+            path.as_posix() not in preferred_paths,
             -len(stem_tokens.intersection(symbol_tokens)),
             -len(path_tokens.intersection(changed_path_tokens)),
             len(path.parts),
@@ -984,18 +1038,12 @@ def discover_diff_public_checks(
             tree = ast.parse(source, filename=relative)
         except (OSError, SyntaxError, ValueError):
             continue
-        source_lines = source.splitlines()
         for node, test_name in _qualified_test_functions(tree):
-            node_source = "\n".join(source_lines[
-                max(0, node.lineno - 1):getattr(node, "end_lineno", node.lineno)
-            ])
-            referenced = tuple(
-                symbol for symbol in symbols
-                if re.search(
-                    rf"\b{re.escape(symbol)}\b",
-                    node_source,
-                )
-            )
+            loaded_names = {item.id for item in ast.walk(node) if isinstance(item, ast.Name) and isinstance(item.ctx, ast.Load)}
+            loaded_names.update(item.attr for item in ast.walk(node) if isinstance(item, ast.Attribute) and isinstance(item.ctx, ast.Load))
+            # Prose, comments, strings and the test function name are not
+            # executable references to a target operation.
+            referenced = tuple(symbol for symbol in symbols if symbol.rsplit(".", 1)[-1] in loaded_names)
             if not referenced:
                 continue
             check_id = stable_id("diff-public-check", relative, test_name, referenced)
@@ -1038,6 +1086,7 @@ def discover_diff_public_checks(
             )
             discovered.append((
                 (
+                    not bool(preferred.intersection(symbol.rsplit(".", 1)[-1] for symbol in referenced)),
                     not same_module_test, -symbol_strength,
                     -len(referenced), -proximity,
                     len(test_parts), relative, node.name,
@@ -1105,6 +1154,49 @@ class RunObservation(SerializableRecord):
 
 
 @dataclass(frozen=True, slots=True)
+class TraceEvent(SerializableRecord):
+    """One line-trace event used by the unified dynamic graph.
+
+    The event deliberately stores bounded local summaries rather than object
+    values.  ``get``/``__getitem__`` preserve the mapping interface used by
+    older diagnostic consumers while the typed record gives graph code a
+    stable schema for branch, call and def-use evidence.
+    """
+
+    file: str
+    function: str
+    line: int
+    event: str
+    caller: str | None = None
+    branch_id: str | None = None
+    branch_outcome: str | None = None
+    safe_local_summary: dict[str, Any] = field(default_factory=dict)
+    predicate: str | None = None
+    return_summary: dict[str, Any] | None = None
+    sequence: int = 0
+    previous_line: int | None = None
+    line_arc: tuple[int, int] | None = None
+    caller_file: str | None = None
+    source_anchor: tuple[str, ...] = ()
+    source_version_id: str | None = None
+    instrumentation_status: str = "OBSERVED"
+
+    @property
+    def path(self) -> str:
+        return self.file
+
+    @property
+    def symbol(self) -> str:
+        return self.function
+
+    def get(self, key: str, default: Any = None) -> Any:
+        return self.to_dict().get(key, default)
+
+    def __getitem__(self, key: str) -> Any:
+        return self.to_dict()[key]
+
+
+@dataclass(frozen=True, slots=True)
 class TraceBundle(SerializableRecord):
     trace_bundle_id: str
     tree_hash: str
@@ -1117,6 +1209,7 @@ class TraceBundle(SerializableRecord):
     state_writes: tuple[str, ...] = ()
     dispatch_routes: tuple[str, ...] = ()
     first_project_frame: str | None = None
+    last_project_frame: str | None = None
     stable_runs: int = 1
     comparable: bool = True
     cwd: str = "."
@@ -1124,7 +1217,7 @@ class TraceBundle(SerializableRecord):
     backend: str = "shared-executor"
     # Localization context copied from the first traced run. It is not
     # certification evidence and is ignored by semantic stability checks.
-    events: tuple[tuple[Any, ...], ...] = ()
+    events: tuple[Any, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)

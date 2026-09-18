@@ -4,13 +4,13 @@ from __future__ import annotations
 
 import json
 import re
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from enum import StrEnum
 from pathlib import Path
 from typing import Any, Sequence
 
 from reachpatch.models.base import SerializableRecord, stable_id
-from reachpatch.models.evidence import ObservationContract
+from reachpatch.models.evidence import ObservationContract, SourceHint
 from reachpatch.models.execution import EvidenceSpan, GoalContract
 
 
@@ -72,7 +72,7 @@ def _goal_from_claim(claim: CompiledRequirementClaim) -> GoalContract | None:
         return None
     expected = dict(claim.expected_observation or {})
     comparator = str(expected.get("kind", "RELATION_HOLDS")).upper()
-    allowed = {"EXIT_ZERO", "EQUALS", "NOT_EQUALS", "RAISES", "NOT_RAISES", "TYPE_IS", "CONTAINS", "ORDER_EQUALS", "LENGTH_EQUALS", "HAS_ATTR", "STATE_DELTA_EQUALS", "RELATION_HOLDS"}
+    allowed = {"EXIT_ZERO", "EQUALS", "NOT_EQUALS", "RAISES", "NOT_RAISES", "TYPE_IS", "INSTANCE_OF", "CONTAINS", "ORDER_EQUALS", "LENGTH_EQUALS", "HAS_ATTR", "STATE_DELTA_EQUALS", "RELATION_HOLDS"}
     if comparator not in allowed:
         comparator = "RELATION_HOLDS"
     authority = "B" if claim.evidence_spans else "PROVISIONAL"
@@ -106,6 +106,17 @@ def compile_goal_contracts(
     )
     if direct_result is not None:
         goals.extend(direct_result)
+        # A syntactically valid but semantically unusable tool response is not
+        # an evidence dead-end.  Re-run the deterministic compiler so target
+        # recovery can start from an explicit unresolved/grounded contract.
+        if not any(item.operation != "UNRESOLVED_TARGET" and item.hard for item in direct_result):
+            compilation = compile_requirement_contract(
+                issue_text, public_evidence, source_hints, None, run_root,
+            )
+            goals.extend(
+                goal for claim in compilation.claims
+                if (goal := _goal_from_claim(claim)) is not None
+            )
     else:
         compilation = compile_requirement_contract(issue_text, public_evidence, source_hints, None, run_root)
         goals.extend(goal for claim in compilation.claims if (goal := _goal_from_claim(claim)) is not None)
@@ -189,7 +200,132 @@ def compile_goal_contracts(
         else:
             comparator = "EXIT_ZERO"; value = {"exit_code": 0}
         goals.append(GoalContract(goal_id, goal_id, tuple(getattr(check, "target_symbols", ()) or getattr(check, "symbol_references", ())), comparator, value, (), str(getattr(check, "authority", "A")), True, None))
-    return tuple(dict((goal.goal_id, goal) for goal in goals).values())
+    # A model's unresolved marker is diagnostic, not a competing goal. Once
+    # deterministic compilation or a public witness establishes a grounded
+    # goal, remove the marker so downstream recovery does not report a phantom
+    # unresolved target. Keep the marker only when no grounded goal exists.
+    if any(goal.operation != "UNRESOLVED_TARGET" for goal in goals):
+        goals = [goal for goal in goals if goal.operation != "UNRESOLVED_TARGET"]
+    goals = list(_deduplicate_redundant_goals(goals))
+    aligned: list[GoalContract] = []
+    for goal in dict((goal.goal_id, goal) for goal in goals).values():
+        terminals = {
+            str(item).rsplit(".", 1)[-1].casefold()
+            for item in (*goal.target_symbols, goal.operation)
+            if str(item).strip() and str(item) != "UNRESOLVED_TARGET"
+        }
+        matching_hints = tuple(
+            str(getattr(hint, "hint_id", ""))
+            for hint in source_hints
+            if str(getattr(hint, "symbol", "")).rsplit(".", 1)[-1].casefold() in terminals
+            and str(getattr(hint, "hint_id", ""))
+        )
+        span_ids = tuple(
+            stable_id("goal-evidence-span", goal.goal_id, span.start, span.end, span.quote)
+            for span in goal.evidence_spans
+        )
+        reason = (
+            "normative expected span aligned with issue/public/source target symbol"
+            if span_ids and matching_hints else
+            "executable public oracle identifies the target symbol"
+            if goal.hard and goal.target_symbols else
+            "target remains unresolved after deterministic evidence alignment"
+        )
+        aligned.append(replace(
+            goal,
+            evidence_span_ids=goal.evidence_span_ids or span_ids,
+            source_hint_ids=goal.source_hint_ids or matching_hints,
+            alignment_reason=goal.alignment_reason or reason,
+        ))
+    from .facets import decompose_required_facets
+    return decompose_required_facets(aligned)
+
+
+def fallback_compile_goal_contracts(
+    issue_text: str,
+    public_evidence: Sequence[Any],
+    source_hints: Sequence[Any] = (),
+) -> tuple[GoalContract, ...]:
+    """Deterministic semantic fallback for malformed/invalid model claims."""
+    records = (
+        tuple(getattr(public_evidence, "records", ()))
+        if not isinstance(public_evidence, (tuple, list))
+        else tuple(public_evidence)
+    )
+    compilation = _fallback(issue_text, source_hints, records)
+    from .facets import decompose_required_facets
+    return decompose_required_facets(tuple(
+        goal for claim in compilation.claims
+        if (goal := _goal_from_claim(claim)) is not None
+    ))
+
+
+def _deduplicate_redundant_goals(
+    goals: Sequence[GoalContract],
+) -> tuple[GoalContract, ...]:
+    """Merge repeated prose descriptions of one behavioral requirement.
+
+    Issue reports commonly state the same contract in a short title and a
+    longer Description paragraph. Keeping both as independent hard goals can
+    make recovery impossible when their lexical symbol guesses differ (for
+    example ``_check_max_length_attribute`` versus ``Field.max_length``).
+    Merge only when comparator/expected agree and the evidence/operation terms
+    overlap substantially; independent normative requirements remain separate.
+    Evidence spans and source links are unioned so provenance is not lost.
+    """
+    def terms(goal: GoalContract) -> set[str]:
+        values = [goal.operation, *goal.target_symbols]
+        values.extend(span.quote for span in goal.evidence_spans)
+        result: set[str] = set()
+        for token in re.findall(r"[A-Za-z_][A-Za-z0-9_]*", " ".join(values).casefold()):
+            if len(token) >= 3 and token not in _GENERIC_SYMBOLS:
+                result.add(token)
+                result.update(part for part in token.split("_") if len(part) >= 3 and part not in _GENERIC_SYMBOLS)
+        return result
+
+    def quality(goal: GoalContract) -> tuple[int, int, int, str]:
+        return (
+            3 * len(goal.source_hint_ids),
+            int(goal.operation.startswith("_")) + 2 * int("." in goal.operation),
+            int(goal.hard),
+            goal.operation,
+        )
+
+    retained: list[GoalContract] = []
+    for goal in goals:
+        if goal.operation == "UNRESOLVED_TARGET":
+            retained.append(goal)
+            continue
+        merged_at: int | None = None
+        goal_terms = terms(goal)
+        for index, existing in enumerate(retained):
+            if existing.operation == "UNRESOLVED_TARGET":
+                continue
+            if existing.comparator != goal.comparator or existing.expected != goal.expected:
+                continue
+            overlap = len(goal_terms & terms(existing)) / max(1, len(goal_terms | terms(existing)))
+            same_operation = existing.operation.casefold() == goal.operation.casefold()
+            if not same_operation and overlap < 0.20:
+                continue
+            merged_at = index
+            preferred = goal if quality(goal) > quality(existing) else existing
+            spans = tuple(dict.fromkeys((*existing.evidence_spans, *goal.evidence_spans)))
+            span_ids = tuple(dict.fromkeys((*existing.evidence_span_ids, *goal.evidence_span_ids)))
+            hint_ids = tuple(dict.fromkeys((*existing.source_hint_ids, *goal.source_hint_ids)))
+            retained[index] = replace(
+                preferred,
+                evidence_spans=spans,
+                evidence_span_ids=span_ids,
+                source_hint_ids=hint_ids,
+                alignment_reason=(
+                    preferred.alignment_reason
+                    or "merged duplicate title/description evidence for one contract"
+                ),
+            )
+            break
+        if merged_at is None:
+            retained.append(goal)
+    return tuple(retained)
 
 
 def _compile_goals_with_tool(
@@ -202,10 +338,6 @@ def _compile_goals_with_tool(
     """Call submit_goal_contracts and deterministically validate it."""
     if transport is None:
         return None
-    messages = [
-        {"role": "system", "content": "Compile minimal behavior goals from exact issue evidence. Code, traceback, Actual and examples are never hard expected behavior."},
-        {"role": "user", "content": issue_text},
-    ]
     errors: list[str] = []
     parsed_once = False
     raw_args: dict[str, Any] = {}
@@ -220,6 +352,15 @@ def _compile_goals_with_tool(
         if not isinstance(public_evidence, (tuple, list))
         else tuple(public_evidence)
     )
+    messages = [
+        {"role": "system", "content": "Compile minimal behavior goals from exact issue evidence. Code, traceback, Actual and examples are never hard expected behavior."},
+        {"role": "user", "content": json.dumps({
+            "issue": issue_text,
+            "source_hints": [item.to_dict() if hasattr(item, "to_dict") else item for item in source_hints],
+            "public_checks": [item.to_dict() if hasattr(item, "to_dict") else item for item in public_checks],
+            "instruction": "Use cross-evidence alignment: normative issue span plus an evidenced source symbol may form one goal.",
+        }, default=str)},
+    ]
     externally_supported = {
         str(symbol).rsplit(".", 1)[-1].casefold()
         for check in public_checks
@@ -370,6 +511,7 @@ def _compile_goals_with_tool(
         unresolved = GoalContract(goal_id=stable_id("unresolved-goal", issue_text), operation="UNRESOLVED_TARGET", target_symbols=(), comparator="RELATION_HOLDS", expected=None, evidence_spans=(), authority="PROVISIONAL", hard=False, unresolved_reason="TARGET_RECOVERY_REQUIRED")
         _write_goal_artifact(run_root, issue_text, raw_args, attempts, (unresolved,), tuple(errors))
         return (unresolved,)
+    _write_goal_artifact(run_root, issue_text, raw_argument_payload, attempts, (), tuple(errors))
     return None
 
 
@@ -385,9 +527,11 @@ def _write_goal_artifact(run_root: Path, issue_text: str, raw_args: Any, attempt
     }
     rendered = json.dumps(payload, indent=2, sort_keys=True, default=lambda value: value.to_dict() if hasattr(value, "to_dict") else str(value)) + "\n"
     (root / "goal_contracts.json").write_text(rendered, encoding="utf-8")
-    # Keep the compiler artifact name stable across the old claim compiler and
-    # the flat GoalContract production path.  Both files contain the exact raw
-    # tool arguments and validation attempts for auditability.
+    # Deterministic fallback writes its own requirement_compilation.json.
+    # Preserve the direct tool protocol independently so fallback cannot
+    # erase provider errors, raw claims or semantic rejection evidence.
+    (root / "goal_compilation_tool.json").write_text(rendered, encoding="utf-8")
+    # Fallback may replace this main record but not the direct protocol file.
     (root / "requirement_compilation.json").write_text(rendered, encoding="utf-8")
 
 
@@ -420,7 +564,21 @@ class RequirementCompilation(SerializableRecord):
     tool_attempts: tuple[dict[str, Any], ...] = ()
 
 
-_NORMATIVE = re.compile(r"\b(must|should|shall|needs? to|expected|allow|support|return|raise|no longer|cannot|must not|should not|preserve|remain|continue)\b", re.I)
+# Only these predicates can turn prose into an executable hard contract.  Words
+# such as ``fix``, ``check`` and ``different`` occur in issue narration and
+# must not create phantom requirements on their own.
+_NORMATIVE = re.compile(
+    r"\b(must|should|shall|needs?\s+to|is\s+expected\s+to|expected|"
+    r"allow|support|return(?:s)?|raise(?:s)?|no\s+longer|cannot|must\s+not|should\s+not|"
+    r"preserve|remain|continue|ensure|avoid|prevent|produce|include|exclude|"
+    r"report|validate|ignore|accept|succeed|work)\b", re.I,
+)
+_STRICT_EXPECTED = re.compile(
+    r"\b(must|should|shall|needs?\s+to|is\s+expected\s+to|expected|"
+    r"allow|support|return(?:s)?|raise(?:s)?|no\s+longer|cannot|must\s+not|should\s+not|"
+    r"preserve|remain|continue|ensure|avoid|prevent|produce|include|exclude|"
+    r"report|validate|ignore|accept|succeed|work)\b", re.I,
+)
 _EXAMPLE = re.compile(r"\b(for example|e\.g\.|such as|illustrat(?:ion|e))\b", re.I)
 _TRACE = re.compile(r"^\s*(?:traceback|file \"|\^+)", re.I)
 _SYMBOL = re.compile(r"`([A-Za-z_]\w*(?:\.[A-Za-z_]\w*)*)`")
@@ -436,8 +594,22 @@ _GENERIC_SYMBOLS = {
     "implementation", "behavior", "function", "method",
     "operation", "system", "code", "input",
     "output", "call", "thing", "result", "following", "below", "above",
-    "list", "lists", "array", "arrays",
+    "list", "lists", "array", "arrays", "add", "ensure", "check", "checks",
+    "currently", "there", "would", "very", "helpful", "often", "mistake",
+    "noticed", "until", "attempt", "made", "with", "from", "for", "when",
+    "that", "should", "must", "expected", "actual", "longest", "specific",
+    "case", "cases", "zero", "total", "including", "each", "different",
+    "same", "new", "old", "current", "does", "not", "none", "behaves",
+    "object", "objects", "return", "returns", "support", "allow", "fit", "fits",
+    "before", "after", "proposing", "propose", "fix", "crash", "crashes",
+    "different", "difference", "behavior", "behaviour", "expected", "desired",
+    "i", "we", "you", "please", "must", "should", "shall",
+    # Discourse connectives can occur immediately before a normative verb
+    # ("but instead should return ...").  They describe how the expected
+    # behaviour contrasts with the failure; they are never API entrypoints.
+    "instead", "otherwise", "rather", "also", "then", "however",
 }
+_DOTTED_NOISE = {"tests", "test", "element", "class", "module", "python"}
 _EXCEPTION_SYMBOL = re.compile(r"(?:Error|Exception|Warning|Interrupt|Exit|Failure|Fault)$", re.I)
 
 _SOURCE_LINE = re.compile(
@@ -468,12 +640,70 @@ def _fallback_symbol(normative_line: str, witness_symbols: Sequence[str], source
         if not value:
             return False
         terminal = value.rsplit(".", 1)[-1]
-        return terminal.casefold() not in _GENERIC_SYMBOLS and not _EXCEPTION_SYMBOL.search(terminal)
+        head = value.split(".", 1)[0]
+        return (
+            terminal.casefold() not in _GENERIC_SYMBOLS
+            and head.casefold() not in _DOTTED_NOISE
+            and head.casefold() not in _GENERIC_SYMBOLS
+            and not _EXCEPTION_SYMBOL.search(terminal)
+        )
 
+    # Source/traceback statements are observations, not normative API
+    # declarations.  Check this before extracting backticked/call tokens so
+    # an unindented traceback excerpt cannot create a phantom hard goal.
+    if _evidence_is_source_or_traceback(normative_line):
+        return "UNRESOLVED_TARGET"
+
+    # Prefer an explicitly named operation in the sentence itself.  This must
+    # run before source-hint ranking: a broad hint such as ``Point`` must not
+    # shadow the concrete ``Point.vel`` call being described.
     for match in _SYMBOL.finditer(normative_line):
         value = match.group(1).strip()
         if usable(value):
             return value
+    for match in _CALL.finditer(normative_line):
+        value = match.group(1).strip()
+        if usable(value):
+            return value
+    # "The following should ..." is an explicit grammatical reference to
+    # the executable witness that follows. Resolve that reference before the
+    # generic subject matcher, which would otherwise be tempted by a nearby
+    # connective such as "instead".
+    if (
+        len(witness_symbols) == 1
+        and re.search(r"\b(?:the\s+)?following\b", normative_line, re.I)
+        and usable(str(witness_symbols[0]))
+    ):
+        return str(witness_symbols[0])
+    for match in _NORMATIVE_SUBJECT.finditer(normative_line):
+        value = match.group(1).strip()
+        if usable(value):
+            return value
+
+    # Prefer an explicitly evidenced entry point when the normative sentence
+    # contains both the API name and a dotted return type/value.  For example,
+    # ``calc must return numbers.Real`` names ``calc`` as the operation while
+    # ``numbers.Real`` is the expected value/type.  Looking for dotted tokens
+    # first would incorrectly make the latter the target and create a phantom
+    # hard goal that cannot be joined to the public executable check.  Source
+    # hints are bounded, provenance-bearing candidates, so this preference
+    # still requires the operation to be present in the local evidence span.
+    for item in source_hints:
+        value = str(getattr(item, "symbol", "") or "").strip()
+        terminal = value.rsplit(".", 1)[-1]
+        if (
+            usable(value)
+            # A bare lowercase noun such as ``choices`` or ``value`` is
+            # usually a field/argument mentioned in prose, not an executable
+            # entry point.  Require a function-like identifier (underscore)
+            # or a class-style name before binding cross-evidence directly;
+            # lexical ranking below can still recover unusual APIs.
+            and ("_" in terminal or terminal[:1].isupper())
+            and terminal
+            and re.search(rf"(?<![A-Za-z0-9_]){re.escape(terminal)}(?![A-Za-z0-9_])", normative_line, re.I)
+        ):
+            return value
+
     for pattern in (
         r"\bcall\s+to\s+(`?[A-Za-z_]\w*(?:\.[A-Za-z_]\w*)*`?)",
         r"\b(?:the\s+)?(`?[A-Za-z_]\w*(?:\.[A-Za-z_]\w*)*`?)\s+call\b",
@@ -491,25 +721,48 @@ def _fallback_symbol(normative_line: str, witness_symbols: Sequence[str], source
     # handled independently by their own evidence.
     if len(witness_symbols) == 1 and usable(str(witness_symbols[0])):
         return str(witness_symbols[0])
-    for match in _NORMATIVE_SUBJECT.finditer(normative_line):
-        value = match.group(1)
-        if usable(value):
-            return value
-    for match in _CALL.finditer(normative_line):
-        value = match.group(1)
+    # Preserve an explicitly named API before lexical source ranking.  This
+    # handles titles such as ``QuerySet.Delete`` and
+    # ``BoundWidget.id_for_label`` without allowing a nearby source helper to
+    # replace the reporter's symbol.
+    for match in re.finditer(r"\b[A-Za-z_]\w*(?:\.[A-Za-z_]\w*)+\b", normative_line):
+        value = match.group(0)
         if usable(value):
             return value
     for match in _BARE_SYMBOL.finditer(normative_line):
         value = match.group(1)
         if usable(value):
             return value
+    # Cross-evidence fallback: issue prose can describe an operation without
+    # naming its Python definition. Prefer a source hint whose identifier
+    # shares distinctive terms with the normative clause. This only supplies
+    # an entry-point candidate; it never grants Oracle authority.
+    terms: set[str] = set()
+    for token in re.findall(r"[A-Za-z_][A-Za-z0-9_]*", normative_line.casefold()):
+        if len(token) < 3 or token in _GENERIC_SYMBOLS:
+            continue
+        terms.add(token)
+        terms.update(
+            part for part in token.split("_")
+            if len(part) >= 3 and part not in _GENERIC_SYMBOLS
+        )
+    ranked: list[tuple[int, str]] = []
+    for item in source_hints:
+        value = str(getattr(item, "symbol", "") or "")
+        if not usable(value):
+            continue
+        name_terms = set(re.findall(r"[A-Za-z0-9]+", value.casefold()))
+        score = len(name_terms & terms)
+        if "_" in value and score:
+            score += 1
+        ranked.append((score, value))
+    if ranked:
+        ranked.sort(key=lambda pair: (-pair[0], pair[1]))
+        if ranked[0][0] > 0:
+            return ranked[0][1]
     for value in witness_symbols:
         if usable(str(value)):
             return str(value)
-    for item in source_hints:
-        value = str(getattr(item, "symbol", "") or "")
-        if usable(value):
-            return value
     return "UNRESOLVED_TARGET"
 
 
@@ -611,6 +864,24 @@ def _fallback(
         issue_text,
     )
     body_end = discussion_at.start() if discussion_at else len(issue_text)
+    # Issue titles often name the operation while the Expected section carries
+    # the normative predicate.  Carry this single, strongly evidenced
+    # operation into that section instead of guessing a noun from each line.
+    title = next((line.strip() for line in issue_text.splitlines() if line.strip()), "")
+    title_operation = ""
+    for pattern in (_SYMBOL, _CALL):
+        match = pattern.search(title)
+        if match:
+            candidate = match.group(1).strip()
+            terminal = candidate.rsplit(".", 1)[-1]
+            if terminal.casefold() not in _GENERIC_SYMBOLS and not _EXCEPTION_SYMBOL.search(terminal):
+                title_operation = candidate
+                break
+    if not title_operation:
+        dotted = re.search(r"\b[A-Za-z_]\w*(?:\.[A-Za-z_]\w*)+\b", title)
+        if dotted and dotted.group(0).split(".", 1)[0].casefold() not in _DOTTED_NOISE:
+            title_operation = dotted.group(0)
+    expected_region = False
     issue_witness_records: list[dict[str, Any]] = []
     for record in public_records:
         if getattr(record, "source", None) != "issue":
@@ -678,7 +949,11 @@ def _fallback(
             in_fence = not in_fence
             continue
         lowered = stripped.casefold()
-        expected_label = re.match(r"^(?:expected|desired)\s*:\s*(?P<body>.*)$", stripped, re.I)
+        # Introductory discussion/questions are not behavioral contracts even
+        # when they contain a word such as ``should``.
+        if re.match(r"^(?:before\b|i\s+(?:think|believe|wonder)|we\s+(?:think|believe)|how\s+to\b)", lowered):
+            continue
+        expected_label = re.match(r"^(?:expected|desired)(?:\s+(?:behavior|behaviour|result|output))?\s*(?::\s*(?P<body>.*))?$", stripped, re.I)
         actual_label = re.match(r"^actual(?:\s+[^:]*)?\s*:", stripped, re.I)
         reproduction_label = re.match(r"^steps\s+to\s+reproduce\s*:", stripped, re.I)
         if reproduction_label:
@@ -689,8 +964,15 @@ def _fallback(
         # failure and must never become an oracle.
         if expected_label:
             in_reproduction = False
+            expected_region = True
+            if expected_label.group("body") is None:
+                continue
         elif actual_label or lowered.startswith("traceback"):
             in_reproduction = False if actual_label else in_reproduction
+            if actual_label:
+                expected_region = False
+        elif re.match(r"^(?:actual|steps to reproduce|traceback|notes?|discussion)\b", lowered):
+            expected_region = False
         # Indented lines are source/witness material.  In particular a
         # ``return`` statement is not an issue contract merely because the
         # surrounding issue uses normative language elsewhere.
@@ -699,7 +981,7 @@ def _fallback(
             not stripped or in_fence or source_indented or _TRACE.search(line)
             or actual_label or lowered.startswith(("actual behavior", "steps to reproduce", "traceback"))
             or (in_reproduction and not expected_label)
-            or not _NORMATIVE.search(line)
+            or (not _NORMATIVE.search(line) and not expected_region)
         ):
             continue
         # Parse labels from their body so ``Expected:`` itself cannot be
@@ -717,6 +999,20 @@ def _fallback(
         span_start = start + max(0, line.find(normative_line))
         span = EvidenceSpan(span_start, span_start + len(normative_line), normative_line)
         symbol = _fallback_symbol(normative_line, witness_symbols, source_hints)
+        if expected_region and title_operation and not (
+            _SYMBOL.search(normative_line) or _CALL.search(normative_line)
+            or _NORMATIVE_SUBJECT.search(normative_line)
+        ):
+            symbol = title_operation
+        if symbol == "UNRESOLVED_TARGET" and expected_region and title_operation:
+            symbol = title_operation
+        # Expected-region text can be implicit (for example, a sentence under
+        # ``Expected behavior``).  It still needs an explicit operation or a
+        # title-aligned symbol before becoming a goal.
+        if expected_region and symbol == "UNRESOLVED_TARGET" and not title_operation:
+            continue
+        if symbol == "UNRESOLVED_TARGET" and re.match(r"^(?:before\b|i\s|we\s|how\s+to\b)", lowered):
+            continue
         unresolved_symbol = symbol == "UNRESOLVED_TARGET"
         illustrative = False
         exception_name = None
@@ -752,6 +1048,13 @@ def _fallback(
                 comparator, expected = "CONTAINS", str(witness_expected["stdout"]).rstrip("\\n")
         if unresolved_symbol:
             comparator, expected = "RELATION_HOLDS", None
+        elif symbol and source_hints and not match and comparator == "RELATION_HOLDS":
+            # A source definition aligned to a normative issue operation can
+            # be probed as a boolean relation.  The issue span supplies the
+            # reporter-grounded Authority-B evidence; Recovery still has to
+            # produce a probe whose clean observation violates this relation
+            # and whose working observation changes before it is accepted.
+            expected = True
         claim_witness_ids = tuple(
             dict.fromkeys((str(witness.get("witness_id")),) if witness else ())
         )
@@ -885,9 +1188,15 @@ def compile_requirement_contract(issue_text: str, public_evidence: Sequence[Any]
     for claim in accepted:
         unique.setdefault((claim.operation, claim.quantifier, json.dumps(claim.expected_observation, sort_keys=True, default=str)), claim)
     if not unique:
-        # Valid JSON with invalid semantic claims is evidence-limited; do not
-        # silently replace it with a dotted-token fallback.
-        result = RequirementCompilation(tuple(), tuple(raw_args.get("witnesses", ())), tuple(map(str, raw_args.get("ambiguities", ()))), raw_args, tuple(rejected), False, tuple(attempts))
+        # A parsed payload can still be semantically unusable.  Deterministic
+        # fallback is required here so recovery receives an explicit target or
+        # unresolved marker rather than a dead-end empty claim list.  Preserve
+        # the raw model payload and rejection history for auditability.
+        fallback = _fallback(issue_text, source_hints, public_records)
+        result = RequirementCompilation(
+            fallback.claims, fallback.witnesses, fallback.ambiguities,
+            raw_args, tuple(rejected), True, tuple(attempts),
+        )
     else:
         result = RequirementCompilation(tuple(unique.values()), tuple(raw_args.get("witnesses", ())), tuple(map(str, raw_args.get("ambiguities", ()))), raw_args, tuple(rejected), False, tuple(attempts))
     _write_compilation_artifact(run_root, issue_text, result)

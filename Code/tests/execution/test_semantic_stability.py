@@ -90,6 +90,34 @@ def test_execute_check_overlays_files_changed_from_base(tmp_path, monkeypatch):
     assert seen == [("api.py",), ("api.py",)]
 
 
+def test_traced_member_gets_bounded_instrumentation_overhead(tmp_path, monkeypatch):
+    tree = tmp_path / "tree-timeout"; tree.mkdir()
+    seen = []
+
+    def fake_trace(root, command, **kwargs):
+        seen.append((kwargs["trace_enabled"], kwargs["timeout_seconds"]))
+        return TraceBundle(
+            "trace", "tree", tuple(command),
+            RunObservation(OutcomeStatus.PASS, 0, "", "", 0.01),
+            ("api.value",), ("api.py:1",), ("api.py:1",),
+            first_project_frame="api.py:1",
+        )
+
+    monkeypatch.setattr("reachpatch.execution.checks.run_trace", fake_trace)
+    check = ExecutableCheck(
+        check_id="timeout", command=("python", "-c", "pass"),
+        role="TARGET", authority="A", timeout_seconds=30,
+        expected=ObservationContract(
+            "pass", {"exit_code": 0}, comparator="EXIT_ZERO",
+        ),
+    )
+
+    result = execute_check(tree, check, stability_runs=2)
+
+    assert result.status == ExecutionStatus.PASS
+    assert seen == [(True, 120.0), (False, 30.0)]
+
+
 def test_exit_zero_ignores_runtime_ansi_temp_path_and_pid_noise(tmp_path):
     check = ExecutableCheck(
         check_id="noise", command=("python",), role="TARGET", authority="A",

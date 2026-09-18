@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-"""Immutable persistence for graph-free execution checkpoints."""
+"""Immutable persistence for unified-graph execution checkpoints."""
 
 import dataclasses
 import enum
@@ -16,7 +16,7 @@ from typing import Any, TypeVar, get_args, get_origin, get_type_hints
 from reachpatch.execution.worktree import (
     apply_unified_diff, copy_source_tree, diff_between, tree_hash,
 )
-from reachpatch.models.base import canonical_json
+from reachpatch.models.base import canonical_json, stable_id
 from reachpatch.models.execution import ReachAvoidState, StateCheckpoint
 
 
@@ -32,11 +32,25 @@ class IncompatibleExecutionArtifact(RuntimeError):
 def _decode(value: Any, annotation: Any) -> Any:
     if annotation is Any or annotation is typing.Any:
         return value
+    # Retired graph payloads cannot enter the active execution schema.
+    if (
+        isinstance(value, dict)
+        and isinstance(annotation, type)
+        and annotation.__name__ == "DynamicReachAvoidGraph"
+        and {"patch_hash", "active_failure_id", "nodes", "edges"}.issubset(value)
+    ):
+        raise IncompatibleExecutionArtifact("retired DynamicFailureGraph; regenerate the case with the unified graph")
     origin = get_origin(annotation)
     args = get_args(annotation)
     if origin in {typing.Union, types.UnionType}:
         if value is None and type(None) in args:
             return None
+        if (
+            isinstance(value, dict)
+            and {"patch_hash", "active_failure_id", "nodes", "edges"}.issubset(value)
+            and any(getattr(candidate, "__name__", "") == "DynamicReachAvoidGraph" for candidate in args)
+        ):
+            raise IncompatibleExecutionArtifact("retired DynamicFailureGraph; regenerate the case with the unified graph")
         for candidate in args:
             if candidate is type(None):
                 continue
@@ -45,6 +59,8 @@ def _decode(value: Any, annotation: Any) -> Any:
             except (TypeError, ValueError, KeyError):
                 continue
         raise TypeError(f"cannot decode union {annotation}")
+    if isinstance(annotation, type) and hasattr(annotation, "from_dict") and isinstance(value, dict):
+        return annotation.from_dict(dict(value))
     if origin is tuple:
         item_type = args[0] if args else Any
         if len(args) > 1 and args[-1] is not Ellipsis:
@@ -98,6 +114,17 @@ def _atomic_json(path: Path, value: Any) -> None:
         raise
 
 
+def _seal_snapshot_files(root: Path) -> None:
+    """Prevent validation commands from mutating an immutable checkpoint."""
+    for current, _, names in os.walk(root):
+        for name in names:
+            path = Path(current) / name
+            try:
+                path.chmod(path.stat().st_mode & ~0o222)
+            except OSError:
+                continue
+
+
 class ExecutionCheckpointStore:
     def __init__(self, run_root: Path) -> None:
         self.run_root = Path(run_root).resolve()
@@ -140,7 +167,10 @@ class ExecutionCheckpointStore:
             raise RuntimeError("checkpoint source tree hash mismatch")
         temporary = Path(tempfile.mkdtemp(prefix=f".{checkpoint.checkpoint_id}.", dir=self.root))
         try:
-            copy_source_tree(source_tree, temporary / "working_tree", hardlink_files=True)
+            # Checkpoints are immutable snapshots. Hardlinks would let sealing
+            # a checkpoint chmod the clean/parent tree that supplied it.
+            copy_source_tree(source_tree, temporary / "working_tree", hardlink_files=False)
+            _seal_snapshot_files(temporary / "working_tree")
             _atomic_json(temporary / "checkpoint.json", {
                 "schema": EXECUTION_SCHEMA_NAME,
                 "checkpoint": checkpoint.to_dict(),
@@ -156,7 +186,7 @@ class ExecutionCheckpointStore:
             raise
         return self.load(checkpoint.checkpoint_id)
 
-    def replace_metadata(self, checkpoint: StateCheckpoint) -> StateCheckpoint:
+    def replace_metadata(self, checkpoint: StateCheckpoint, *, execution_results: dict[str, tuple[Any, ...]] | None = None) -> StateCheckpoint:
         path = self.path(checkpoint.checkpoint_id) / "checkpoint.json"
         raw = json.loads(path.read_text(encoding="utf-8"))
         previous = record_from_dict(StateCheckpoint, raw["checkpoint"])
@@ -164,8 +194,36 @@ class ExecutionCheckpointStore:
         if any(getattr(previous, field) != getattr(checkpoint, field) for field in immutable):
             raise RuntimeError("execution checkpoint content cannot be mutated")
         raw["checkpoint"] = checkpoint.to_dict()
+        if execution_results is not None:
+            for role in ("target", "preservation", "challenge"):
+                results = execution_results[role]
+                hashes = {item.check_id: stable_id("check-observation", item.check_id,
+                          item.status, item.semantic_signature) for item in results}
+                if hashes != getattr(checkpoint, role + "_observation_hashes"):
+                    raise IncompatibleExecutionArtifact("ARTIFACT_INCONSISTENT: observation references")
+                raw[role + "_results"] = [item.to_dict() for item in results]
         _atomic_json(path, raw)
         return self.load(checkpoint.checkpoint_id)
+
+    def validate_evidence(self, checkpoint: StateCheckpoint, graph: Any) -> None:
+        """Reject stale evidence exports instead of silently reporting zero runs."""
+        raw = json.loads((self.path(checkpoint.checkpoint_id) / "checkpoint.json").read_text())
+        node = graph.nodes[checkpoint.checkpoint_id]
+        if node.metadata["patch_hash"] != checkpoint.patch_hash:
+            raise IncompatibleExecutionArtifact("ARTIFACT_INCONSISTENT: graph patch")
+        for role in ("target", "preservation", "challenge"):
+            results = raw[role + "_results"]
+            hashes = {item["check_id"]: stable_id("check-observation", item["check_id"],
+                       item["status"], item["semantic_signature"]) for item in results}
+            if hashes != getattr(checkpoint, role + "_observation_hashes"):
+                raise IncompatibleExecutionArtifact("ARTIFACT_INCONSISTENT: persisted execution results")
+            if canonical_json({item["check_id"]: item for item in results}) != canonical_json(node.metadata.get(role + "_results", {})):
+                raise IncompatibleExecutionArtifact("ARTIFACT_INCONSISTENT: graph execution results")
+            observed = {canonical_json(item.metadata["execution"]) for item in graph.nodes.values()
+                        if item.metadata.get("patch_hash") == checkpoint.patch_hash
+                        and "execution" in item.metadata}
+            if any(canonical_json(item) not in observed for item in results):
+                raise IncompatibleExecutionArtifact("ARTIFACT_INCONSISTENT: missing graph observation")
 
     def recover_snapshot(self, checkpoint: StateCheckpoint, clean_snapshot: Path) -> Path:
         destination = Path(checkpoint.snapshot_tree)
@@ -183,6 +241,7 @@ class ExecutionCheckpointStore:
             rebuilt_hash = tree_hash(rebuilt)
             if checkpoint.working_tree_hash and rebuilt_hash != checkpoint.working_tree_hash:
                 raise RuntimeError("rebuilt checkpoint tree hash mismatch")
+            _seal_snapshot_files(rebuilt)
             os.replace(rebuilt, destination)
         finally:
             shutil.rmtree(temporary, ignore_errors=True)
@@ -237,7 +296,15 @@ def update_safe_checkpoint(state: ReachAvoidState, checkpoint: StateCheckpoint) 
 
 
 def update_best_checkpoint(state: ReachAvoidState, checkpoint: StateCheckpoint) -> StateCheckpoint:
-    state.best_checkpoint = checkpoint
+    incumbent = state.best_checkpoint
+    if incumbent is None or (
+        tuple(checkpoint.search_score), checkpoint.certified,
+        checkpoint.final_eligible, checkpoint.revision,
+    ) > (
+        tuple(incumbent.search_score), incumbent.certified,
+        incumbent.final_eligible, incumbent.revision,
+    ):
+        state.best_checkpoint = checkpoint
     return checkpoint
 
 
@@ -254,10 +321,19 @@ def restore_parent_working_checkpoint(
 def select_final_checkpoint(state: ReachAvoidState) -> StateCheckpoint:
     if state.certified_checkpoint is not None:
         return state.certified_checkpoint
-    candidates = tuple(
-        item for item in (state.best_checkpoint, state.safe_checkpoint)
-        if item is not None and item.final_eligible
-    )
+    candidates = tuple({
+        item.checkpoint_id: item for item in (
+            state.best_checkpoint, state.safe_checkpoint,
+            *state.checkpoint_history.values(),
+            state.working_checkpoint,
+        ) if item is not None and not item.repository_corrupted
+        and item.patch_is_applicable and not item.forbidden_path_changed
+        and not item.confirmed_preservation_regression
+        and not any("syntax" in reason.casefold() or "indentation" in reason.casefold()
+                    for reason in item.mechanical_blockers)
+        and str(item.status).upper() not in {"REJECTED", "EXHAUSTED"}
+        and item.patch_hash not in state.rejected_patch_hashes
+    }.values())
     if candidates:
-        return max(candidates, key=lambda item: (item.revision, item.checkpoint_id))
+        return max(candidates, key=lambda item: (item.certified, tuple(item.search_score), item.revision, item.checkpoint_id))
     return state.working_checkpoint

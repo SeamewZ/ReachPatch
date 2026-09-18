@@ -30,6 +30,11 @@ def _jsonable(value: Any) -> Any:
         return sorted(items, key=canonical_json)
     if isinstance(value, enum.Enum):
         return value.value
+    # Mutable execution artifacts such as the unified dynamic graph expose a
+    # canonical ``to_dict`` without being frozen dataclasses.  Serialize them
+    # through that explicit boundary rather than leaking object identity.
+    if not dataclasses.is_dataclass(value) and hasattr(value, "to_dict"):
+        return _jsonable(value.to_dict())
     if isinstance(value, Path):
         return str(value)
     if dataclasses.is_dataclass(value):

@@ -34,10 +34,46 @@ def _history_count(signature: str, history: Mapping[str, Any]) -> int:
     return 2
 
 
+def _failure_locus_signature(
+    kind: ActiveFailureKind,
+    check: ExecutableCheck | None,
+    execution: CheckExecution,
+) -> str:
+    """Identify a causal failure without making actual values part of it.
+
+    A changed return value or traceback text can be useful progress evidence,
+    but it must not reset the history for the same executable obligation and
+    target frame.  This stable key is the identity used to exhaust duplicate
+    mechanisms and to decide when a causal cut needs expansion.
+    """
+    trace = execution.trace
+    observation = execution.observation
+    exception = getattr(observation, "exception", None)
+    exception_type = (
+        exception.get("type") if isinstance(exception, Mapping) else
+        type(exception).__name__ if exception is not None else None
+    )
+    frame = getattr(trace, "first_project_frame", None)
+    stage = getattr(execution.failure_stage, "value", execution.failure_stage)
+    assertion = next(
+        (line.strip() for line in str(getattr(observation, "stderr", "")).splitlines()
+         if "assert" in line.casefold() or "error" in line.casefold()),
+        None,
+    )
+    return content_hash({
+        "kind": kind.value,
+        "check": check.check_id if check is not None else execution.check_id,
+        "target_frame": frame,
+        "failure_stage": stage,
+        "exception_type": exception_type,
+        "assertion_location": assertion,
+    })
+
+
 def _failure_from_execution(kind: ActiveFailureKind, check: ExecutableCheck | None, execution: CheckExecution, history: Mapping[str, Any]) -> ActiveFailure:
     observation = execution.observation
     trace = execution.trace
-    signature = content_hash({"kind": kind.value, "check": check.check_id if check is not None else execution.check_id, "semantic": execution.semantic_signature, "status": execution.status})
+    signature = _failure_locus_signature(kind, check, execution)
     actual = observed_value(observation)
     if actual is None:
         actual = {
@@ -54,7 +90,7 @@ def _failure_from_execution(kind: ActiveFailureKind, check: ExecutableCheck | No
     return ActiveFailure(
         failure_id=stable_id("active-failure", kind.value, check_id, signature), kind=kind, check_id=check_id, goal_id=goal_id, command=command, comparator=comparator,
         expected=expected, actual=actual, stdout=observation.stdout, stderr=observation.stderr, exit_code=observation.return_code, exception=observation.exception,
-        traceback_frames=_traceback_frames(observation.stderr), entered_project_code=execution.entered_project_code, first_project_frame=getattr(trace, "first_project_frame", None), failure_stage=execution.failure_stage, signature=signature, same_signature_count=_history_count(signature, history), authority=authority,
+        traceback_frames=_traceback_frames(observation.stderr), entered_project_code=bool(getattr(execution, "entered_target_code", None) if getattr(execution, "entered_target_code", None) is not None else execution.entered_project_code), first_project_frame=getattr(trace, "first_project_frame", None), failure_stage=execution.failure_stage, signature=signature, same_signature_count=_history_count(signature, history), authority=authority,
     )
 
 

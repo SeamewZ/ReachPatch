@@ -9,8 +9,8 @@ from reachpatch.models.execution import AtomicProgress, StateCheckpoint, Transit
 from reachpatch.reach_avoid.execution_checkpoint import (
     ExecutionCheckpointStore, record_from_dict,
 )
-from reachpatch.reach_avoid.dynamic_failure_graph import (
-    DynamicFailureGraph, DynamicFailureGraphBudget, build_dynamic_failure_graph,
+from reachpatch.reach_avoid.dynamic_reach_avoid_graph import (
+    DynamicReachAvoidGraph, GraphNodeKind,
 )
 
 
@@ -61,15 +61,9 @@ def test_checkpoint_certificate_round_trip(tmp_path):
 
 
 def test_dynamic_failure_graph_json_round_trip():
-    from types import SimpleNamespace
-    graph = build_dynamic_failure_graph(
-        Path("."), Path("."),
-        "diff --git a/calc.py b/calc.py\n+++ b/calc.py\n@@ -1,1 +1,1 @@\n+return 1\n",
-        SimpleNamespace(failure_id="f", same_signature_count=2),
-        SimpleNamespace(executed_line_ids=("calc.py:1",), events=()), None,
-        DynamicFailureGraphBudget(),
-    )
-    restored = record_from_dict(DynamicFailureGraph, graph.to_dict())
+    graph = DynamicReachAvoidGraph()
+    graph.add_node(GraphNodeKind.SYMBOL, file="calc.py", symbol="calc", source_span="def calc(): return 1")
+    restored = DynamicReachAvoidGraph.from_dict(graph.to_dict())
     assert restored.graph_id == graph.graph_id
     assert restored.nodes.keys() == graph.nodes.keys()
     assert restored.edges.keys() == graph.edges.keys()
@@ -103,13 +97,10 @@ def test_state_round_trip_restores_dynamic_failure_graph(tmp_path):
     ReachAvoidController(RepairPlayer(InitialPatch())).run(instance, run_root=run_root)
     store = ExecutionCheckpointStore(run_root)
     state = store.read_state()
-    graph = build_dynamic_failure_graph(
-        repo, repo, "", SimpleNamespace(failure_id="f", same_signature_count=2),
-        SimpleNamespace(executed_line_ids=("calc.py:1",), events=()), None,
-        DynamicFailureGraphBudget(),
-    )
+    graph = DynamicReachAvoidGraph()
+    graph.add_node(GraphNodeKind.SYMBOL, file="calc.py", symbol="calc", source_span="def calc(): return 2")
     state.dynamic_failure_graph = graph
     store.write_state(state)
     restored = store.read_state()
-    assert isinstance(restored.dynamic_failure_graph, DynamicFailureGraph)
+    assert isinstance(restored.dynamic_failure_graph, DynamicReachAvoidGraph)
     assert restored.dynamic_failure_graph.digest() == graph.digest()

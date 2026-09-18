@@ -384,10 +384,10 @@ class _LegacyExecutionCheckpointStore:
         return raw
 
 
-# Production execution checkpoints live in the graph-free module.  Keep this
-# import as a compatibility export for callers that historically imported the
-# store from ``reach_avoid.checkpoint``; ``CheckpointStore`` above remains the
-# read-only GraphStack artifact adapter.
+# Production execution checkpoints live in the unified reach/avoid graph
+# implementation. Keep this import as a compatibility export for callers that
+# historically imported the store from ``reach_avoid.checkpoint``;
+# ``CheckpointStore`` above remains the read-only GraphStack artifact adapter.
 from reachpatch.reach_avoid.execution_checkpoint import (  # noqa: E402
     ExecutionCheckpointStore,
 )

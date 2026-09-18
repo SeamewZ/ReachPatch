@@ -90,9 +90,13 @@ def _same_or_deeper_target_path(
     trial: CheckExecution,
     check: ExecutableCheck,
 ) -> bool:
-    if not parent.entered_project_code:
-        return trial.entered_project_code
-    if not trial.entered_project_code:
+    parent_target = getattr(parent, "entered_target_code", None)
+    trial_target = getattr(trial, "entered_target_code", None)
+    parent_entered = bool(parent.entered_project_code if parent_target is None else parent_target)
+    trial_entered = bool(trial.entered_project_code if trial_target is None else trial_target)
+    if not parent_entered:
+        return trial_entered
+    if not trial_entered:
         return False
     parent_trace, trial_trace = parent.trace, trial.trace
     parent_symbols = {
@@ -113,29 +117,13 @@ def _same_or_deeper_target_path(
     parent_targets = parent_symbols.intersection(target_symbols)
     if parent_targets:
         return bool(parent_targets.intersection(trial_symbols))
+    # Without a declared target, only an exact shared dynamic symbol/arc can
+    # establish path continuity. Being in the same file is not target entry.
     if parent_symbols and trial_symbols and parent_symbols.intersection(trial_symbols):
         return True
-    parent_paths = tuple(getattr(parent_trace, "executed_path_ids", ()) or ())
-    trial_paths = tuple(getattr(trial_trace, "executed_path_ids", ()) or ())
-    if parent_paths and trial_paths:
-        # Trace event counts are not path depth.  A repair commonly removes a
-        # redundant branch or a return event, so the trial can have fewer
-        # events while still executing the same target function.  Require
-        # shared path evidence instead of treating that harmless shortening as
-        # an early-runtime shortcut.
-        if set(parent_paths).intersection(trial_paths):
-            return True
-        # A causal edit may move line IDs while preserving the same project
-        # function. Compare the first traced file/function as a stable path
-        # identity before rejecting stage progress.
-        parent_frame = getattr(parent_trace, "first_project_frame", None)
-        trial_frame = getattr(trial_trace, "first_project_frame", None)
-        if parent_frame and trial_frame:
-            return str(parent_frame).split(":", 1)[0] == str(trial_frame).split(":", 1)[0]
-        return False
-    parent_frame = getattr(parent_trace, "first_project_frame", None)
-    trial_frame = getattr(trial_trace, "first_project_frame", None)
-    return not parent_frame or parent_frame == trial_frame
+    parent_paths = set(getattr(parent_trace, "executed_path_ids", ()) or ())
+    trial_paths = set(getattr(trial_trace, "executed_path_ids", ()) or ())
+    return bool(parent_paths and trial_paths and parent_paths.intersection(trial_paths))
 
 
 def _assertion_mismatch_count(execution: CheckExecution) -> int | None:
@@ -302,6 +290,7 @@ def all_reach_conditions_pass(
 
     trusted_target_pass = any(
         item.stable and item.status is CheckStatus.PASS
+        and (getattr(item, "entered_target_code", None) is not False)
         and _role_is_target(item) and _trusted_authority(item)
         for item in targets
     )

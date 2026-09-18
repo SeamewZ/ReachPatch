@@ -1,4 +1,5 @@
 from pathlib import Path
+import json
 
 from reachpatch.models.evidence import EvidenceRecord, PublicEvidence, public_evidence_from_instance
 from reachpatch.requirement_graph.compiler import (
@@ -6,6 +7,20 @@ from reachpatch.requirement_graph.compiler import (
     compile_goal_contracts, validate_compiled_claim,
 )
 from reachpatch.requirement_graph.builder import build_requirement_graph
+
+
+def test_fallback_preserves_failed_tool_protocol(tmp_path):
+    class BrokenTransport:
+        def complete(self, messages, **kwargs):
+            raise RuntimeError("provider unavailable")
+    issue = "`transform_coordinates` must return 3."
+    public = public_evidence_from_instance(issue, (), {}, tmp_path)
+    compile_goal_contracts(issue, public, (), BrokenTransport(), tmp_path / "compile")
+    protocol = json.loads((tmp_path / "compile" / "goal_compilation_tool.json").read_text())
+    assert len(protocol["tool_attempts"]) == 2
+    assert "provider unavailable" in str(protocol["validation_errors"])
+    fallback = json.loads((tmp_path / "compile" / "requirement_compilation.json").read_text())
+    assert fallback["fallback_used"]
 
 
 def test_real_target_and_illustrative_example_keep_quantifier(tmp_path):
@@ -163,3 +178,39 @@ def test_unresolved_goal_is_emitted_without_normative_evidence(tmp_path):
     assert len(goals) == 1
     assert goals[0].operation == "UNRESOLVED_TARGET"
     assert not goals[0].hard
+
+
+def test_return_type_dotted_name_does_not_shadow_evidenced_operation(tmp_path):
+    issue = "calc must return numbers.Real."
+    (tmp_path / "calc.py").write_text("def calc():\n    return None\n", encoding="utf-8")
+    evidence = public_evidence_from_instance(
+        issue, (), {"public_checks": ({
+            "check_id": "target", "command": (
+                "python", "-c",
+                "from calc import calc; import numbers; assert calc() is numbers.Real",
+            ), "role": "TARGET", "authority": "A",
+            "symbol_references": ("calc",),
+        },)}, tmp_path,
+    )
+    from reachpatch.reach_avoid.controller import build_requirement_source_hints
+    hints = build_requirement_source_hints(tmp_path, issue, evidence.checks)
+    goals = compile_goal_contracts(issue, evidence, hints, None, tmp_path / "compile")
+    assert len(goals) == 1
+    assert goals[0].operation == "calc"
+    assert goals[0].source_hint_ids
+    assert goals[0].evidence_span_ids
+
+
+def test_following_witness_does_not_promote_instead_as_operation(tmp_path):
+    issue = (
+        "Issue when passing empty lists/arrays to WCS transformations\n"
+        "The following should not fail but instead should return empty lists/arrays:\n\n"
+        "```\nfrom astropy.wcs import WCS\n"
+        "wcs = WCS('example.fits')\nwcs.wcs_pix2world([], [], 0)\n```\n"
+    )
+    evidence = public_evidence_from_instance(issue, (), {}, tmp_path)
+    goals = compile_goal_contracts(issue, evidence, (), None, tmp_path / "compile")
+
+    assert all(goal.operation != "instead" for goal in goals)
+    target = next(goal for goal in goals if goal.operation == "wcs_pix2world")
+    assert target.hard

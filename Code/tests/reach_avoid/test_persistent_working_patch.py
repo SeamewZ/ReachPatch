@@ -82,3 +82,112 @@ def test_no_executable_target_stops_before_repair_revision(tmp_path):
     )
     assert result.status == "EVIDENCE_LIMITED"
     assert generator.revisions == 0
+
+
+def test_recovery_agent_recovers_target_without_initial_public_check(tmp_path):
+    """An issue-grounded probe can create the first executable target.
+
+    There is deliberately no executable target entry here (only a preservation
+    check).  The recovery conversation is the only source of the target
+    command: it writes a restricted probe, observes two stable clean failures,
+    and then lets the repair loop fix the P0 failure.  The fake transport follows the exact
+    tool-call protocol used by the production recovery agent, so this test
+    exercises the real promotion/validation path without spending API budget.
+    """
+    repository = tmp_path / "repo-recovery"
+    repository.mkdir()
+    (repository / "calc.py").write_text(
+        "def calc(value=1):\n    return 0\n", encoding="utf-8",
+    )
+
+    class RecoveryTransport:
+        def complete(self, messages, **kwargs):
+            import json
+
+            previous = [
+                item for item in messages
+                if item.get("role") == "tool" and item.get("content")
+            ]
+            last = json.loads(previous[-1]["content"]) if previous else {}
+            probe_id = str(last.get("probe_id", ""))
+            turn = len(previous)
+            if turn == 0:
+                name, arguments = "write_probe", {
+                    "name": "calc_target.py",
+                    "source": "from calc import calc\nassert calc(1) == 1\n",
+                }
+            elif turn == 1:
+                name, arguments = "register_observation_contract", {
+                    "probe_id": probe_id,
+                    "contract": {"comparator": "EXIT_ZERO", "expected": {"exit_code": 0}},
+                    "authority": "B",
+                }
+            elif turn in {2, 3}:
+                name, arguments = "run_probe_on_clean", {"probe_id": probe_id}
+            elif turn in {4, 5}:
+                name, arguments = "run_probe_on_working", {"probe_id": probe_id}
+            else:
+                name, arguments = "finish_target_recovery", {"summary": "probe complete"}
+            return {
+                "_request_id": f"recovery-{turn}",
+                "tool_calls": [{
+                    "id": f"call-{turn}",
+                    "function": {"name": name, "arguments": json.dumps(arguments)},
+                }],
+            }
+
+    transport = RecoveryTransport()
+
+    class Repair:
+        def __init__(self):
+            self.transport = transport
+
+        def revise(self, objective, tools, initial=False):
+            if initial:
+                patch = (
+                    "diff --git a/calc.py b/calc.py\n"
+                    "--- a/calc.py\n+++ b/calc.py\n"
+                    "@@ -1,2 +1,2 @@\n def calc(value=1):\n"
+                    "-    return 0\n+    return 1\n"
+                )
+            else:
+                patch = (
+                    "diff --git a/calc.py b/calc.py\n"
+                    "--- a/calc.py\n+++ b/calc.py\n"
+                    "@@ -1,2 +1,4 @@\n def calc(value=1):\n"
+                    "-    return 1\n+    if value == 0:\n+        return 0\n+    return 1\n"
+                )
+            _apply(
+                tools,
+                patch,
+            )
+            return {"summary": "recovery toy", "mechanism": "return-correction"}
+
+    run_root = tmp_path / "run-recovery"
+    instance = Instance(
+        "toy-recovery-without-public-target", str(repository), "base",
+        "calc must support returning 1.",
+        public_metadata={"public_checks": ({
+            "check_id": "preserve-zero",
+            "command": ("python", "-c", "from calc import calc; assert calc(0) == 0"),
+            "role": "PRESERVATION", "authority": "A", "symbol_references": ("calc",),
+        },)},
+    )
+    result = ReachAvoidController(RepairPlayer(Repair())).run(
+        instance, run_root=run_root,
+    )
+    assert result.status == "REACHED"
+    assert "+    return 1" in result.unified_diff
+    summary = json.loads((run_root / "execution_summary.json").read_text())
+    assert summary["transition_count"] > 0
+    assert summary["graph_metrics"]["target_recovery_attempt_count"] > 0
+    recovery = json.loads((run_root / "target_recovery.json").read_text())
+    assert recovery["target_checks"]
+    assert recovery["agent_events"]
+    observations = [
+        event.get("result", {}).get("observation", {})
+        for event in recovery["agent_events"]
+        if event.get("tool") in {"run_probe_on_clean", "run_probe_on_working"}
+    ]
+    assert any(item.get("status") == "FAIL" for item in observations)
+    assert any(item.get("status") == "PASS" for item in observations)
