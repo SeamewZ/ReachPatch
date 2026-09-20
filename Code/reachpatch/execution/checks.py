@@ -14,7 +14,7 @@ from typing import Any, Hashable
 
 from reachpatch.models.base import canonical_json, content_hash
 from reachpatch.models.evidence import ObservationContract, OutcomeStatus, RunObservation, TraceBundle
-from reachpatch.models.execution import CheckExecution, CheckStatus, ExecutableCheck
+from reachpatch.models.execution import CheckExecution, CheckStatus, ExecutableCheck, FailureStage
 from .trace import run_trace
 from .worktree import diff_between
 
@@ -224,9 +224,20 @@ def _environment_blocked(trace) -> bool:
     if (re.search(r"(?m)^E\s+\w*Warning:", diagnostic)
         and re.search(r"(?m)[^\n]*(?:site-packages|dist-packages)/[^\n]+\.py:\d+:\s*\w*Warning\s*$", diagnostic)):
         return True
+    text = f"{observation.exception or ''} {observation.stderr or ''}".casefold()
+    # These failures describe the execution environment, not a project
+    # contract. They remain blockers even when a public test first entered an
+    # unrelated project wrapper (for example requests.Session before a
+    # network-none DNS failure). A raw resolver failure can therefore never
+    # be promoted through a broad symbol list.
+    if any(token in text for token in (
+        "socket.gaierror", "temporary failure in name resolution",
+        "name or service not known", "nodename nor servname provided",
+        "failed to resolve", "network is unreachable",
+    )):
+        return True
     if getattr(trace, "first_project_frame", None):
         return False
-    text = f"{observation.exception or ''} {observation.stderr or ''}".casefold()
     return any(token in text for token in (
         "modulenotfounderror", "no module named", "cannot import name",
         "importerror", "environmenterror",
@@ -326,6 +337,14 @@ def execute_check(
                     matched = file.casefold().endswith((module + ".py", module + "/__init__.py"))
                 else:
                     matched = False
+                # Executing a class body while importing its module is not an
+                # invocation of that class or one of its target methods.  A
+                # recovery probe that crashes during setup must not become a
+                # trusted target merely because the issue names the class.
+                if matched and str(event_value(event, "caller", "")) == "<module>":
+                    caller_file = str(event_value(event, "caller_file", "")).replace("\\", "/")
+                    if caller_file == file:
+                        matched = False
                 target_entered = target_entered or matched
     elif target_names:
         # Older trace adapters without events can establish only an exact
@@ -335,6 +354,9 @@ def execute_check(
     # A test/setup frame alone is not target execution evidence.
     if event_files and all(any(part in path.split("/") for part in ("tests", "test", "setup")) for path in event_files):
         target_entered = False
+    if stable and status is CheckStatus.FAIL and not target_entered:
+        if failure_stage is FailureStage.TARGET_CONTRACT_FAILURE:
+            failure_stage = FailureStage.PRE_TARGET_RUNTIME_BLOCKER
     result = CheckExecution(
         check_id=check.check_id, status=status, observation=observation, trace=trace,
         runs=count, stable=stable, semantic_signature=content_hash(signatures),

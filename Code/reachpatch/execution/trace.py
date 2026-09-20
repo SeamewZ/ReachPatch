@@ -9,7 +9,7 @@ import time
 import shutil
 from pathlib import Path
 
-from reachpatch.models.base import stable_id
+from reachpatch.models.base import content_hash, stable_id
 from reachpatch.models.evidence import OutcomeStatus, RunObservation, TraceBundle, TraceEvent
 
 from .worktree import copy_source_tree, tree_hash
@@ -458,6 +458,28 @@ def run_trace(
         for item in dynamic_events
         if isinstance(item, dict) or (isinstance(item, (tuple, list)) and len(item) >= 4)
     )
+    project_files = tuple(dict.fromkeys(
+        item.file for item in typed_events
+        if isinstance(item, TraceEvent) and item.file
+    ))
+    file_hashes = {}
+    for relative in project_files:
+        source_path = execution_tree / relative
+        if source_path.is_file():
+            try:
+                file_hashes[relative] = content_hash(
+                    source_path.read_text(encoding="utf-8", errors="replace")
+                )
+            except OSError:
+                file_hashes[relative] = "UNREADABLE"
+    execution_identity = {
+        "requested_tree": str(execution_tree),
+        "tree_hash": input_tree_hash,
+        "backend": backend,
+        "python_command": command[0] if command else None,
+        "project_module_files": project_files,
+        "project_file_hashes": file_hashes,
+    }
     return TraceBundle(
         trace_bundle_id=trace_id,
         tree_hash=digest,
@@ -473,5 +495,6 @@ def run_trace(
         cwd=cwd,
         environment=tuple(sorted((str(key), str(value)) for key, value in environment)),
         backend=backend,
+        execution_identity=execution_identity,
         events=typed_events,
     )

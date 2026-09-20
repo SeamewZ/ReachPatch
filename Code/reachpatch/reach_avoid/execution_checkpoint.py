@@ -321,19 +321,33 @@ def restore_parent_working_checkpoint(
 def select_final_checkpoint(state: ReachAvoidState) -> StateCheckpoint:
     if state.certified_checkpoint is not None:
         return state.certified_checkpoint
-    candidates = tuple({
-        item.checkpoint_id: item for item in (
+    # Resolve aliases BEFORE filtering. Otherwise an obsolete safe/best copy
+    # can sneak past a regression flag set on the newer checkpoint record.
+    canonical = {
+        item.checkpoint_id: state.checkpoint_history.get(item.checkpoint_id, item) for item in (
             state.best_checkpoint, state.safe_checkpoint,
             *state.checkpoint_history.values(),
             state.working_checkpoint,
-        ) if item is not None and not item.repository_corrupted
+        ) if item is not None}
+    candidates = tuple(item for item in canonical.values() if not item.repository_corrupted
         and item.patch_is_applicable and not item.forbidden_path_changed
         and not item.confirmed_preservation_regression
         and not any("syntax" in reason.casefold() or "indentation" in reason.casefold()
                     for reason in item.mechanical_blockers)
         and str(item.status).upper() not in {"REJECTED", "EXHAUSTED"}
         and item.patch_hash not in state.rejected_patch_hashes
-    }.values())
+    )
     if candidates:
-        return max(candidates, key=lambda item: (item.certified, tuple(item.search_score), item.revision, item.checkpoint_id))
+        return max(candidates, key=lambda item: (
+            item.certified,
+            tuple(item.search_score),
+            # SWE cases are defined against a failing base.  When executable
+            # evidence cannot distinguish two best-effort checkpoints, an
+            # actual applicable candidate patch is better than the untouched
+            # bootstrap.  This is a final tie-break, not P0 priority: P0 and
+            # every revision use the same rule and evidence score.
+            bool(item.cumulative_diff.strip()),
+            item.revision,
+            item.checkpoint_id,
+        ))
     return state.working_checkpoint

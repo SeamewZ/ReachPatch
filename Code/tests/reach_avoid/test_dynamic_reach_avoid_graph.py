@@ -53,6 +53,38 @@ def test_rank_cuts_and_distinct_hypotheses():
     assert len({item.proposed_mechanism for item in hypotheses}) == 2
 
 
+def test_rank_cuts_binds_class_requirement_to_current_method_after_refresh():
+    graph = DynamicReachAvoidGraph()
+    graph.add_node(
+        GraphNodeKind.OBLIGATION, node_id="obligation",
+        metadata={"goal_id": "goal", "check_id": "target-check",
+                  "target_symbols": ("RenameIndex",)},
+    )
+    graph.add_node(
+        GraphNodeKind.SYMBOL, node_id="retired-class", file="models.py",
+        symbol="RenameIndex", line_start=10, line_end=80,
+        source_span="class RenameIndex:", status="RETIRED_SOURCE",
+        metadata={"requirement_ids": ("goal",)},
+    )
+    graph.add_node(
+        GraphNodeKind.SYMBOL, node_id="current-method", file="models.py",
+        symbol="RenameIndex.database_backwards", line_start=40, line_end=55,
+        source_span="def database_backwards(self):\n    return None",
+        status="CURRENT_SOURCE",
+    )
+    graph.add_node(
+        GraphNodeKind.FAILURE, node_id="failure", symbol="RenameIndex",
+        metadata={"obligation_id": "obligation",
+                  "first_target_frame": "models.py:42"},
+    )
+
+    cuts = rank_causal_cuts(graph, "goal", "failure", "", 1)
+
+    assert len(cuts) == 1
+    assert cuts[0].symbol_ids == ("current-method",)
+    assert "database_backwards" in cuts[0].source_spans[0]
+
+
 def test_real_trace_records_taken_and_not_taken(tmp_path: Path):
     (tmp_path / "pkg.py").write_text(
         "def target(value):\n    if value:\n        return 1\n    return 0\n",

@@ -9,7 +9,8 @@ import time
 from pathlib import Path
 from typing import Any
 
-from reachpatch.models.base import SerializableRecord, stable_id
+from reachpatch.models.base import SerializableRecord, content_hash, stable_id
+from reachpatch.reach_avoid.evidence_context import initial_source_context
 from reachpatch.models.evidence import (
     ExecutableCheck as LegacyExecutableCheck, ExecutableOracle,
     ObservationContract, OutcomeStatus, PublicEvidence,
@@ -22,7 +23,7 @@ from .trace import run_trace
 from .checks import (
     execute_check, semantic_observation_signature,
 )
-from .worktree import diff_between
+from .worktree import diff_between, tree_hash
 from reachpatch.reach_avoid.dynamic_reach_avoid_graph import (
     CheckpointState, DynamicReachAvoidGraph, materialize_graph_guided_challenges as _materialize_graph_guided_challenges,
 )
@@ -43,6 +44,7 @@ class TargetRecoveryConfig(SerializableRecord):
     provider_request_timeout_seconds: float = 180.0
     check_timeout_seconds: float = 120.0
     candidate_allowance: int = 2
+    demand_driven: bool = True
 
 
 @dataclass(frozen=True, slots=True)
@@ -210,7 +212,12 @@ class TargetRecoveryToolExecutor:
         if not re.fullmatch(r"[A-Za-z0-9_.-]+", str(name)):
             raise ValueError("invalid probe name")
         parsed = ast.parse(str(source), filename=str(name))
-        forbidden_modules = {"os", "subprocess", "shutil", "socket", "pathlib", "urllib", "requests"}
+        # The probe must be able to import the project under repair. In
+        # particular, forbidding ``requests`` made it impossible to construct
+        # an in-memory Response/raw-stream reproduction for Requests itself.
+        # Direct operating-system, process, filesystem and network modules
+        # remain unavailable; execution also runs in the sealed backend.
+        forbidden_modules = {"os", "subprocess", "shutil", "socket", "pathlib", "urllib"}
         forbidden_calls = {"eval", "exec", "open", "__import__", "input"}
         for node in ast.walk(parsed):
             if isinstance(node, (ast.Import, ast.ImportFrom)):
@@ -262,7 +269,16 @@ class TargetRecoveryToolExecutor:
                                  for symbol in goal.target_symbols) if isinstance(self.goal_contracts, (tuple, list)) else (),
         )
         status = getattr(trace.observation.status, "value", trace.observation.status)
-        valid_semantic_sample = str(status) in {"PASS", "FAIL"}
+        expected_tree_hash = tree_hash(tree)
+        trace_tree_hash = getattr(trace, "tree_hash", expected_tree_hash)
+        execution_identity = getattr(
+            trace, "execution_identity", {"tree_hash": trace_tree_hash},
+        )
+        identity_valid = (
+            trace_tree_hash == expected_tree_hash
+            and execution_identity.get("tree_hash") == expected_tree_hash
+        )
+        valid_semantic_sample = str(status) in {"PASS", "FAIL"} and identity_valid
         if valid_semantic_sample:
             runs.append(trace)
         observation = trace.observation.to_dict() if hasattr(trace.observation, "to_dict") else dict(trace.observation)
@@ -271,7 +287,9 @@ class TargetRecoveryToolExecutor:
                   "run_index": len(runs) if valid_semantic_sample else None,
                   "counts_toward_stability": valid_semantic_sample,
                   "observation": observation, "first_project_frame": trace.first_project_frame,
-                  "trace_bundle_id": trace.trace_bundle_id}
+                  "trace_bundle_id": trace.trace_bundle_id,
+                  "execution_identity": execution_identity,
+                  "identity_valid": identity_valid}
         self._record("run_probe_on_" + destination, {"probe_id": probe_id}, result)
         return result
 
@@ -297,6 +315,14 @@ class TargetRecoveryToolExecutor:
         )
         if observation.normalized_comparator not in ObservationContract._COMPARATORS:
             raise ValueError("unsupported observation comparator")
+        # EXIT_ZERO already has one precise machine meaning. Natural-language
+        # restatements such as "probe exits 0" and boolean ``True`` must not
+        # create distinct contracts or consume recovery turns; canonicalize
+        # the redundant payload while retaining the cited relation text.
+        if observation.normalized_comparator == "EXIT_ZERO":
+            observation = ObservationContract(
+                observation.relation, {"exit_code": 0}, "process", "EXIT_ZERO",
+            )
         requested = str(authority).upper()
         probe.contract = observation
         probe.requirement_id = str(requirement_id) if requirement_id else None
@@ -306,9 +332,38 @@ class TargetRecoveryToolExecutor:
         # one of those sources.
         probe.authority = "PROVISIONAL"
         probe.input_recipe = dict(input_recipe or {})
+        # Reject an ungrounded contract before spending four executions on it.
+        # This is an alignment check only; authority is still granted later
+        # after clean FAIL x2, exact target entry and a second binding check.
+        from reachpatch.requirement_graph.facets import match_grounded_probe_goal
+        grounded_goal = None
+        if probe.requirement_id is not None and isinstance(
+            self.goal_contracts, (tuple, list),
+        ):
+            grounded_goal = match_grounded_probe_goal(self.goal_contracts, probe)
+        if probe.requirement_id is not None and grounded_goal is None:
+            probe.contract = None
+            probe.requirement_id = None
+            probe.input_recipe = {}
+            # Probe source is immutable by design. Remove the unusable
+            # candidate so the next turn can write a corrected self-checking
+            # probe instead of being forced to register the same source again.
+            self.probes.pop(probe.probe_id, None)
+            raise ValueError(
+                "contract is not an executable refinement of the cited A/B/C requirement; "
+                "for a RELATION_HOLDS requirement use an EXIT_ZERO contract and a self-checking "
+                "probe with a non-constant assert or explicit raise that depends on calling the "
+                "target symbol"
+            )
         result = {"probe_id": probe.probe_id, "contract_id": observation.contract_id,
-                  "authority": probe.authority, "requirement_id": probe.requirement_id}
-        self._record("register_observation_contract", {"probe_id": probe_id, "authority": requested}, result)
+                  "authority": probe.authority, "requirement_id": probe.requirement_id,
+                  "grounded_goal_id": grounded_goal.goal_id if grounded_goal else None,
+                  "contract": observation.normalized()}
+        self._record("register_observation_contract", {
+            "probe_id": probe_id, "authority": requested,
+            "requirement_id": probe.requirement_id,
+            "contract": observation.normalized(),
+        }, result)
         return result
 
     def finish_target_recovery(self, summary: str = "") -> dict[str, Any]:
@@ -389,11 +444,22 @@ TARGET_RECOVERY_TOOL_SCHEMAS = tuple({
     ("finish_target_recovery", {"summary": {"type": "string"}}, []),
 ))
 
+# The executor retains the complete protocol API for auditing and direct
+# tests.  The model only receives operations that require semantic judgment;
+# paired execution and protocol completion are deterministic controller work.
+TARGET_RECOVERY_MODEL_TOOL_SCHEMAS = tuple(
+    schema for schema in TARGET_RECOVERY_TOOL_SCHEMAS
+    if schema["function"]["name"] in {
+        "search_source", "read_source", "write_probe",
+        "register_observation_contract",
+    }
+)
+
 
 class TargetRecoveryAgent:
     """Run a bounded DeepSeek recovery conversation with only safe tools."""
 
-    def __init__(self, transport: Any, *, max_turns: int = 16, max_tokens: int = 12000,
+    def __init__(self, transport: Any, *, max_turns: int = 24, max_tokens: int = 4096,
                  timeout_seconds: float = 1200.0,
                  provider_request_timeout_seconds: float = 180.0):
         self.transport = transport
@@ -408,9 +474,11 @@ class TargetRecoveryAgent:
                 "You are a restricted target recovery agent. You may only use the supplied tools. "
                 "Do not edit project files, read hidden files, use the network, or claim an Oracle from prose. "
                 "Use the supplied source_hints and working_diff to identify the target entrypoint before searching broadly. "
-                "After locating it, write one minimal reproduction probe, register its structured observation contract, "
-                "then collect two valid semantic runs on clean and working, and finish. "
-                "A BLOCKED/UNSUPPORTED execution is not a semantic run; retry the same probe when the tool requests it. "
+                "After locating it, write one minimal reproduction probe and register its structured observation contract. "
+                "For a RELATION_HOLDS requirement, write a self-checking EXIT_ZERO probe whose non-constant assert or "
+                "explicit raise depends on the target result; printing an observation is not an Oracle. Inject failures "
+                "at the immediate callee/dependency boundary visible to the target, not at an unrelated deeper layer. "
+                "The controller, not you, performs paired execution and completion. "
                 "A target scenario is accepted only after two stable clean runs violate its structured contract.")},
             {"role": "user", "content": json.dumps(context, sort_keys=True, default=str)},
         ]
@@ -421,13 +489,29 @@ class TargetRecoveryAgent:
         for _ in range(self.max_turns):
             if executor.finished or time.monotonic() >= deadline:
                 break
+            # Once semantic work is complete, advance the finite execution
+            # protocol without an API call. BLOCKED runs consume an attempt
+            # but not a stability sample, exactly as direct executor use does.
+            contracted = tuple(probe for probe in executor.probes.values()
+                               if probe.contract is not None)
+            if contracted:
+                for probe in contracted:
+                    attempt_limit = executor.stability_runs + 2
+                    while (len(probe.clean_runs) < executor.stability_runs
+                           and probe.clean_attempts < attempt_limit):
+                        executor.run_probe_on_clean(probe.probe_id)
+                    while (len(probe.working_runs) < executor.stability_runs
+                           and probe.working_attempts < attempt_limit):
+                        executor.run_probe_on_working(probe.probe_id)
+                executor.finish_target_recovery("deterministic paired execution complete")
+                break
             # Recovery is a finite evidence-building protocol.  Models often
             # reread the same source interval while never producing a probe;
             # after a bounded number of such turns, expose only the next
             # state-advancing tool.  This does not create an oracle or invent
             # an input—the model still has to supply a concrete probe and
             # contract, but cannot consume the whole turn budget on reads.
-            available_tools = TARGET_RECOVERY_TOOL_SCHEMAS
+            available_tools = TARGET_RECOVERY_MODEL_TOOL_SCHEMAS
             forced_choice: str | dict[str, Any] = "required"
             # Once a probe exists, use an explicit evidence protocol instead
             # of allowing the model to spend the remaining turns out of
@@ -436,45 +520,12 @@ class TargetRecoveryAgent:
             # aligned to an Authority-A/B/C goal and are discarded.
             forced_progress_tool: str | None = None
             if executor.probes:
-                attempt_limit = executor.stability_runs + 2
                 pending = next((
                     probe for probe in executor.probes.values()
                     if probe.contract is None
-                    and probe.clean_attempts < attempt_limit
-                    and probe.working_attempts < attempt_limit
                 ), None)
                 if pending is not None:
                     forced_progress_tool = "register_observation_contract"
-                else:
-                    pending = next((
-                        probe for probe in executor.probes.values()
-                        if probe.contract is not None
-                        and len(probe.clean_runs) < executor.stability_runs
-                        and probe.clean_attempts < attempt_limit
-                    ), None)
-                    if pending is not None:
-                        forced_progress_tool = "run_probe_on_clean"
-                    else:
-                        pending = next((
-                            probe for probe in executor.probes.values()
-                            if probe.contract is not None
-                            and len(probe.clean_runs) >= executor.stability_runs
-                            and len(probe.working_runs) < executor.stability_runs
-                            and probe.working_attempts < attempt_limit
-                        ), None)
-                        if pending is not None:
-                            forced_progress_tool = "run_probe_on_working"
-                        elif any(
-                            probe.contract is not None
-                            and len(probe.clean_runs) >= executor.stability_runs
-                            and len(probe.working_runs) >= executor.stability_runs
-                            for probe in executor.probes.values()
-                        ):
-                            forced_progress_tool = "finish_target_recovery"
-                        elif len(executor.probes) < executor.max_probes:
-                            forced_progress_tool = "write_probe"
-                        else:
-                            forced_progress_tool = "finish_target_recovery"
             elif repeated_tool_count >= 2 or read_tool_count >= 6:
                 if not executor.probes:
                     available_tools = tuple(
@@ -572,8 +623,8 @@ class TargetRecoveryAgent:
                     "content": (
                         "Stop source exploration. The next turn is restricted to the "
                         "state-advancing recovery tool shown in the tool list: write one "
-                        "minimal probe, run it on clean/working twice, register the exact "
-                        "structured observation contract, or finish. Do not reread the "
+                        "minimal probe or register its exact structured observation "
+                        "contract. Do not reread the "
                         "same source interval."
                     ),
                 })
@@ -1111,23 +1162,29 @@ def _execution_check_from_public(check: Any, goal_id: str | None, goals: tuple[A
     authority = str(getattr(check, "authority", "PROVISIONAL"))
     if authority not in {"A", "B", "C"}:
         authority = "PROVISIONAL"
-    target_symbols = tuple(
-        getattr(check, "target_symbols", ())
-        or getattr(check, "symbol_references", ())
+    # Public-test references discover and align a test, but they are not all
+    # target entrypoints. Once a check is bound to a requirement, only that
+    # requirement's operation/symbols may establish ``entered_target_code``.
+    # Otherwise a test mentioning ``Session`` and ``iter_content`` can be
+    # certified after entering Session and dying in DNS before iter_content is
+    # ever called.
+    goal = next(
+        (item for item in goals
+         if goal_id and str(getattr(item, "goal_id", "")) == str(goal_id)),
+        None,
     )
-    if not target_symbols and goal_id:
-        goal = next(
-            (item for item in goals
-             if str(getattr(item, "goal_id", "")) == str(goal_id)),
-            None,
+    if goal is not None:
+        target_symbols = tuple(dict.fromkeys(
+            str(item) for item in (
+                *getattr(goal, "target_symbols", ()),
+                getattr(goal, "operation", ""),
+            ) if str(item).strip() and str(item) != "UNRESOLVED_TARGET"
+        ))
+    else:
+        target_symbols = tuple(
+            getattr(check, "target_symbols", ())
+            or getattr(check, "symbol_references", ())
         )
-        if goal is not None:
-            target_symbols = tuple(dict.fromkeys(
-                str(item) for item in (
-                    *getattr(goal, "target_symbols", ()),
-                    getattr(goal, "operation", ""),
-                ) if str(item).strip() and str(item) != "UNRESOLVED_TARGET"
-            ))
     return ExecutableCheck(
         check_id=str(getattr(check, "check_id", "") or stable_id("public-check", command)),
         goal_id=goal_id, role=CheckRole.TARGET, authority=authority,
@@ -1146,10 +1203,50 @@ def _goal_for_check(goals: tuple[Any, ...], check: Any) -> str | None:
         tuple(getattr(check, "target_symbols", ()))
         + tuple(getattr(check, "symbol_references", ()))
     )}
-    for goal in goals:
-        goal_symbols = {str(item).casefold().rsplit(".", 1)[-1] for item in getattr(goal, "target_symbols", ())}
+    candidates = []
+    for index, goal in enumerate(goals):
+        goal_symbols = {
+            str(item).casefold().rsplit(".", 1)[-1]
+            for item in getattr(goal, "target_symbols", ())
+        }
         if symbols and goal_symbols.intersection(symbols):
-            return str(getattr(goal, "goal_id", "")) or None
+            candidates.append((index, goal))
+    if candidates:
+        # Multiple independent contracts commonly share one operation.  Bind
+        # a discovered public test to the contract whose evidence is actually
+        # named by the test selector/command (for example ``none``,
+        # ``sequence`` and ``TypeError``), instead of mechanically choosing
+        # the first goal for that symbol.  This is deterministic evidence
+        # alignment; it does not infer a new expected value from a test name.
+        check_text = " ".join((
+            str(getattr(check, "check_id", "")),
+            *(str(item) for item in getattr(check, "command", ())),
+        )).casefold()
+        check_terms = set(re.findall(r"[a-z][a-z0-9]+", check_text.replace("_", " ")))
+        ignored = {
+            "python", "pytest", "test", "tests", "true", "false",
+            "return", "target", "check", "public", "exit", "zero",
+        }
+        check_terms -= ignored
+
+        def alignment_score(item: tuple[int, Any]) -> tuple[int, int, int]:
+            index, goal = item
+            evidence = " ".join(
+                str(getattr(span, "quote", ""))
+                for span in getattr(goal, "evidence_spans", ())
+            )
+            expected = getattr(goal, "expected", None)
+            goal_text = f"{evidence} {getattr(goal, 'comparator', '')} {expected}".casefold()
+            goal_terms = set(re.findall(r"[a-z][a-z0-9]+", goal_text.replace("_", " "))) - ignored
+            overlap = len(check_terms.intersection(goal_terms))
+            # More specific exception/type facets win a lexical tie; source
+            # order is the final stable fallback for a generic public test.
+            specific = int(str(getattr(goal, "comparator", "")).upper() in {
+                "RAISES", "INSTANCE_OF", "TYPE_IS", "LENGTH_EQUALS",
+            })
+            return overlap, specific if overlap else 0, -index
+
+        return str(getattr(max(candidates, key=alignment_score)[1], "goal_id", "")) or None
     if symbols:
         return None
     hard = [goal for goal in goals if bool(getattr(goal, "hard", False))]
@@ -1500,9 +1597,16 @@ def recover_target_checks(
     # Recovery must also run for an unresolved/soft goal.  The agent may only
     # propose probes; authority is still determined by the typed evidence
     # checks below, so this cannot manufacture an Oracle.
-    missing_facets = tuple(goal for goal in goals if goal.hard
-                           and goal.goal_id not in {check.goal_id for check in targets})
-    if (not targets or oracle_review or missing_facets) and transport is not None:
+    covered_goal_ids = {
+        check.goal_id for check in (*targets, *preservation)
+        if check.goal_id and check.authority in {"A", "B", "C"}
+    }
+    missing_facets = tuple(
+        goal for goal in goals
+        if goal.hard and goal.goal_id not in covered_goal_ids
+    )
+    needs_model_recovery = bool(not targets or oracle_review or missing_facets)
+    if (needs_model_recovery or not config.demand_driven) and transport is not None:
         try:
             executor = TargetRecoveryToolExecutor(
                 repo_root=Path(clean_snapshot), clean_snapshot=Path(clean_snapshot),
@@ -1510,22 +1614,47 @@ def recover_target_checks(
                 program_slice=dynamic_graph, run_root=Path(run_root), max_probes=config.max_probes,
                 stability_runs=config.stability_runs, timeout_seconds=config.check_timeout_seconds,
             )
+            compact_records = []
+            for record in getattr(public_evidence, "records", ()):
+                content = str(getattr(record, "content", ""))
+                limit = 12_000 if getattr(record, "source", None) == "issue" else 1_500
+                compact_records.append({
+                    "evidence_id": getattr(record, "evidence_id", None),
+                    "source": getattr(record, "source", None),
+                    "authority": getattr(record, "authority", None),
+                    "content": content[:limit],
+                    "omitted_chars": max(0, len(content) - limit),
+                    "metadata": {key: value for key, value in
+                        dict(getattr(record, "metadata", {}) or {}).items()
+                        if key in {"issue_witnesses", "check_id", "command",
+                                   "symbol_references", "expected"}},
+                })
+            compact_hints = [{
+                "hint_id": hint.hint_id, "symbol": hint.symbol, "file": hint.file,
+                "line_start": hint.line_start, "line_end": hint.line_end,
+                "evidence_span_ids": hint.evidence_span_ids, "reason": hint.reason,
+                "authority": hint.authority,
+            } for hint in source_hints[:48]]
+            diff_text = current_diff.canonical_diff
+            bounded_diff = (diff_text if len(diff_text) <= 24_000 else
+                diff_text[:12_000] + "\n...[middle omitted; use source tools]...\n" + diff_text[-12_000:])
             context = {
                 "goal_contracts": [goal.to_dict() if hasattr(goal, "to_dict") else goal for goal in goals],
-                "issue_evidence": [record.to_dict() if hasattr(record, "to_dict") else record for record in getattr(public_evidence, "records", ())],
-                "source_hints": [hint.to_dict() if hasattr(hint, "to_dict") else hint for hint in source_hints],
-                "graph_context": dynamic_graph.initial_generation_context() if dynamic_graph is not None else None,
-                "working_diff": current_diff.canonical_diff,
-                "oracle_review": list(oracle_review),
-                "missing_required_facets": [goal.to_dict() for goal in missing_facets],
+                "issue_evidence": compact_records,
+                "source_hints": compact_hints,
+                "graph_context": initial_source_context(dynamic_graph) if dynamic_graph is not None else None,
+                "working_diff": {"content": bounded_diff, "sha256": content_hash(diff_text),
+                                 "omitted_chars": max(0, len(diff_text) - len(bounded_diff))},
+                "oracle_review": list(oracle_review)[:16],
+                "missing_required_facets": [goal.goal_id for goal in missing_facets],
                 "existing_checks": [check.to_dict() for check in targets],
-                "previous_recovery_decisions": list(dynamic_graph.nodes.get("recovery-history").metadata.get("decisions", ()))
+                "previous_recovery_decisions": list(dynamic_graph.nodes.get("recovery-history").metadata.get("decisions", ()))[-2:]
                     if dynamic_graph is not None and "recovery-history" in dynamic_graph.nodes else [],
-                "instructions": "Generate probes only; an Oracle must cite Authority A/B/C evidence. If oracle_review identifies a surviving incorrect return, recover missing return assertions from the cited requirement. Do not copy the mutant as an expected value or weaken the requirement.",
+                "instructions": "Generate probes only; an Oracle must cite Authority A/B/C evidence. RELATION_HOLDS requires a self-checking EXIT_ZERO probe with a non-constant assert or explicit raise depending on the target call; printing values is exploratory only. Inject an exception at the immediate dependency boundary observed by the target rather than guessing a lower-layer exception. If oracle_review identifies a surviving incorrect return, recover missing return assertions from the cited requirement. Do not copy the mutant as an expected value or weaken the requirement.",
             }
             agent_events.extend(TargetRecoveryAgent(
                 transport,
-                max_turns=max(8, config.max_agent_turns),
+                max_turns=config.max_agent_turns,
                 timeout_seconds=config.timeout_seconds,
                 provider_request_timeout_seconds=config.provider_request_timeout_seconds,
             ).recover(executor, context))
@@ -1603,8 +1732,12 @@ def recover_target_checks(
         reasons.append("EVIDENCE_GOAL_ALIGNMENT_MISSING")
     if agent_timed_out:
         reasons.append("AGENT_TIMEOUT")
-    if any(event.get("tool") == "transport" and event.get("error") for event in agent_events):
-        reasons.append("AGENT_TRANSPORT_FAILURE")
+    for event in agent_events:
+        if event.get("tool") == "transport" and event.get("error"):
+            error = str(event["error"])
+            reason = "RECOVERY_BUDGET_EXHAUSTED" if "BUDGET" in error or "RESERVE" in error else "AGENT_TRANSPORT_FAILURE"
+            if reason not in reasons:
+                reasons.append(reason)
     if targets:
         reasons.append("TARGET_RECOVERY_SUCCEEDED")
     if dynamic_graph is not None:

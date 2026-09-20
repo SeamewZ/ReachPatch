@@ -36,8 +36,16 @@ def materialize_return_facet_checks(check: ExecutableCheck, goals: Sequence[Goal
     if len(calls) != 1:
         return ()  # AMBIGUOUS_TARGET_CALL
     call = calls[0]
-    index = next((i for i, statement in enumerate(parsed.body)
-                  if isinstance(statement, (ast.Expr, ast.Assign)) and statement.value is call), None)
+    index = next((
+        i for i, statement in enumerate(parsed.body)
+        if (
+            isinstance(statement, (ast.Expr, ast.Assign))
+            and statement.value is call
+        ) or (
+            isinstance(statement, ast.Assert)
+            and any(node is call for node in ast.walk(statement.test))
+        )
+    ), None)
     if index is None:
         return ()  # TARGET_CALL_REQUIRES_CONTROL_FLOW_ADAPTER
     # Keep setup and the original input; don't execute a nested call twice or

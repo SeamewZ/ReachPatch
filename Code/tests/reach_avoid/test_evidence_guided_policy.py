@@ -1,7 +1,10 @@
 from dataclasses import replace
 from types import SimpleNamespace
 
-from reachpatch.models.execution import ExecutableCheck, CheckRole, CheckStatus, CheckExecution, GoalContract, EvidenceSpan
+from reachpatch.models.execution import (
+    ExecutableCheck, CheckRole, CheckStatus, CheckExecution, FailureStage,
+    GoalContract, EvidenceSpan,
+)
 from reachpatch.reach_avoid.dynamic_reach_avoid_graph import (
     DynamicReachAvoidGraph, GraphNodeKind, GraphEdgeKind, CheckpointState,
     register_validation_checks, derive_validation_obligations, predicate_input_recipes,
@@ -78,7 +81,7 @@ def test_hypotheses_have_falsifiers_and_input_partitions():
     assert len({item.expected_path_change for item in hypotheses}) == len(hypotheses)
 
 
-def test_exact_input_oracle_required_even_when_original_is_trusted():
+def test_exact_input_oracle_required_even_when_original_is_trusted(tmp_path):
     graph = graph_with_target()
     original = check(input_recipe={"variants": [
         {"command": ["python", "-c", "print(100)"], "input": 100},
@@ -87,7 +90,8 @@ def test_exact_input_oracle_required_even_when_original_is_trusted():
     ]})
     register_validation_checks(graph, (original,))
     checkpoint = CheckpointState("parent", None, "", "hash", causal_cut_ids=("branch",))
-    cells = materialize_graph_guided_challenges(None, graph, checkpoint, ())
+    graph.register_checkpoint(checkpoint)
+    cells = materialize_graph_guided_challenges(tmp_path, graph, checkpoint, ())
     assert len([cell for cell in cells if cell.status == "PENDING"]) == 1
     assert next(cell for cell in cells if cell.status == "PENDING").oracle["expected"] == 101
 
@@ -139,6 +143,29 @@ def test_audit_budget_does_not_become_evidence(tmp_path):
     result = CheckExecution("target", CheckStatus.PASS, None, stable=True)
     reports = audit_return_oracles(tmp_path, graph_with_target(), (goal,), (check(),), (result,), patch_hash="p", wall_seconds=0)
     assert reports[0]["status"] == "INCONCLUSIVE"
+
+
+def test_relation_probe_is_not_blocked_by_return_only_oracle_audit(tmp_path):
+    (tmp_path / "pkg.py").write_text("def target(x):\n    return x + 1\n")
+    goal = GoalContract(
+        "goal", "target", ("target",), "RELATION_HOLDS", True,
+        (EvidenceSpan(0, 34, "target should map one to two"),), "B", True,
+    )
+    graph = seed_dynamic_graph(
+        tmp_path, "target should map one to two", (goal,), (), (), None,
+    )
+    probe = check(command=(
+        "python", "-c", "from pkg import target; assert target(1) == 2",
+    ))
+    result = execute_check(tmp_path, probe)
+
+    reports = audit_return_oracles(
+        tmp_path, graph, (goal,), (probe,), (result,), patch_hash="p",
+    )
+
+    assert reports[0]["status"] == "AUDIT_NOT_APPLICABLE"
+    assert reports[0]["blocks_certification"] is False
+    assert not uncovered_oracle_gaps(reports)
 
 
 def test_class_method_nodes_do_not_collide(tmp_path):
@@ -229,6 +256,24 @@ def test_target_entry_does_not_accept_substring_match(tmp_path):
     assert result.status is CheckStatus.PASS
     assert not result.entered_target_code
     assert len(result.run_observations) == 2
+
+
+def test_target_entry_does_not_accept_class_body_during_import(tmp_path):
+    (tmp_path / "pkg.py").write_text(
+        "class Target:\n"
+        "    def run(self):\n"
+        "        return 1\n"
+    )
+    probe = replace(
+        check(command=("python", "-c", "from pkg import Target; raise TypeError('probe setup')")),
+        target_symbols=("Target",), comparator="EXIT_ZERO", expected={"exit_code": 0},
+    )
+
+    result = execute_check(tmp_path, probe)
+
+    assert result.stable and result.status is CheckStatus.FAIL
+    assert not result.entered_target_code
+    assert result.failure_stage is FailureStage.PRE_TARGET_RUNTIME_BLOCKER
 
 
 def test_trace_does_not_invoke_custom_truthiness(tmp_path):

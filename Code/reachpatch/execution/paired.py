@@ -60,6 +60,9 @@ def _observation_from_dict(raw: dict) -> RunObservation:
 
 
 def _trace_from_dict(raw: dict) -> TraceBundle:
+    identity = dict(raw.get("execution_identity", {}))
+    if "project_module_files" in identity:
+        identity["project_module_files"] = tuple(identity["project_module_files"])
     return TraceBundle(
         trace_bundle_id=str(raw["trace_bundle_id"]),
         tree_hash=str(raw["tree_hash"]),
@@ -77,6 +80,7 @@ def _trace_from_dict(raw: dict) -> TraceBundle:
         cwd=str(raw.get("cwd", ".")),
         environment=tuple(tuple(item) for item in raw.get("environment", ())),
         backend=str(raw.get("backend", "shared-executor")),
+        execution_identity=identity,
     )
 
 

@@ -4,7 +4,7 @@ from types import SimpleNamespace
 import pytest
 
 from reachpatch.execution.target_recovery import (
-    TARGET_RECOVERY_TOOL_SCHEMAS, TargetRecoveryAgent,
+    TARGET_RECOVERY_MODEL_TOOL_SCHEMAS, TARGET_RECOVERY_TOOL_SCHEMAS, TargetRecoveryAgent,
     TargetRecoveryToolExecutor,
 )
 from reachpatch.models.evidence import public_evidence_from_instance
@@ -19,7 +19,7 @@ class _Transport:
     def complete(self, messages, **kwargs):
         assert kwargs["tool_choice"] == "required"
         assert {item["function"]["name"] for item in kwargs["tools"]} == {
-            item["function"]["name"] for item in TARGET_RECOVERY_TOOL_SCHEMAS
+            item["function"]["name"] for item in TARGET_RECOVERY_MODEL_TOOL_SCHEMAS
         }
         return next(self.calls)
 
@@ -58,17 +58,49 @@ def test_agent_contract_stays_provisional_without_public_evidence(tmp_path):
     assert registered["authority"] == "PROVISIONAL"
 
 
+def test_exit_zero_contract_payload_is_canonicalized_before_grounding(tmp_path):
+    from reachpatch.models.execution import EvidenceSpan, GoalContract
+
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    (repo / "api.py").write_text("def value(x):\n    return x\n", encoding="utf-8")
+    goal = GoalContract(
+        "goal", "value", ("value",), "RELATION_HOLDS", True,
+        (EvidenceSpan(0, 23, "value should satisfy rule"),), "B", True,
+    )
+    executor = TargetRecoveryToolExecutor(
+        repo_root=repo, clean_snapshot=repo, working_snapshot=repo,
+        goal_contracts=(goal,), run_root=tmp_path / "run",
+    )
+    probe = executor.write_probe(
+        "probe", "from api import value\nassert value(1) == 2\n",
+    )
+    registered = executor.register_observation_contract(
+        probe["probe_id"],
+        {"comparator": "EXIT_ZERO", "expected": "probe exits 0",
+         "observable": "exit status"},
+        requirement_id="goal", authority="B",
+    )
+
+    assert registered["grounded_goal_id"] == "goal"
+    assert registered["contract"]["expected"] == {"exit_code": 0}
+    assert executor.probes[probe["probe_id"]].contract.expected == {"exit_code": 0}
+
+
 def test_probe_command_is_self_contained_for_isolated_execution(tmp_path):
     executor = _executor(tmp_path)
     probe = executor.write_probe(
         "probe", "from api import value\nprint(value(1))\n",
     )
 
-    executor.run_probe_on_clean(probe["probe_id"])
+    result = executor.run_probe_on_clean(probe["probe_id"])
 
     trace = executor.probes[probe["probe_id"]].clean_runs[0]
     assert trace.command[:2] == ("python", "-c")
     assert str(executor.probes[probe["probe_id"]].source_path) not in trace.command
+    assert result["identity_valid"]
+    assert result["execution_identity"]["tree_hash"] == trace.tree_hash
+    assert "api.py" in result["execution_identity"]["project_module_files"]
 
 
 def test_agent_uses_required_tool_choice_and_finishes(tmp_path):
@@ -213,12 +245,7 @@ def test_recovery_protocol_registers_contract_before_paired_runs(tmp_path):
         transport, max_turns=8, timeout_seconds=30,
     ).recover(executor, {})
 
-    assert transport.forced == [
-        "write_probe", "register_observation_contract",
-        "run_probe_on_clean", "run_probe_on_clean",
-        "run_probe_on_working", "run_probe_on_working",
-        "finish_target_recovery",
-    ]
+    assert transport.forced == ["write_probe", "register_observation_contract"]
     recovered = next(iter(executor.probes.values()))
     assert recovered.contract is not None
     assert len(recovered.clean_runs) == 2

@@ -1,0 +1,27 @@
+{
+  "status": "INTERIM_COST_RESULT_NOT_COMPLETED",
+  "case_count": 20,
+  "cutoff_utc": "2026-09-20T09:42:08.182309+00:00",
+  "implementation_hash": "07987ce08d4462d44fd052977ae6dddd70470c4a42a26b86794c63bce458f2af",
+  "model": "deepseek-flash",
+  "temperature": 0,
+  "thinking": "disabled",
+  "seed": null,
+  "totals": {
+    "baseline_model_calls": 439,
+    "method_model_calls": 323,
+    "baseline_total_tokens": 6264375,
+    "method_total_tokens": 4428109
+  },
+  "model_call_reduction": 0.26423690205011385,
+  "token_reduction": 0.29312836476104953,
+  "counting_scope": "Selected successful generation attempt only; excludes archived attempts.",
+  "cohort_selection": "All 20 baseline results present at the recorded cutoff, matched by instance ID.",
+  "baseline_official_result": null,
+  "limitations": [
+    "Partial completion cohort, not a random sample.",
+    "Repair non-inferiority and full-cohort token reduction are not established.",
+    "Historical method arm has unequal retries and missing usage artifacts.",
+    "Reported controller REACHED is not official resolved."
+  ]
+}

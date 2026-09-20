@@ -1215,6 +1215,7 @@ class TraceBundle(SerializableRecord):
     cwd: str = "."
     environment: tuple[tuple[str, str], ...] = ()
     backend: str = "shared-executor"
+    execution_identity: dict[str, Any] = field(default_factory=dict)
     # Localization context copied from the first traced run. It is not
     # certification evidence and is ignored by semantic stability checks.
     events: tuple[Any, ...] = ()

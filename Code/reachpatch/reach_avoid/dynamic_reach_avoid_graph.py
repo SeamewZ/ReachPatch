@@ -72,7 +72,7 @@ class DynamicGraphBudget(SerializableRecord):
 
 @dataclass(frozen=True, slots=True)
 class SearchBudget(SerializableRecord):
-    branch_factor: int = 3
+    branch_factor: int = 1
     max_depth: int = 3
     max_evaluated_patch_nodes: int = 8
     max_children_per_causal_cut: int = 1
@@ -1269,11 +1269,31 @@ def rank_causal_cuts(graph: DynamicReachAvoidGraph, requirement_id: str, failure
                     for symbol in graph.nodes[node_id].metadata.get("target_symbols", ())}
     if failure and failure.symbol:
         target_names.add(failure.symbol)
+
+    def requirement_symbol_matches(node_symbol: str | None) -> bool:
+        """Bind a class requirement to its current method symbols.
+
+        Source refresh versions whole classes and their methods separately.
+        If the class span is retired after P0, an exact-only comparison leaves
+        a requirement such as ``RenameIndex`` with no current root even though
+        ``RenameIndex.database_backwards`` is the executed failure locus.
+        This is a qualified member relation, never a substring match.
+        """
+        candidate = str(node_symbol or "")
+        for declared in target_names:
+            declared = str(declared)
+            leaf = declared.rsplit(".", 1)[-1]
+            if candidate in {declared, leaf}:
+                return True
+            if candidate.startswith(declared + ".") or candidate.startswith(leaf + "."):
+                return True
+        return False
+
     roots = {node.node_id for node in graph.nodes.values()
              if node.kind is GraphNodeKind.SYMBOL
              and node.status not in {"RETIRED_SOURCE", "HISTORICAL_SOURCE"}
              and (requirement_id in node.metadata.get("requirement_ids", ())
-                  or node.symbol in target_names)}
+                  or requirement_symbol_matches(node.symbol))}
     scope = set(roots)
     # A bounded view of the same graph, not a new graph or repository scan.
     for _ in range(graph.budget.initial_caller_depth + 1):
@@ -1591,7 +1611,7 @@ def predicate_input_recipes(predicate: str) -> tuple[dict[str, Any], ...]:
 
 def materialize_graph_guided_challenges(repo_root: Path, graph: DynamicReachAvoidGraph, checkpoint: CheckpointState, observations: Sequence[Any]) -> tuple[ChallengeCell, ...]:
     """Generate bounded boundary probes from changed predicates and value flow."""
-    del repo_root
+    repo_root = Path(repo_root).resolve()
     commands: list[tuple[str, ...]] = []
     observed_check_ids: set[str] = set()
     for item in observations:
@@ -1679,6 +1699,17 @@ def materialize_graph_guided_challenges(repo_root: Path, graph: DynamicReachAvoi
                 if symbol:
                     variant_command = instantiate_probe_command(base_command, symbol.source_span, str(symbol.symbol), variant_input)
             challenge_id = stable_id("graph-challenge", checkpoint.checkpoint_id, branch.node_id, variant_input, variant_command)
+            if not variant_command:
+                gap_id = stable_id("missing-probe-adapter", checkpoint.checkpoint_id, branch.node_id)
+                if gap_id not in graph.nodes:
+                    graph.add_node(GraphNodeKind.OBLIGATION, node_id=gap_id,
+                        file=branch.file, status="MISSING_ADAPTER", metadata={
+                            "obligation_kind": "PROBE_ADAPTER_GAP", "source_branch_id": branch.node_id,
+                            "checkpoint_id": checkpoint.checkpoint_id,
+                            "source_exists": bool(branch.file and (repo_root / branch.file).is_file()),
+                            "reason": "NO_EXECUTABLE_PROBE_ADAPTER"})
+                    graph.add_edge(GraphEdgeKind.REQUIRES_VALIDATION, checkpoint.checkpoint_id, gap_id)
+                continue
             oracle = variant.get("oracle")
             authority = str(variant.get("authority", "PROVISIONAL")).upper()
             evidence_ids = tuple(variant.get("evidence_ids", ()))

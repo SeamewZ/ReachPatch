@@ -316,18 +316,21 @@ def all_reach_conditions_pass(
             return False
     required = {str(item) for item in required_goal_ids if str(item)}
     if required:
-        hard_target_results = tuple(
-            item for item in targets
+        hard_contract_results = tuple(
+            item for item in (*targets, *preservations)
             if str(getattr(item, "goal_id", "")) in required
+            and _trusted_authority(item)
         )
-        if not hard_target_results or not all(
+        if not hard_contract_results or not all(
             item.stable and item.status is CheckStatus.PASS
-            for item in hard_target_results
+            for item in hard_contract_results
         ):
             return False
         passed_goal_ids = {
             str(getattr(item, "goal_id", ""))
-            for item in targets if item.stable and item.status is CheckStatus.PASS
+            for item in (*targets, *preservations)
+            if item.stable and item.status is CheckStatus.PASS
+            and _trusted_authority(item)
         }
         if not required.issubset(passed_goal_ids):
             return False

@@ -9,7 +9,8 @@ import urllib.request
 from dataclasses import dataclass
 from typing import Any
 
-from reachpatch.models.base import canonical_json
+from reachpatch.models.base import canonical_json, content_hash
+from reachpatch.reach_avoid.evidence_context import compact_evidence_context
 from reachpatch.repair.execution_objective import InitialPatchObjective, RepairMode, RepairObjective
 
 from .execution_tools import RepairToolExecutor, TOOL_SCHEMAS
@@ -17,16 +18,12 @@ from .execution_tools import RepairToolExecutor, TOOL_SCHEMAS
 
 @dataclass(frozen=True, slots=True)
 class DeepSeekConfig:
-    initial_generator_max_turns: int = 24
-    revision_generator_max_turns: int = 20
-    revision_generator_turn_limit: int = 20
-    root_recovery_max_turns: int = 28
+    initial_generator_max_turns: int = 10
+    revision_generator_max_turns: int = 6
     initial_generator_wall_time_s: float = 1200.0
     revision_generator_wall_time_s: float = 1200.0
-    root_recovery_wall_time_s: float = 1800.0
-    initial_generator_token_budget: int = 32768
-    revision_generator_token_budget: int = 32768
-    root_recovery_token_budget: int = 32768
+    initial_generator_token_budget: int = 4096
+    revision_generator_token_budget: int = 4096
     # Keep the phase wall-clock budgets large enough for recovery while
     # bounding one stalled provider request so a sibling checkpoint can run.
     provider_request_timeout_seconds: float = 180.0
@@ -133,6 +130,40 @@ class DeepSeekAgent:
             ]
         return value
 
+    @staticmethod
+    def _prompt_validation_status(tools: RepairToolExecutor) -> dict[str, Any]:
+        """Return validation state without duplicating inline probe programs.
+
+        The exact active failing command already appears first in the repair
+        objective.  ``pending_commands`` can contain the same multi-kilobyte
+        ``python -c`` probe plus every preservation selector; serializing it
+        again made context compaction larger than the original request.  The
+        model only needs queue identity/status here.  The executor retains the
+        complete commands and runs them after an edit.
+        """
+        status = tools.validation_status()
+        command_refs = tuple({
+            "argv0": str(command[0]) if command else "",
+            "selector": next((
+                str(part) for part in reversed(command)
+                if len(str(part)) <= 240 and "\n" not in str(part)
+            ), "<inline-program>"),
+            "command_hash": content_hash(command),
+            "argument_count": len(command),
+        } for command in status.get("pending_commands", ())[:24])
+        return {
+            key: value for key, value in status.items()
+            if key not in {"pending_commands", "outcomes"}
+        } | {
+            "pending_command_refs": command_refs,
+            "outcomes": tuple({
+                "check_id": item.get("check_id"),
+                "status": item.get("status"),
+                "stable": item.get("stable"),
+                "failure_stage": item.get("failure_stage"),
+            } for item in status.get("outcomes", ())[:24]),
+        }
+
     @classmethod
     def _bound_messages(
         cls,
@@ -141,65 +172,56 @@ class DeepSeekAgent:
         tools: RepairToolExecutor,
         source_contexts: dict[str, dict[str, Any]],
         *,
-        max_chars: int = 220_000,
+        max_chars: int = 48000,
     ) -> list[dict[str, Any]]:
-        """Keep provider requests bounded while retaining executable state.
+        """Rebuild a short request from current state, never truncate a contract.
 
-        Tool transcripts are useful for local diagnosis but are not durable
-        state: the staging tree and the structured objective are authoritative.
-        Once a transcript grows beyond the provider context budget, start a
-        fresh protocol turn with a compact evidence summary.  This also avoids
-        orphaned ``tool`` messages after old assistant tool calls are dropped.
+        All raw tool replies remain in generator artifacts. Old exploratory
+        conversation is replaceable; the issue, full working diff, exact failure
+        and relevant current source are not.
         """
-        def size(items: list[dict[str, Any]]) -> int:
-            return len(canonical_json(items))
-
-        if size(messages) <= max_chars:
+        if len(messages) < 8 and len(canonical_json(messages)) <= max_chars:
             return messages
-        current_incremental = tools.inspect_incremental_diff()
-        current_cumulative = tools.inspect_diff()
-        validation = cls._compact(
-            tools.validation_status(), string_limit=1400,
-        )
-        recent_tools: list[dict[str, Any]] = []
-        for item in messages[-12:]:
-            role = item.get("role")
-            if role == "tool":
-                recent_tools.append({
-                    "role": role,
-                    "tool_call_id": item.get("tool_call_id"),
-                    "content": cls._compact(item.get("content", ""), string_limit=1600),
-                })
-            elif role == "assistant":
-                calls = item.get("tool_calls") or ()
-                recent_tools.append({
-                    "role": role,
-                    "tool_calls": tuple({
-                        "id": call.get("id"),
-                        "function": {"name": call.get("function", {}).get("name")},
-                    } for call in calls),
-                })
-            elif role == "user":
-                recent_tools.append({
-                    "role": role,
-                    "content": cls._compact(item.get("content", ""), string_limit=1200),
-                })
-        summary = cls._convergence_prompt(
-            objective,
-            current_incremental,
-            current_cumulative,
-            source_contexts,
-            validation,
-            1,
-            tuple(tools.state.generator_session.attempt_history[-8:]),
-        )
+        current_sources = {}
+        source_items = list(source_contexts.items())
+        # Early reads are normally the graph-ranked target and its imports;
+        # late reads are exploratory. Keep both instead of allowing recency to
+        # evict the target exactly when editing becomes mandatory.
+        selected_source_items = source_items[:1]
+        if len(source_items) > 1:
+            selected_source_items.extend(source_items[-1:])
+        selected_source_items = list(dict(selected_source_items).items())
+        for key, span in selected_source_items:
+            path = str(span["path"])
+            try:
+                selected = tools.read_file(path, span.get("start_line", 1),
+                                           span.get("end_line", 240))
+                content = str(selected.get("content", ""))
+                if len(content) > 2500:
+                    selected = {**selected, "content": content[:2500],
+                                "omitted_chars": len(content) - 2500}
+                current_sources[key] = selected
+            except (OSError, ValueError) as error:
+                current_sources[key] = {"source_unavailable": str(error)}
+        if isinstance(objective, InitialPatchObjective) and current_sources:
+            from dataclasses import replace
+            objective = replace(objective, graph_context={"source": "current source below"})
         compact = [
-            {"role": "system", "content": "You are the Repair Player in an execution-driven Reach-Avoid loop. Work only from the exact executable failure and typed Oracle."},
-            {"role": "user", "content": summary + "\nRecent bounded tool transcript:\n" + canonical_json(recent_tools)},
+            messages[0],
+            {"role": "user", "content": cls._prompt(
+                objective, ()) +
+                "\\nCURRENT SOURCE READS:\\n" + canonical_json(current_sources) +
+                "\\nVALIDATION:\\n" + canonical_json(cls._prompt_validation_status(tools)) +
+                "\\nLATEST TOOL EVIDENCE:\\n" + canonical_json(cls._compact([
+                    item for item in messages[-4:] if item.get("role") == "tool"
+                ][-1:], string_limit=1000))},
         ]
-        # Keep the invariant explicit if future context fields grow.
-        if size(compact) > max_chars:
-            compact[1]["content"] = compact[1]["content"][:max_chars - 256] + "\n[context truncated]"
+        if len(canonical_json(compact)) > max_chars:
+            from reachpatch.execution.case_budget import CaseBudgetExhausted
+            raise CaseBudgetExhausted("MANDATORY_CONTEXT_EXCEEDS_LIMIT")
+        tools.state.dynamic_failure_graph.record_update("CONTEXT_HISTORY_ELIDED",
+            original_chars=len(canonical_json(messages)), sent_chars=len(canonical_json(compact)),
+            objective_id=objective.objective_id)
         return compact
 
     @classmethod
@@ -236,7 +258,9 @@ class DeepSeekAgent:
                     selected_ids.update((edge.source_id, edge.target_id))
             selected_nodes = (
                 [node for node in nodes.values() if node.node_id in selected_ids]
-                if selected_ids else list(nodes.values())
+                if selected_ids else [node for node in nodes.values()
+                    if str(node.kind) in {"SYMBOL", "BRANCH", "VALUE"}
+                    and node.file in {span.path for span in objective.relevant_source_slices}]
             )
             selected_node_ids = {node.node_id for node in selected_nodes}
             dynamic_context = {
@@ -246,12 +270,14 @@ class DeepSeekAgent:
                 "nodes": tuple({
                     "kind": str(node.kind), "path": getattr(node, "path", getattr(node, "file", None)),
                     "symbol": getattr(node, "symbol", None), "start_line": getattr(node, "start_line", getattr(node, "line_start", 0)),
-                    "end_line": getattr(node, "end_line", getattr(node, "line_end", 0)), "source_span": getattr(node, "source_span", ""),
+                    "end_line": getattr(node, "end_line", getattr(node, "line_end", 0)),
                     "authority": getattr(node, "authority", ""), "status": getattr(node, "status", ""),
-                    "metadata": getattr(node, "metadata", {}),
+                    "source_span": str(getattr(node, "source_span", ""))[:2500],
+                    "metadata": {key: value for key, value in node.metadata.items()
+                                 if key in {"predicate", "defines", "uses", "branch_outcome", "safe_local_summary"}},
                 } for node in sorted(
                     selected_nodes, key=lambda item: (getattr(item, "distance", 0), getattr(item, "path", getattr(item, "file", "")) or "", getattr(item, "start_line", getattr(item, "line_start", 0))),
-                )[:32]),
+                )[:8]),
                 "edges": tuple({
                     "kind": str(edge.kind),
                     "source": nodes.get(edge.source_id).symbol if nodes.get(edge.source_id) else None,
@@ -261,13 +287,13 @@ class DeepSeekAgent:
                     "trace_ids": edge.trace_ids,
                     "evidence_ids": edge.evidence_ids,
                 } for edge in graph.edges.values()
-                if edge.active and edge.source_id in selected_node_ids and edge.target_id in selected_node_ids)[:64],
+                if edge.active and edge.source_id in selected_node_ids and edge.target_id in selected_node_ids)[:24],
                 "frontier": tuple({
                     "reason": getattr(item, "reason", ""), "path": getattr(item, "path", None),
                     "symbol": getattr(item, "symbol", None), "depth": getattr(item, "depth", 0),
                     "boundary_node_ids": getattr(item, "boundary_node_ids", ()),
                     "omitted_relation_kinds": getattr(item, "omitted_relation_kinds", ()),
-                } for item in getattr(graph, "frontier", getattr(graph, "frontiers", ()))[:24]),
+                } for item in getattr(graph, "frontier", getattr(graph, "frontiers", ()))[:8]),
                 "expanded_depth": getattr(graph, "expanded_depth", getattr(graph, "revision", 0)),
             }
         return {
@@ -285,650 +311,204 @@ class DeepSeekAgent:
                 and hasattr(objective.repair_hypothesis, "to_dict")
                 else getattr(objective, "repair_hypothesis", None)
             ),
-            "graph_source_spans": getattr(objective, "graph_source_spans", ()),
+            "graph_source_spans": cls._compact(
+                tuple(getattr(objective, "graph_source_spans", ()))[:4],
+                string_limit=2500,
+            ),
             "hypothesis_feedback": getattr(objective, "hypothesis_feedback", ()),
             "exploratory_observations": getattr(objective, "exploratory_observations", ()),
-            "dynamic_failure_context": cls._compact(dynamic_context, string_limit=12000),
+            "dynamic_failure_context": cls._compact(dynamic_context, string_limit=2500),
             "objective_id": objective.objective_id,
             "repair_mode": objective.mode,
-            "active_failure": cls._compact(
-                failure.to_dict() if hasattr(failure, "to_dict") else failure,
-                string_limit=12000,
-            ),
-            "stdout": cls._compact(objective.stdout, string_limit=8000),
-            "stderr": cls._compact(objective.stderr, string_limit=8000),
+            "active_failure": {"failure_id": failure.failure_id, "kind": str(failure.kind)},
+            "stdout": cls._compact(objective.stdout, string_limit=4000),
+            "stderr": cls._compact(objective.stderr, string_limit=4000),
             "current_patch_hash": objective.current_patch_hash,
             "relevant_source_slices": cls._compact(
-                tuple(item.to_dict() for item in objective.relevant_source_slices),
-                string_limit=5000,
+                tuple(item.to_dict() for item in objective.relevant_source_slices[:2]),
+                string_limit=2500,
             ),
-            "changed_hunks": cls._compact(
-                tuple(item.to_dict() for item in objective.changed_hunks),
-                string_limit=3000,
-            ),
-            "locked_checks": tuple(item.to_dict() for item in objective.locked_checks),
-            "preservation_checks": tuple(item.to_dict() for item in objective.preservation_checks),
+            "locked_checks": tuple({
+                "check_id": item.check_id,
+                "role": str(item.role),
+                "authority": item.authority,
+                "selector": next((str(part) for part in reversed(item.command)
+                                  if len(str(part)) <= 240 and "\n" not in str(part)),
+                                 "<inline-program>"),
+            } for item in objective.locked_checks[:12]),
+            "preservation_checks": tuple({
+                "check_id": item.check_id,
+                "authority": item.authority,
+                "selector": next((str(part) for part in reversed(item.command)
+                                  if len(str(part)) <= 240 and "\n" not in str(part)),
+                                 "<inline-program>"),
+            } for item in objective.preservation_checks[:12]),
             "mechanical_blockers": tuple(item.to_dict() for item in objective.mechanical_blockers),
-            "previous_attempts": tuple(item.to_dict() for item in objective.previous_attempts),
             "forbidden_repeated_mechanisms": objective.forbidden_repeated_mechanisms,
             "hypothesis_id": getattr(objective, "hypothesis_id", None),
-            "attempt_history": cls._compact(attempt_history[-8:], string_limit=1200),
+            "attempt_history": tuple({key: value for key, value in item.items()
+                if key in {"result_kind", "error_kind", "active_failure_id", "changed_files"}}
+                for item in attempt_history[-3:]),
         }
 
     @classmethod
-    def _prompt(
-        cls,
-        objective: RepairObjective | InitialPatchObjective,
-        attempt_history: tuple[dict[str, Any], ...] = (),
-    ) -> str:
-        revision = objective.objective_kind != "INITIAL_PATCH"
-        retry_marker = os.environ.get("REACHPATCH_RA51_ATTEMPT", "1")
-        retry_guidance = (
-            f"This is independent generation retry {retry_marker}. The previous "
-            "case-level attempt did not produce an acceptable patch. Do not repeat "
-            "its rejected algorithm or exact diff; derive a materially different, "
-            "executable repair from the issue and current source.\n"
-            if retry_marker != "1" else ""
-        )
+    def _prompt(cls, objective: RepairObjective | InitialPatchObjective,
+                attempt_history: tuple[dict[str, Any], ...] = ()) -> str:
+        retry = os.environ.get("REACHPATCH_RA51_ATTEMPT", "1")
+        retry_guidance = (f"Independent generation retry {retry}: do not repeat a rejected algorithm or exact diff. "
+                          if retry != "1" else "")
         return (
-            "You are the Repair Player in an execution-driven Reach-Avoid loop. "
-            "Work on the current working tree with the supplied tools and return exactly "
-            "one tool call per turn. The exact executable failure and typed Oracle are the source of truth. The unified dynamic graph selected the causal cut and repair hypothesis for this child; do not substitute a different mechanism without recording why the selected graph evidence is contradicted. The graph never grants Oracle authority. "
-            + (
-                "The cumulative diff is already applied to the working tree; submit only "
-                "incremental edits. " if revision else
-                "Inspect the relevant causal slice and execution contract before making "
-                "the initial behavioral edit. "
-            )
-            + "You are creating an independent child from the specified parent checkpoint. The complete base-to-parent diff is already applied. Do not reset to clean, do not inherit a sibling, and do not overwrite sibling work. Implement only the specified causal hypothesis and return a complete base-to-child diff. Edit the existing working tree and preserve its complete cumulative diff; do not generate an independent patch. Read the exact failure command, Oracle, actual observation, stdout/stderr, traceback and current source before changing code. Close only this one ActiveFailure in the current revision. "
-            + "For apply_patch, send either a complete git unified diff starting with 'diff --git' and containing ---/+++/@@ hunks, or a complete structured action starting with '*** Begin Patch' and ending with '*** End Patch'. Never send a prose explanation, markdown without a patch body, or a partial hunk. "
-            + "Use the allowed source slices, reproduce every grounded observation, and "
-            "preserve locked target and preservation behavior. A patch must change executable "
-            "behavior, not only comments, whitespace, or an unchanged excerpt. Never use "
-            "model wording as a mechanism identity: failed mechanism records are keyed by "
-            "actual diff and execution facts. finish_revision is valid only after every grounded "
-            "validation has executed to a terminal observation; a stable FAIL may be submitted "
-            "for stage/distance comparison, while UNKNOWN or BLOCKED is not progress. "
-            "If a protected target passes while preservation fails, make one cumulative edit "
-            "that repairs the preservation consumer and retains the target. "
-            "Do not delete target behavior, weaken inputs, modify tests, or swallow exceptions to obtain a surface pass. When target progress and a regression coexist, retain the target mechanism and repair the regression in the same cumulative edit. "
-            "The hypothesis includes predicted path changes, distinguishing input partitions and falsification conditions. Use these to test this mechanism, not to invent expected outputs. Sibling disagreements and oracle mutation survivors are diagnostic evidence, never majority-vote oracles or proof of correctness. Review measured feedback on prior mechanisms before editing. "
-            "read_file, search_symbol, inspect_diff, and inspect_incremental_diff are "
-            "available whenever needed to understand a failed observation.\n"
-            + retry_guidance
-            + canonical_json(cls._repair_context(objective, attempt_history))
+            "Make one minimal behavior-changing edit for this issue or the specified evidence-backed hypothesis. "
+            "The working tree already contains the full base-to-parent diff. Never reset it or inherit sibling edits. "
+            "Use actual source and public contracts; a missing oracle does not justify inventing expected behavior. "
+            "Read omitted source lines before editing. Return one tool call per turn. "
+            "apply_patch accepts complete git unified diff or *** Begin Patch actions. "
+            "Do not modify tests, swallow exceptions, weaken inputs, or remove locked successful behavior. "
+            "After one edit the controller validates and decides whether another repair is warranted; "
+            "do not spend calls submitting or self-scoring. Reuse evidence rather than repeat diagnostics.\\n"
+            + retry_guidance + canonical_json(cls._repair_context(objective, attempt_history))
         )
-
-    @classmethod
-    def _convergence_prompt(
-        cls,
-        objective: RepairObjective | InitialPatchObjective,
-        current_incremental_diff: dict[str, Any],
-        current_cumulative_diff: dict[str, Any],
-        source_contexts: dict[str, dict[str, Any]],
-        validation_status: dict[str, Any],
-        remaining_turns: int,
-        attempt_history: tuple[dict[str, Any], ...] = (),
-    ) -> str:
-        retry_marker = os.environ.get("REACHPATCH_RA51_ATTEMPT", "1")
-        retry_guidance = (
-            f"Independent case-level retry {retry_marker}: use a materially different "
-            "repair strategy from any prior failed attempt.\n"
-            if retry_marker != "1" else ""
-        )
-        preferred_paths = {
-            item.path for item in getattr(objective, "relevant_source_slices", ())
-        }
-        observed = [
-            value for path, value in source_contexts.items()
-            if path in preferred_paths
-            or not any(part in {"test", "tests"} for part in path.split("/"))
-        ][-4:]
-        turn_label = "Eight" if remaining_turns == 8 else str(remaining_turns)
-        repair_contract = cls._repair_context(objective, attempt_history)
-        # The live tree may have changed since the objective was compiled;
-        # replace the objective snapshot instead of serializing two diffs.
-        repair_contract["current_cumulative_diff"] = current_cumulative_diff.get(
-            "canonical_diff", objective.current_full_diff,
-        )
-        diff_instruction = (
-            "The cumulative diff is already present; submit only an incremental hunk "
-            "with exact current-source context. "
-            if str(current_cumulative_diff.get("canonical_diff", "")).strip() else
-            "No edit exists yet. Submit the smallest executable unified diff now, using "
-            "exact current-source context. "
-        )
-        return (
-            f"{turn_label} tool turns remain. Converge using the same full repair contract. "
-            "Make the smallest evidence-grounded causal edit, but you may read a required "
-            "source slice, inspect a trace/diff, or run a grounded validation before editing. "
-            "After a successful edit inspect_diff and finish_revision when validations are "
-            "satisfied. "
-            "Any apply_patch call must contain a complete git unified diff or a complete "
-            "*** Begin Patch ... *** End Patch structured action, with exact current-source "
-            "context; never submit prose or a partial hunk. "
-            + diff_instruction
-            + "\n"
-            + retry_guidance
-            + canonical_json({
-                "repair_contract": repair_contract,
-                "current_incremental_diff": current_incremental_diff,
-                "grounded_validation_status": validation_status,
-                "observed_source_contexts": observed,
-            })
-        )
-
-    @staticmethod
-    def _diff_from_content(content: str) -> str | None:
-        match = re.search(r"```(?:diff|patch)\s*\n(.*?)```", content, re.DOTALL)
-        if match:
-            return match.group(1).strip() + "\n"
-        if content.lstrip().startswith("diff --git "):
-            return content.strip() + "\n"
-        return None
-
-    def revise(
-        self,
-        objective: RepairObjective | InitialPatchObjective,
-        tools: RepairToolExecutor,
-        *,
-        initial: bool = False,
-    ) -> dict[str, Any]:
-        messages: list[dict[str, Any]] = [
-            {"role": "system", "content": "You are the Repair Player in an execution-driven Reach-Avoid loop. Work only from the exact executable failure and typed Oracle."},
-            {"role": "user", "content": self._prompt(
-                objective,
-                tuple(tools.state.generator_session.attempt_history[-8:]),
-            )},
+    def revise(self, objective: RepairObjective | InitialPatchObjective,
+               tools: RepairToolExecutor, *, initial: bool = False) -> dict[str, Any]:
+        """One evidence-bound edit. Validation and submission need no LLM turn."""
+        messages = [
+            {"role": "system", "content": "Repair the supplied issue using repository evidence. Do not modify tests or invent expected behavior."},
+            {"role": "user", "content": self._prompt(objective)},
         ]
-        max_turns = (
-            self.config.initial_generator_max_turns if initial
-            else (
-                self.config.root_recovery_max_turns
-                if getattr(objective, "mode", None) is RepairMode.RECOVER_ROOT_CAUSE
-                else (
-                    self.config.revision_generator_turn_limit
-                    if self.config.revision_generator_max_turns == 12
-                    else self.config.revision_generator_max_turns
-                )
-            )
-        )
-        timeout = (
-            self.config.initial_generator_wall_time_s if initial
-            else (
-                self.config.root_recovery_wall_time_s
-                if getattr(objective, "mode", None) is RepairMode.RECOVER_ROOT_CAUSE
-                else self.config.revision_generator_wall_time_s
-            )
-        )
-        tokens = (
-            self.config.initial_generator_token_budget if initial
-            else (
-                self.config.root_recovery_token_budget
-                if getattr(objective, "mode", None) is RepairMode.RECOVER_ROOT_CAUSE
-                else self.config.revision_generator_token_budget
-            )
-        )
-        recovery_used = False
-        mechanism = "causal_edit"
-        refresh_after_apply_failure = False
-        force_convergence = False
-        convergence_prompted = False
-        rejected_patches: set[str] = {
-            objective.current_full_diff
-        } if objective.current_full_diff.strip() else set()
-        duplicate_rejection_count = 0
-        no_op_rejection_count = 0
-        rejected_finished_revision = False
+        turns = self.config.initial_generator_max_turns if initial else self.config.revision_generator_max_turns
+        tokens = self.config.initial_generator_token_budget if initial else self.config.revision_generator_token_budget
+        wall = self.config.initial_generator_wall_time_s if initial else self.config.revision_generator_wall_time_s
+        deadline = time.monotonic() + wall
         source_contexts: dict[str, dict[str, Any]] = {}
-        last_tool_signature: str | None = None
-        repeated_tool_streak = 0
-        force_patch_next = False
-        turn = 0
-        turn_limit = max_turns
-        convergence_turns = 12 if initial and max_turns >= 20 else 8
-        deadline = time.monotonic() + timeout
-        while turn < turn_limit and time.monotonic() < deadline:
-            current_incremental = tools.inspect_incremental_diff()
-            current_cumulative = tools.inspect_diff()
-            has_incremental = bool(
-                current_incremental.get("canonical_diff", "").strip()
-            )
-            has_cumulative = bool(
-                current_cumulative.get("canonical_diff", "").strip()
-            )
-            committable_revision = has_incremental and has_cumulative
-            validation = tools.validation_status()
-            if (
-                committable_revision
-                and validation["required_count"]
-                and validation["pending_commands"]
-            ):
-                result = tools.run_allowed_public_check(
-                    validation["pending_commands"][0]
-                )
-                messages.append({
-                    "role": "user",
-                    "content": (
-                        "Reach-Avoid deterministically executed the next executable "
-                        "validation for the current cumulative patch. Preserve every "
-                        "SATISFIED observation and repair every FAILED observation before "
-                        "finishing:\n" + canonical_json(result)
-                    ),
-                })
-                continue
-            turn += 1
-            remaining_turns = turn_limit - turn + 1
-            # Tool phases describe what may finish the revision, not what the
-            # model may inspect.  Diagnosis remains available after a rejected
-            # edit and during convergence so the next patch can be causal.
-            finish_allowed = bool(
-                committable_revision
-                and (not validation["required_count"] or validation["ready"])
-                and not tools.cumulative_patch_rejected(
-                    str(current_cumulative.get("patch_hash", ""))
-                )
-            )
-            available_tools = tuple(
-                schema for schema in TOOL_SCHEMAS
-                if finish_allowed or schema["function"]["name"] != "finish_revision"
-            )
-            tool_choice: str | dict[str, Any] = "required"
-            force_patch = bool(
-                not committable_revision
-                and (
-                    force_patch_next
-                    or (remaining_turns <= 4 and bool(source_contexts))
-                    or remaining_turns == 1
-                )
-            )
-            if force_patch:
-                available_tools = tuple(
-                    schema for schema in available_tools
-                    if schema["function"]["name"] == "apply_patch"
-                )
-                tool_choice = {
-                    "type": "function",
-                    "function": {"name": "apply_patch"},
-                }
-            elif remaining_turns == 1 and finish_allowed:
-                tool_choice = {
-                    "type": "function",
-                    "function": {"name": "finish_revision"},
-                }
-            if not convergence_prompted and (
-                force_convergence or remaining_turns <= convergence_turns
-            ):
-                messages = [
-                    {
-                        "role": "system",
-                        "content": "You are the Repair Player in an execution-driven Reach-Avoid loop. Follow the selected causal cut and repair hypothesis from the unified dynamic graph; executable observations remain the only certification evidence.",
-                    },
-                    {
-                        "role": "user",
-                        "content": self._convergence_prompt(
-                            objective, current_incremental, current_cumulative,
-                            source_contexts,
-                            tools.validation_summary(),
-                            remaining_turns,
-                            tuple(tools.state.generator_session.attempt_history[-8:]),
-                        ),
-                    },
-                ]
-                convergence_prompted = True
-            elif remaining_turns == 1:
-                current = tools.inspect_diff()
-                if current.get("canonical_diff", "").strip():
-                    messages.append({
-                        "role": "user",
-                        "content": (
-                            "Final turn: a non-empty cumulative diff exists. Call "
-                            "finish_revision now; do not read or search again."
-                        ),
-                    })
-            try:
-                request_tokens = (
-                    self.config.root_recovery_token_budget
-                    if recovery_used else tokens
-                )
-                request_started = time.monotonic()
-                messages = self._bound_messages(
-                    messages, objective, tools, source_contexts,
-                )
-                message = self.transport.complete(
-                    messages, tools=available_tools, max_tokens=request_tokens,
-                    timeout_seconds=min(
-                        self.config.provider_request_timeout_seconds,
-                        max(1.0, deadline - time.monotonic()),
-                    ),
-                    tool_choice=tool_choice,
-                )
-            except (urllib.error.URLError, TimeoutError, KeyError, ValueError, json.JSONDecodeError) as exc:
-                if recovery_used:
-                    return {"error_kind": type(exc).__name__, "summary": str(exc), "recovery_used": True}
-                recovery_used = True
-                turn_limit = max(turn_limit, self.config.root_recovery_max_turns)
-                deadline = max(deadline, time.monotonic() + self.config.root_recovery_wall_time_s)
-                if isinstance(exc, urllib.error.HTTPError) and exc.code == 400:
-                    messages = [
-                        {
-                            "role": "system",
-                            "content": "You are the Repair Player in an execution-driven Reach-Avoid loop. Follow the selected causal cut and repair hypothesis from the unified dynamic graph; executable observations remain the only certification evidence.",
-                        },
-                        {
-                            "role": "user",
-                            "content": self._convergence_prompt(
-                                objective, current_incremental, current_cumulative,
-                                source_contexts, tools.validation_summary(),
-                                remaining_turns,
-                                tuple(tools.state.generator_session.attempt_history[-8:]),
-                            ),
-                        },
-                    ]
-                    convergence_prompted = True
-                else:
-                    messages.append({
-                        "role": "user",
-                        "content": "Return one valid tool call. The working patch is preserved; inspect a local source slice if needed.",
-                    })
-                continue
-            force_patch_next = False
-            finish_reason = message.pop("_finish_reason", None)
-            request_id = message.pop("_request_id", None)
-            usage = message.pop("_usage", {})
-            if request_id:
-                phase_name = (
-                    "initial" if initial else
-                    "root_recovery" if recovery_used or getattr(objective, "mode", None) is RepairMode.RECOVER_ROOT_CAUSE
-                    else f"revision:{tools.state.revision_count}"
-                )
-                tools.state.generator_session.conversation.append({
-                    "role": "model_request",
-                    "request_id": str(request_id),
-                    "objective_id": objective.objective_id,
-                    "phase": phase_name,
-                    "phase_key": (
-                        "case:initial" if phase_name == "initial" else
-                        f"case:root_recovery:{tools.state.revision_count + 1}"
-                        if phase_name == "root_recovery" else
-                        f"case:revision:{tools.state.revision_count + 1}"
-                    ),
-                    "graph_hash": (
-                        objective.dynamic_failure_graph.digest()
-                        if isinstance(objective, RepairObjective)
-                        and objective.dynamic_failure_graph is not None
-                        and hasattr(objective.dynamic_failure_graph, "digest") else
-                        getattr(objective, "graph_context", {}).get("graph_hash")
-                        if isinstance(getattr(objective, "graph_context", None), dict) else None
-                    ),
-                    "causal_cut_ids": getattr(objective, "causal_cut_ids", ()),
-                    "graph_source_spans": getattr(objective, "graph_source_spans", ()),
-                    "graph_node_ids_used": getattr(objective, "causal_cut_ids", ()),
-                    "source_spans_used": getattr(objective, "graph_source_spans", ()),
-                    "finish_reason": finish_reason,
-                    "token_usage": usage,
-                    "wall_time_seconds": time.monotonic() - request_started,
-                })
-                graph = getattr(tools.state, "dynamic_failure_graph", None)
-                graph_context_used = bool(
-                    getattr(objective, "graph_source_spans", ())
-                    or getattr(objective, "graph_context", None)
-                )
-                if graph is not None and graph_context_used:
-                    graph.metrics["model_calls_with_graph_source_context"] = (
-                        int(graph.metrics.get("model_calls_with_graph_source_context", 0)) + 1
-                    )
-            messages.append(message)
-            if finish_reason == "length":
-                # The tree is authoritative.  Keep a partial cumulative edit
-                # and give the same frontier one bounded context-compression
-                # recovery turn instead of clearing or sealing the patch.
-                recovery_used = True
-                turn_limit = max(turn_limit, self.config.root_recovery_max_turns)
-                deadline = max(deadline, time.monotonic() + self.config.root_recovery_wall_time_s)
-                messages.append({
-                    "role": "user",
-                    "content": (
-                        "The provider response was truncated. Preserve the current working "
-                        "patch, compress context to the selected frontier and continue "
-                        "with exactly one executable tool call."
-                    ),
-                })
-                continue
-            tool_calls = message.get("tool_calls") or ()
-            allowed_tool_names = {
-                schema["function"]["name"] for schema in available_tools
-            }
-            if not tool_calls:
-                content = str(message.get("content") or "")
-                patch = self._diff_from_content(content)
-                if patch:
-                    try:
-                        tools.invoke("apply_patch", {"patch": patch})
-                        tools.invoke("finish_revision", {
-                            "summary": "Applied model-provided unified diff",
-                            "mechanism": mechanism,
-                        })
-                    except (ValueError, KeyError, TypeError, OSError, RuntimeError) as exc:
-                        rejected_patches.add(patch)
-                        force_convergence = True
-                        messages.append({
-                            "role": "user",
-                            "content": (
-                                "The prose diff was rejected and the pre-call working tree "
-                                "was restored. Return one valid, materially different "
-                                "apply_patch tool call grounded in the current observations: "
-                                f"{exc}"
-                            ),
-                        })
-                        continue
-                    break
-                if recovery_used:
-                    force_convergence = True
-                    continue
-                recovery_used = True
-                turn_limit = max(turn_limit, self.config.root_recovery_max_turns)
-                messages.append({
-                    "role": "user",
-                    "content": "Use a valid tool call; do not replace the response with prose.",
-                })
-                continue
-            executed_call = False
-            deferred_calls = False
-            turn_followups: list[str] = []
-            for call in tool_calls:
+        attempted: dict[str, Any] = {}
+        graph = tools.state.dynamic_failure_graph
+        mechanism = getattr(getattr(objective, "repair_hypothesis", None), "proposed_mechanism", "initial_issue_repair")
+        diagnostic_tools = tuple(schema for schema in TOOL_SCHEMAS
+                                 if schema["function"]["name"] not in {"finish_revision", "run_allowed_public_check"})
+        patch_tools = tuple(schema for schema in diagnostic_tools
+                            if schema["function"]["name"] == "apply_patch")
+        # A larger case budget permits retries and later hypotheses; it must
+        # not turn one evidence question into dozens of source-reading calls.
+        # Initial localization gets at most twelve diagnostic turns and a
+        # hypothesis-bound revision at most six before an edit is required.
+        diagnostic_turn_limit = max(2, min(turns - 1, 12 if initial else 6))
+        patch_required_announced = False
+        patch_apply_failures = 0
+        for turn in range(turns):
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                return {"error_kind": "ACTION_WALL_BUDGET", "summary": "No edit within action budget", "mechanism": mechanism}
+            messages = self._bound_messages(messages, objective, tools, source_contexts)
+            available = diagnostic_tools
+            if turn >= diagnostic_turn_limit:
+                available = patch_tools
+                if not patch_required_announced:
+                    messages.append({"role": "user", "content": (
+                        "The bounded evidence-collection phase is complete. Use the source evidence already "
+                        "present to apply one minimal production-code patch now. Do not request more source, "
+                        "do not edit tests, and preserve behavior outside the stated contract."
+                    )})
+                    patch_required_announced = True
+            packet = compact_evidence_context(graph, messages, scope=objective.objective_id)
+            started = time.monotonic()
+            message = self.transport.complete(list(packet.messages), tools=available, max_tokens=tokens,
+                timeout_seconds=min(self.config.provider_request_timeout_seconds, remaining),
+                tool_choice="required")
+            graph.record_update("MODEL_CALL", objective_id=objective.objective_id,
+                checkpoint_id=tools.state.working_checkpoint.checkpoint_id,
+                hypothesis_id=getattr(objective, "hypothesis_id", None),
+                graph_hash=graph.digest(), graph_evidence_ids=packet.evidence_ids,
+                source_paths=tuple(source_contexts), request_id=message.get("_request_id"),
+                finish_reason=message.get("_finish_reason"), usage=message.get("_usage", {}),
+                wall_seconds=time.monotonic() - started, turn=turn)
+            calls = message.get("tool_calls") or ()
+            if not calls:
+                return {"error_kind": "MISSING_TOOL_CALL", "summary": str(message.get("content", ""))[:1000],
+                        "mechanism": mechanism}
+            messages.append({key: value for key, value in message.items()
+                             if key in {"role", "content", "tool_calls", "reasoning_content"}})
+            edited = False
+            for index, call in enumerate(calls):
                 function = call.get("function", {})
                 name = str(function.get("name", ""))
-                followup = ""
-                arguments: dict[str, Any] = {}
-                duplicate_patch = False
-                if executed_call:
-                    deferred_calls = True
-                    messages.append({
-                        "role": "tool",
-                        "tool_call_id": str(call.get("id", name)),
-                        "content": canonical_json({
-                            "error": "DeferredToolCall",
-                            "detail": (
-                                "Only the first tool call in a turn is executed because "
-                                "each edit can change the valid Reach-Avoid tool phase."
-                            ),
-                        }),
-                    })
-                    continue
-                executed_call = True
-                try:
-                    arguments = json.loads(function.get("arguments") or "{}")
-                    signature = canonical_json({"name": name, "arguments": arguments})
-                    if signature == last_tool_signature:
-                        repeated_tool_streak += 1
-                    else:
-                        last_tool_signature = signature
-                        repeated_tool_streak = 1
-                    if repeated_tool_streak >= 3 and name not in {"apply_patch", "finish_revision"}:
-                        force_patch_next = True
-                        followup = (
-                            "The same diagnostic tool call has been repeated three times. "
-                            "Stop searching and apply the smallest causal patch now; "
-                            "the next turn must use apply_patch on the current source."
-                        )
-                    if name not in allowed_tool_names:
-                        raise ValueError(
-                            f"{name or '<empty>'} is not allowed in this tool phase; "
-                            f"choose one of {sorted(allowed_tool_names)}"
-                        )
-                    if name == "apply_patch":
-                        patch = str(arguments.get("patch", ""))
-                        duplicate_patch = patch in rejected_patches
-                        if duplicate_patch:
-                            raise ValueError(
-                                "this exact unified diff was already rejected; "
-                                "change the repair algorithm and build a different hunk"
-                            )
-                    result = tools.invoke(name, arguments)
-                    if name == "apply_patch":
-                        rejected_finished_revision = False
-                    if name == "read_file" and isinstance(result, dict):
-                        source_contexts[str(result.get("path", ""))] = result
-                        if result.get("redundant"):
-                            force_patch_next = True
-                            followup = (
-                                "That source interval was already available. Stop repeated "
-                                "reads and move to the smallest causal apply_patch."
-                            )
-                    if name == "finish_revision":
-                        mechanism = str(arguments.get("mechanism", mechanism))
-                    if name == "read_file" and refresh_after_apply_failure:
-                        refresh_after_apply_failure = False
-                except (ValueError, KeyError, TypeError, OSError, RuntimeError, json.JSONDecodeError) as exc:
-                    result = {"error": type(exc).__name__, "detail": str(exc)}
-                    if name == "apply_patch" and name in allowed_tool_names:
-                        patch = str(arguments.get("patch", ""))
-                        force_convergence = True
-                        convergence_prompted = True
-                        objective_effect = canonical_json(
-                            self._repair_context(objective).get(
-                                "active_failure",
-                                self._repair_context(objective).get("goal_contracts", ()),
-                            )
-                        )
-                        if duplicate_patch:
-                            duplicate_rejection_count += 1
-                            refresh_after_apply_failure = False
-                            followup = (
-                                "The exact rejected patch was repeated. The current source is "
-                                "already in context, so do not read it again and do not submit "
-                                "the same algorithm. Apply a materially different executable "
-                                "change grounded in this required observable effect: "
-                                f"{objective_effect}"
-                            )
-                            if duplicate_rejection_count >= 2:
-                                return {
-                                    "error_kind": "REPEATED_REJECTED_PATCH",
-                                    "summary": (
-                                        "The generator repeated an unchanged or unappliable "
-                                        "patch after execution-backed rejection feedback."
-                                    ),
-                                    "mechanism": "repeated_rejected_patch",
-                                    "recovery_used": recovery_used,
-                                }
+                if index:
+                    result = {"status": "DEFERRED", "reason": "Only one state-dependent action executes per turn."}
+                else:
+                    try:
+                        arguments = json.loads(function.get("arguments") or "{}")
+                        signature = canonical_json((name, arguments, tools.inspect_diff().get("patch_hash")))
+                        if signature in attempted:
+                            graph.record_update("DUPLICATE_TOOL_PREVENTED", objective_id=objective.objective_id, tool=name)
+                            result = {"status": "REUSED_EVIDENCE", "previous_result": attempted[signature],
+                                      "instruction": "This action adds no evidence. Use this result to edit, or investigate a different unresolved question."}
                         else:
-                            if patch:
-                                rejected_patches.add(patch)
-                            rejected_no_op = "no-op" in str(exc).casefold()
-                            if rejected_no_op:
-                                no_op_rejection_count += 1
-                            refresh_after_apply_failure = True
-                            followup = (
-                                "The patch was rejected and the tree is unchanged. On the next "
-                                "turn, read the current target file. Then construct a different "
-                                "hunk from that exact source; do not repeat the rejected diff. "
-                                "A valid patch must change executable control flow, data flow, "
-                                "a return value, an exception, or a state effect required by the "
-                                "objective. Reprinting the method, changing only comments or "
-                                "whitespace, and replacing a line with itself are no-ops. "
-                                f"Required observable effect: {objective_effect}"
+                            if name not in {schema["function"]["name"] for schema in available}:
+                                raise ValueError("Tool not available for this evidence action")
+                            result = tools.invoke(name, arguments)
+                            attempted[signature] = result
+                            if name == "read_file":
+                                source_contexts[f"{result['path']}:{result['start_line']}:{result['end_line']}"] = result
+                            edited = name == "apply_patch"
+                    except (ValueError, KeyError, TypeError, OSError, RuntimeError) as error:
+                        from reachpatch.execution.case_budget import CaseBudgetExhausted
+                        if isinstance(error, CaseBudgetExhausted):
+                            raise
+                        result = {"error": type(error).__name__, "detail": str(error)}
+                        if name == "apply_patch":
+                            patch_apply_failures += 1
+                            patch_text = str(locals().get("arguments", {}).get("patch", ""))
+                            matching_source = []
+                            error_text = str(error)
+                            match = re.search(
+                                r"(?:current source|target does not exist):\s*([^\s]+)",
+                                error_text,
                             )
-                            if no_op_rejection_count >= 3:
-                                return {
-                                    "error_kind": "REPEATED_NOOP_PATCH",
-                                    "summary": (
-                                        "The generator submitted three distinct patches with "
-                                        "no executable source change."
-                                    ),
-                                    "mechanism": "repeated_noop_patch",
-                                    "recovery_used": recovery_used,
-                                }
-                    elif name == "finish_revision" and "previously rolled back" in str(exc):
-                        rejected_finished_revision = True
-                        force_convergence = True
-                        convergence_prompted = True
-                        followup = (
-                            "Reach-Avoid already evaluated and rolled back this exact "
-                            "cumulative patch. Do not rename its mechanism or finish it "
-                            "again. Apply one materially different causal edit that preserves "
-                            "the protected target executions and closes the counterexample."
-                        )
-                messages.append({
-                    "role": "tool",
-                    "tool_call_id": str(call.get("id", name)),
-                    "content": canonical_json(result),
-                })
-                if followup:
-                    turn_followups.append(followup)
-            if deferred_calls:
-                messages.append({
-                    "role": "user",
-                    "content": (
-                        "Additional tool calls were deferred after the first call changed "
-                        "or inspected state. Re-evaluate the current diff and return exactly "
-                        "one next tool call."
-                    ),
-                })
-            for followup in turn_followups:
-                messages.append({"role": "user", "content": followup})
-            if tools.finished:
-                break
-        final_incremental = tools.inspect_incremental_diff()
-        final_cumulative = tools.inspect_diff()
-        # Validation is deterministic evidence collection, not an extra model
-        # turn.  A model can consume its final available turn by applying the
-        # edit, so drain the bounded executable validation queue before
-        # deciding whether that edit may be retained for transition evaluation.
-        # This never treats an empty validation set as ready.
-        if (
-            final_incremental.get("canonical_diff", "").strip()
-            and final_cumulative.get("canonical_diff", "").strip()
-        ):
-            while tools.validation_status()["pending_commands"]:
-                tools.run_allowed_public_check(
-                    tools.validation_status()["pending_commands"][0]
-                )
-        final_validation = tools.validation_status()
-        # A stable FAIL is still a valid trial.  Reach-Avoid, rather than the
-        # edit agent, owns the decision to advance, keep repairing, or reject.
-        # Only pending/UNKNOWN execution prevents a trial from being evaluated.
-        validation_observed = bool(
-            not final_validation["pending_commands"]
-            and not final_validation["unknown_validation_ids"]
-        )
-        retained_edit = bool(
-            final_incremental.get("canonical_diff", "").strip()
-            and final_cumulative.get("canonical_diff", "").strip()
-            and not tools.cumulative_patch_rejected(
-                str(final_cumulative.get("patch_hash", ""))
-            )
-            and validation_observed
-        )
-        if not retained_edit and not tools.finished and mechanism == "causal_edit":
-            mechanism = "context_expansion_without_edit"
-        return {
-            "error_kind": None if tools.finished or retained_edit else "TURN_LIMIT",
-            "summary": (
-                tools.finish_summary
-                or "Retained a non-empty tool-applied edit for Reach-Avoid evaluation"
-                if retained_edit else tools.finish_summary
-            ),
-            "mechanism": mechanism,
-            "recovery_used": recovery_used,
-        }
+                            failed_path = match.group(1) if match else None
+                            for span in source_contexts.values():
+                                if failed_path and str(span.get("path")) != failed_path:
+                                    continue
+                                try:
+                                    refreshed = tools.read_file(
+                                        str(span["path"]), span.get("start_line", 1),
+                                        span.get("end_line", 240),
+                                    )
+                                except (OSError, ValueError):
+                                    continue
+                                matching_source.append(cls._compact(
+                                    refreshed, string_limit=4000,
+                                ))
+                                if len(matching_source) >= 2:
+                                    break
+                            if matching_source:
+                                result["exact_current_source"] = matching_source
+                            result["instruction"] = (
+                                "Regenerate one smaller patch using exact_current_source; "
+                                "do not reuse the failed hunk context."
+                            )
+                            graph.record_update(
+                                "PATCH_APPLY_FAILED",
+                                objective_id=objective.objective_id,
+                                error=error_text,
+                                patch_hash=content_hash(patch_text),
+                                patch_preview=patch_text[:2000],
+                                failure_count=patch_apply_failures,
+                            )
+                messages.append({"role": "tool", "tool_call_id": str(call.get("id", name)),
+                                 "content": canonical_json(result)})
+            if patch_apply_failures >= 6:
+                return {
+                    "error_kind": "PATCH_APPLICATION_RETRY_EXHAUSTED",
+                    "summary": "Repeated patch context mismatch after exact-source refresh",
+                    "mechanism": mechanism,
+                }
+            if edited:
+                validation = tools.validation_status()
+                while validation["pending_commands"]:
+                    tools.run_allowed_public_check(validation["pending_commands"][0])
+                    validation = tools.validation_status()
+                # A stable failure is submitted as evidence, not hidden by
+                # internal greedy edits. The controller decides what to do.
+                tools.finish_revision("Single edit submitted for independent execution review", mechanism)
+                return {"summary": tools.finish_summary, "mechanism": mechanism}
+        return {"error_kind": "ACTION_CALL_BUDGET", "summary": "No edit within bounded evidence action",
+                "mechanism": mechanism}

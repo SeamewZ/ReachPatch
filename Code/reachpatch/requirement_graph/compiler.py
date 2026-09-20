@@ -178,6 +178,13 @@ def compile_goal_contracts(
             for item in tuple(getattr(check, "target_symbols", ()))
             + tuple(getattr(check, "symbol_references", ()))
         }
+        # An opaque suite-level command is useful preservation evidence, but
+        # without a symbol or an explicit pre-bound goal it cannot define an
+        # additional target contract.  Creating a hard ``goal-public-check``
+        # here leaves a phantom obligation that no execution can enter and
+        # needlessly triggers model-based target recovery.
+        if not check_symbols and not getattr(check, "goal_id", None):
+            continue
         # A public assertion is evidence for an issue-grounded goal when it
         # names the same operation. Do not create a second hard goal merely
         # because the assertion has its own check id; that would leave a
@@ -607,7 +614,7 @@ _GENERIC_SYMBOLS = {
     # Discourse connectives can occur immediately before a normative verb
     # ("but instead should return ...").  They describe how the expected
     # behaviour contrasts with the failure; they are never API entrypoints.
-    "instead", "otherwise", "rather", "also", "then", "however",
+    "instead", "otherwise", "rather", "also", "then", "however", "and", "but", "or",
 }
 _DOTTED_NOISE = {"tests", "test", "element", "class", "module", "python"}
 _EXCEPTION_SYMBOL = re.compile(r"(?:Error|Exception|Warning|Interrupt|Exit|Failure|Fault)$", re.I)
@@ -859,9 +866,11 @@ def _fallback(
     offset = 0
     in_fence = False
     in_reproduction = False
+    # Dataset-provided public maintainer hints are Authority-B issue evidence,
+    # not untrusted discussion. Only generic trailing discussion/comments end
+    # deterministic requirement compilation.
     discussion_at = re.search(
-        r"(?im)^\s*(?:public\s+maintainer\s+hints?|discussion|comments?)\s*:\s*$",
-        issue_text,
+        r"(?im)^\s*(?:discussion|comments?)\s*:\s*$", issue_text,
     )
     body_end = discussion_at.start() if discussion_at else len(issue_text)
     # Issue titles often name the operation while the Expected section carries
@@ -882,6 +891,7 @@ def _fallback(
         if dotted and dotted.group(0).split(".", 1)[0].casefold() not in _DOTTED_NOISE:
             title_operation = dotted.group(0)
     expected_region = False
+    maintainer_region = False
     issue_witness_records: list[dict[str, Any]] = []
     for record in public_records:
         if getattr(record, "source", None) != "issue":
@@ -949,6 +959,11 @@ def _fallback(
             in_fence = not in_fence
             continue
         lowered = stripped.casefold()
+        if re.match(r"^public\s+maintainer\s+hints?\s*:\s*$", stripped, re.I):
+            maintainer_region = True
+            in_reproduction = False
+            expected_region = False
+            continue
         # Introductory discussion/questions are not behavioral contracts even
         # when they contain a word such as ``should``.
         if re.match(r"^(?:before\b|i\s+(?:think|believe|wonder)|we\s+(?:think|believe)|how\s+to\b)", lowered):
@@ -981,7 +996,7 @@ def _fallback(
             not stripped or in_fence or source_indented or _TRACE.search(line)
             or actual_label or lowered.startswith(("actual behavior", "steps to reproduce", "traceback"))
             or (in_reproduction and not expected_label)
-            or (not _NORMATIVE.search(line) and not expected_region)
+            or (not _NORMATIVE.search(line) and not expected_region and not maintainer_region)
         ):
             continue
         # Parse labels from their body so ``Expected:`` itself cannot be
@@ -1017,7 +1032,7 @@ def _fallback(
         illustrative = False
         exception_name = None
         exception_match = re.search(
-            r"\b(?:must|should|shall|expected\s+to)\s+(?:raise|throw)\s+`?([A-Za-z_]\w*(?:\.[A-Za-z_]\w*)*)`?",
+            r"\b(?:must|should|shall|expected\s+to)\s+(?:still\s+)?(?:raise|throw)\s+`?([A-Za-z_]\w*(?:\.[A-Za-z_]\w*)*)`?",
             normative_line, re.I,
         )
         if exception_match:
@@ -1040,7 +1055,7 @@ def _fallback(
                 expected = {"None": None, "True": True, "False": False}.get(raw_expected, raw_expected)
             comparator = "EQUALS"
         witness = witness_by_operation.get(str(symbol or "").casefold())
-        if witness is not None:
+        if witness is not None and exception_name is None:
             witness_expected = witness.get("expected")
             if isinstance(witness_expected, dict) and "exit_code" in witness_expected and match is None:
                 comparator, expected = "EXIT_ZERO", witness_expected

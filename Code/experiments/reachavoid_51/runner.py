@@ -11,6 +11,7 @@ import time
 import traceback
 from dataclasses import asdict
 from collections import Counter
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from typing import Any, Iterable
 
@@ -166,6 +167,23 @@ def _public_rows() -> list[dict[str, Any]]:
     for index, row in enumerate(rows):
         _assert_public_value(row, f"public[{index}]")
     return rows
+
+
+def _cohort_rows(rows: list[dict[str, Any]], only: set[str]) -> list[dict[str, Any]]:
+    """Freeze an explicit public-only cohort before any official data is read."""
+    known = {str(row["instance_id"]) for row in rows}
+    if only - known:
+        raise ValueError(f"unknown instance IDs: {sorted(only - known)}")
+    if only:
+        return [row for row in rows if str(row["instance_id"]) in only]
+    raw_size = os.environ.get("REACHPATCH_COHORT_SIZE", "").strip()
+    if not raw_size:
+        return rows
+    size = int(raw_size)
+    if size < 1 or size > len(rows):
+        raise ValueError(f"REACHPATCH_COHORT_SIZE must be in 1..{len(rows)}")
+    # Dataset order is part of the public input and is persisted in the seal.
+    return rows[:size]
 
 
 def _source_tree(row: dict[str, Any]) -> Path:
@@ -424,12 +442,16 @@ def _validate_component_evidence(case_id: str, evidence: dict[str, Any]) -> None
 
 
 def _case_configuration(max_revisions: int) -> ReachAvoidConfig:
+    enabled = lambda name: os.environ.get(name, "1").strip().casefold() not in {"0", "false", "no", "off"}
     return ReachAvoidConfig(
         max_real_patch_revisions=max_revisions,
         execution_budget_seconds=float(os.environ.get("REACHPATCH_CASE_WALL_SECONDS", "3600")),
         max_case_model_calls=int(os.environ.get("REACHPATCH_CASE_MODEL_CALLS", "160")),
         max_case_tokens=int(os.environ.get("REACHPATCH_CASE_TOKENS", "1000000")),
         final_validation_reserve_seconds=float(os.environ.get("REACHPATCH_FINAL_VALIDATION_RESERVE", "30")),
+        validation_workers=int(os.environ.get("REACHPATCH_VALIDATION_WORKERS", "2")),
+        evidence_reuse_enabled=enabled("REACHPATCH_EVIDENCE_REUSE_ENABLED"),
+        demand_driven_interaction_enabled=enabled("REACHPATCH_DEMAND_DRIVEN_INTERACTION_ENABLED"),
     )
 
 
@@ -552,16 +574,11 @@ def _generation_preflight(rows: list[dict[str, Any]], key_path: Path) -> None:
 
 def generate(key_path: Path, model: str, max_revisions: int, only: set[str]) -> dict[str, Any]:
     rows = _public_rows()
-    known = {str(row["instance_id"]) for row in rows}
-    if only - known:
-        raise ValueError(f"unknown instance IDs: {sorted(only - known)}")
-    selected = [
-        row for row in rows
-        if not only or str(row["instance_id"]) in only
-    ]
+    selected = _cohort_rows(rows, only)
     _generation_preflight(selected, key_path)
     EXPERIMENT_ROOT.mkdir(parents=True, exist_ok=True)
     case_retries = max(1, int(os.environ.get("REACHPATCH_CASE_RETRIES", "3")))
+    case_workers = max(1, int(os.environ.get("REACHPATCH_CASE_WORKERS", "1")))
     manifest = _read_json(GENERATION_MANIFEST)
     diagnostic = os.environ.get("REACHPATCH_DIAGNOSTIC10") == "1"
     expected = {
@@ -572,6 +589,9 @@ def generate(key_path: Path, model: str, max_revisions: int, only: set[str]) -> 
         "max_revisions": max_revisions,
         "case_configuration": asdict(_case_configuration(max_revisions)),
         "case_retries": case_retries,
+        "case_workers": case_workers,
+        "cohort_instance_ids": [str(row["instance_id"]) for row in selected],
+        "cohort_hash": content_hash([str(row["instance_id"]) for row in selected]),
         **({"diagnostic_instance_ids": sorted(only)} if diagnostic else {}),
     }
     if manifest is None:
@@ -579,18 +599,15 @@ def generate(key_path: Path, model: str, max_revisions: int, only: set[str]) -> 
         _write_json(GENERATION_MANIFEST, manifest)
     elif any(manifest.get(key) != value for key, value in expected.items()):
         raise RuntimeError("existing generation manifest belongs to a different method run")
-    current_results: dict[str, dict[str, Any]] = {}
-    failures = []
-    for index, row in enumerate(selected, 1):
+    def run_selected(index: int, row: dict[str, Any]) -> tuple[str, dict[str, Any] | None, dict[str, Any] | None]:
         case_id = str(row["instance_id"])
         tree = _source_tree(row)
         tree_before = _git_worktree_digest(tree)
         result_path = RESULT_ROOT / f"{case_id}.json"
         existing = _read_json(result_path)
         if existing and _generation_result_valid(existing, row):
-            current_results[case_id] = existing
             print(canonical_json({"instance_id": case_id, "status": "REUSED", "index": index}), flush=True)
-            continue
+            return case_id, existing, None
         if existing or (RUN_ROOT / case_id).exists():
             _archive_failed_attempt(case_id)
         command = [
@@ -620,42 +637,65 @@ def generate(key_path: Path, model: str, max_revisions: int, only: set[str]) -> 
                 raise RuntimeError(f"{case_id}: generation mutated the immutable base tree")
             result = _read_json(result_path)
             if completed.returncode == 0 and result and _generation_result_valid(result, row):
-                current_results[case_id] = result
                 print(canonical_json({
                     "instance_id": case_id,
                     "status": result["status"],
                     "attempt": retry,
                     "index": index,
                 }), flush=True)
-                break
+                return case_id, result, None
             if result_path.exists() and not _generation_result_valid(result or {}, row):
                 result_path.unlink()
-        else:
-            failures.append({
-                "instance_id": case_id,
-                "attempts": case_retries,
-                "return_code": completed.returncode if completed else None,
-                "stdout_tail": completed.stdout[-4000:] if completed else "",
-                "stderr_tail": completed.stderr[-8000:] if completed else "",
-            })
-            print(canonical_json({
-                "instance_id": case_id,
-                "status": "ERROR",
-                "attempts": case_retries,
-                "index": index,
-            }), flush=True)
+        failure = {
+            "instance_id": case_id,
+            "attempts": case_retries,
+            "return_code": completed.returncode if completed else None,
+            "stdout_tail": completed.stdout[-4000:] if completed else "",
+            "stderr_tail": completed.stderr[-8000:] if completed else "",
+        }
+        print(canonical_json({
+            "instance_id": case_id,
+            "status": "ERROR",
+            "attempts": case_retries,
+            "index": index,
+        }), flush=True)
+        return case_id, None, failure
+
+    current_results: dict[str, dict[str, Any]] = {}
+    failures: list[dict[str, Any]] = []
+    if case_workers == 1:
+        completed_rows = (
+            run_selected(index, row) for index, row in enumerate(selected, 1)
+        )
+        for case_id, result, failure in completed_rows:
+            if result is not None:
+                current_results[case_id] = result
+            if failure is not None:
+                failures.append(failure)
+    else:
+        with ThreadPoolExecutor(max_workers=min(case_workers, len(selected))) as pool:
+            futures = {
+                pool.submit(run_selected, index, row): str(row["instance_id"])
+                for index, row in enumerate(selected, 1)
+            }
+            for future in as_completed(futures):
+                case_id, result, failure = future.result()
+                if result is not None:
+                    current_results[case_id] = result
+                if failure is not None:
+                    failures.append(failure)
+    failures.sort(key=lambda item: str(item["instance_id"]))
     all_results = {}
     for row in rows:
         path = RESULT_ROOT / f"{row['instance_id']}.json"
         result = _read_json(path)
         if result and _generation_result_valid(result, row):
             all_results[str(row["instance_id"])] = result
-    sealed_results = (
-        {str(row["instance_id"]): all_results[str(row["instance_id"])] for row in selected
-         if str(row["instance_id"]) in all_results}
-        if diagnostic else all_results
-    )
-    expected_case_count = len(selected) if diagnostic else len(rows)
+    sealed_results = {
+        str(row["instance_id"]): all_results[str(row["instance_id"])]
+        for row in selected if str(row["instance_id"]) in all_results
+    }
+    expected_case_count = len(selected)
     summary = {
         **expected,
         "case_count": expected_case_count,
@@ -671,6 +711,7 @@ def generate(key_path: Path, model: str, max_revisions: int, only: set[str]) -> 
         "updated_at": utc_now(),
     }
     _write_json(EXPERIMENT_ROOT / "generation_summary.json", summary)
+    build_efficiency_report()
     if failures:
         failed_ids = ", ".join(str(item["instance_id"]) for item in failures)
         raise RuntimeError(
@@ -711,25 +752,25 @@ def _seal_predictions(results: dict[str, dict[str, Any]], kind: str) -> str:
 def _official_rows_after_seal() -> list[dict[str, Any]]:
     sealed = _read_json(SEALED_MANIFEST)
     diagnostic = os.environ.get("REACHPATCH_DIAGNOSTIC10") == "1"
-    expected_count = 10 if diagnostic else 51
-    if not sealed or sealed.get("case_count") != expected_count:
+    expected_count = int((sealed or {}).get("case_count", 0))
+    if not sealed or expected_count < 1:
         raise RuntimeError(
-            f"all {expected_count} generation results must be sealed before official data is read"
+            "all cohort generation results must be sealed before official data is read"
         )
     source = DIAGNOSTIC_OFFICIAL_PATH if diagnostic else OFFICIAL_PATH
     rows = _read_jsonl(source)
-    if len(rows) != expected_count:
+    if diagnostic and len(rows) != expected_count:
         raise RuntimeError(
             f"expected {expected_count} official instances, found {len(rows)}"
         )
-    public_ids = (
-        {str(item) for item in sealed.get("instance_ids", ())}
-        if diagnostic else {str(row["instance_id"]) for row in _public_rows()}
-    )
+    public_ids = {str(item) for item in sealed.get("instance_ids", ())}
     official_ids = {str(row["instance_id"]) for row in rows}
-    if official_ids != public_ids:
+    if not public_ids or (official_ids != public_ids if diagnostic else not public_ids <= official_ids):
         raise RuntimeError("official/public instance sets differ")
-    return rows
+    selected = [row for row in rows if str(row["instance_id"]) in public_ids]
+    if len(selected) != expected_count:
+        raise RuntimeError("sealed cohort is not fully represented in official data")
+    return selected
 
 
 def _harness_report_path(stage: str, run_id: str) -> Path:
@@ -739,7 +780,9 @@ def _harness_report_path(stage: str, run_id: str) -> Path:
     return candidates[0]
 
 
-def _run_harness_stage(stage: str, workers: int, timeout: int) -> dict[str, Any]:
+def _run_harness_stage(
+    stage: str, workers: int, timeout: int, official_path: Path,
+) -> dict[str, Any]:
     predictions = HARNESS_ROOT / f"sealed_{stage}_predictions.jsonl"
     sealed = _read_json(SEALED_MANIFEST) or {}
     expected_sha = sealed.get(f"{stage}_predictions_sha256")
@@ -748,11 +791,6 @@ def _run_harness_stage(stage: str, workers: int, timeout: int) -> dict[str, Any]
     stage_root = HARNESS_ROOT / stage
     stage_root.mkdir(parents=True, exist_ok=True)
     run_id = f"reachavoid51-{stage}-{expected_sha[:12]}"
-    official_path = (
-        DIAGNOSTIC_OFFICIAL_PATH
-        if os.environ.get("REACHPATCH_DIAGNOSTIC10") == "1"
-        else OFFICIAL_PATH
-    )
     command = [
         sys.executable, "-m", "swebench.harness.run_evaluation",
         "--dataset_name", str(official_path),
@@ -794,13 +832,147 @@ def _run_harness_stage(stage: str, workers: int, timeout: int) -> dict[str, Any]
 
 
 def harness(workers: int, timeout: int) -> dict[str, Any]:
-    _official_rows_after_seal()
-    p0 = _run_harness_stage("p0", workers, timeout)
-    final = _run_harness_stage("final", workers, timeout)
+    official_rows = _official_rows_after_seal()
+    official_path = HARNESS_ROOT / "sealed_official_cohort.jsonl"
+    _write_jsonl(official_path, official_rows)
+    p0 = _run_harness_stage("p0", workers, timeout, official_path)
+    final = _run_harness_stage("final", workers, timeout, official_path)
     summary = {"schema": SCHEMA, "p0": p0, "final": final, "completed_at": utc_now()}
     _write_json(HARNESS_ROOT / "harness_summary.json", summary)
+    build_efficiency_report()
     build_effectiveness_report()
     return summary
+
+
+def _case_efficiency(result: dict[str, Any]) -> dict[str, Any]:
+    run_root = Path(str(result["run_root"]))
+    efficiency = _read_json(run_root / "token_efficiency.json") or {}
+    budget = dict(efficiency.get("budget", {}))
+    usage = dict(budget.get("usage", {}))
+    model_events = [
+        item for item in budget.get("events", ())
+        if item.get("kind") == "MODEL"
+    ]
+    state = _read_json(run_root / "execution_state.json") or {}
+    attempts = (
+        state.get("state", {}).get("generator_session", {}).get("attempt_history", ())
+    )
+    attempt_counts = Counter(str(item.get("result_kind", "UNKNOWN")) for item in attempts)
+    patch_fingerprints = [
+        (str(item.get("source_patch_hash", "")), str(item.get("incremental_patch_hash", "")))
+        for item in attempts if item.get("incremental_patch_hash")
+    ]
+    duplicate_patch_attempts = len(patch_fingerprints) - len(set(patch_fingerprints))
+    graph_events = dict(efficiency.get("events", {}))
+    exact_request_duplicates = sum(bool(item.get("exact_request_duplicate")) for item in model_events)
+    duplicate_tool_actions = sum(int(item.get("duplicate_tool_action_count", 0)) for item in model_events)
+    novel_action_calls = sum(int(item.get("novel_tool_action_count", 0)) > 0 for item in model_events)
+    no_action_calls = sum(
+        int(item.get("novel_tool_action_count", 0)) == 0
+        and not bool(item.get("has_text_response"))
+        for item in model_events
+    )
+    recovery_model_calls = sum(item.get("stage") == "TARGET_RECOVERY" for item in model_events)
+    original_bytes = int(efficiency.get("context_original_bytes", 0))
+    elided_bytes = int(efficiency.get("context_elided_bytes", 0))
+    return {
+        "instance_id": str(result["instance_id"]),
+        "terminal_status": str(result["status"]),
+        "duration_seconds": float(result.get("duration_seconds", 0.0)),
+        "model_calls": int(budget.get("model_calls", len(model_events))),
+        "total_tokens": int(usage.get("total_tokens", budget.get("tokens", 0)) or 0),
+        "prompt_tokens": int(usage.get("prompt_tokens", 0) or 0),
+        "completion_tokens": int(usage.get("completion_tokens", 0) or 0),
+        "uncached_prompt_tokens": int(usage.get("prompt_cache_miss_tokens", 0) or 0),
+        "cached_prompt_tokens": int(usage.get("prompt_cache_hit_tokens", 0) or 0),
+        "execution_seconds": float(budget.get("execution_seconds", 0.0)),
+        "novel_action_model_calls": novel_action_calls,
+        "no_action_model_calls": no_action_calls,
+        "exact_duplicate_model_requests": exact_request_duplicates,
+        "duplicate_tool_actions": duplicate_tool_actions,
+        "target_recovery_model_calls": recovery_model_calls,
+        "duplicate_actions_prevented": int(graph_events.get("DUPLICATE_ACTION_PREVENTED", 0)),
+        "source_reads_reused": int(graph_events.get("SOURCE_READ_REUSED", 0)),
+        "validation_cache_hits": int(graph_events.get("VALIDATION_CACHE_HIT", 0)),
+        "context_original_bytes": original_bytes,
+        "context_sent_bytes": int(efficiency.get("context_sent_bytes", 0)),
+        "context_elided_bytes": elided_bytes,
+        "context_elision_rate": (elided_bytes / original_bytes if original_bytes else 0.0),
+        "generator_attempt_count": len(attempts),
+        "empty_patch_attempts": int(attempt_counts.get("NO_NEW_DIFF", 0)),
+        "generator_error_attempts": int(attempt_counts.get("GENERATOR_ERROR", 0)),
+        "duplicate_patch_attempts": duplicate_patch_attempts,
+        "target_recovery_success": bool(
+            result.get("component_evidence", {}).get("target_recovery", {}).get("success")
+        ),
+        "entered_repair_loop": bool(
+            result.get("component_evidence", {}).get("dynamic_reach_avoid_graph", {})
+            .get("entered_repair_loop", 0)
+        ),
+        "final_differs_from_p0": result.get("p0_patch_hash") != result.get("final_patch_hash"),
+    }
+
+
+def build_efficiency_report() -> dict[str, Any]:
+    generation = _read_json(EXPERIMENT_ROOT / "generation_summary.json") or {}
+    rows = [_case_efficiency(item) for item in generation.get("results", ())]
+    harness_summary = _read_json(HARNESS_ROOT / "harness_summary.json") or {}
+    resolved_ids = set(harness_summary.get("final", {}).get("resolved_ids", ()))
+    for row in rows:
+        row["official_final_resolved"] = (
+            row["instance_id"] in resolved_ids if harness_summary else None
+        )
+    totals = {
+        key: sum(float(row[key]) for row in rows)
+        for key in (
+            "duration_seconds", "model_calls", "total_tokens", "prompt_tokens",
+            "completion_tokens", "uncached_prompt_tokens", "cached_prompt_tokens",
+            "execution_seconds", "novel_action_model_calls", "no_action_model_calls",
+            "exact_duplicate_model_requests", "duplicate_tool_actions",
+            "target_recovery_model_calls", "duplicate_actions_prevented",
+            "source_reads_reused", "validation_cache_hits", "context_original_bytes",
+            "context_sent_bytes", "context_elided_bytes", "generator_attempt_count",
+            "empty_patch_attempts", "generator_error_attempts", "duplicate_patch_attempts",
+        )
+    }
+    model_calls = totals.get("model_calls", 0.0)
+    resolved_count = len(resolved_ids) if harness_summary else None
+    report = {
+        "schema": "reachpatch-evidence-efficiency-experiment-v1",
+        "case_count": len(rows),
+        "implementation_hash": generation.get("implementation_hash"),
+        "cohort_hash": generation.get("cohort_hash"),
+        "metric_definitions": {
+            "novel_action_model_call_rate": "fraction of provider calls returning at least one previously unseen stage/tool/argument action",
+            "no_action_model_call_rate": "fraction of provider calls returning neither a tool action nor nonempty text",
+            "uncached_prompt_tokens": "provider-reported prompt_cache_miss_tokens",
+            "duplicate_patch_attempt": "same parent patch hash and incremental patch hash attempted more than once",
+            "token_reduction_claim": "requires a matched baseline cohort; this report alone measures consumption, not savings",
+        },
+        "totals": totals,
+        "means": {key: value / len(rows) for key, value in totals.items()} if rows else {},
+        "novel_action_model_call_rate": (
+            totals.get("novel_action_model_calls", 0.0) / model_calls if model_calls else 0.0
+        ),
+        "no_action_model_call_rate": (
+            totals.get("no_action_model_calls", 0.0) / model_calls if model_calls else 0.0
+        ),
+        "context_elision_rate": (
+            totals.get("context_elided_bytes", 0.0) / totals.get("context_original_bytes", 1.0)
+            if totals.get("context_original_bytes", 0.0) else 0.0
+        ),
+        "official_final_resolved_count": resolved_count,
+        "calls_per_resolved_case": (
+            model_calls / resolved_count if resolved_count else None
+        ),
+        "tokens_per_resolved_case": (
+            totals.get("total_tokens", 0.0) / resolved_count if resolved_count else None
+        ),
+        "rows": rows,
+        "completed_at": utc_now(),
+    }
+    _write_json(EXPERIMENT_ROOT / "evidence_efficiency_report.json", report)
+    return report
 
 
 def build_effectiveness_report() -> dict[str, Any]:

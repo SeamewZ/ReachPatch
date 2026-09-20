@@ -125,6 +125,25 @@ def test_all_checks_pass_reaches():
     assert result is TransitionDecision.REACHED
 
 
+def test_passing_preservation_covers_already_satisfied_required_goal():
+    target = _execution(
+        "target", CheckStatus.PASS, value=2,
+        stage=FailureStage.TARGET_PASS, goal_id="changed-goal",
+    )
+    preservation = _execution(
+        "preserve", CheckStatus.PASS, value=1,
+        stage=FailureStage.TARGET_PASS, goal_id="preserved-goal",
+        role="PRESERVATION", authority="B",
+    )
+    result = decide_transition(
+        _checkpoint("parent", "parent"), _checkpoint("trial", "trial"),
+        _mechanical(), _mechanical(), (), (target,), (preservation,), (),
+        required_goal_ids=("changed-goal", "preserved-goal"),
+    )
+
+    assert result is TransitionDecision.REACHED
+
+
 def test_unknown_severity_name_finding_does_not_block_reach():
     class Finding:
         severity = "UNKNOWN"

@@ -122,6 +122,17 @@ def test_diagnostic_official_rows_require_matching_ten_case_seal(
     assert [item["instance_id"] for item in rows] == instance_ids
 
 
+def test_runner_freezes_public_cohort_by_dataset_order(monkeypatch):
+    rows = [{"instance_id": f"case-{index}"} for index in range(51)]
+    monkeypatch.setenv("REACHPATCH_COHORT_SIZE", "50")
+
+    selected = runner._cohort_rows(rows, set())
+
+    assert len(selected) == 50
+    assert selected[0]["instance_id"] == "case-0"
+    assert selected[-1]["instance_id"] == "case-49"
+
+
 def test_runner_rejects_missing_unified_graph():
     with pytest.raises(RuntimeError, match="missing unified graph hash"):
         runner._validate_component_evidence("case-id", {})
@@ -141,25 +152,15 @@ def test_runner_propagates_same_case_budget_configuration(monkeypatch):
     assert config.execution_budget_seconds == 1800
     assert config.max_case_model_calls == 80
     assert config.max_case_tokens == 200000
-
-
 def test_deepseek_retry_prompt_requires_a_different_patch(monkeypatch):
-    objective = RepairObjective(
-        objective_id="objective", objective_kind="INITIAL_PATCH",
-        primary_requirement={}, related_requirements=(), public_context=(),
-        related_failures=(), counterexamples=(), preservation_requirements=(),
-        observations=(), failure_signatures=(),
-        first_divergences=(), executed_path_ids=(), guarded_branch_ids=(),
-        causal_guidance={}, bindings=(), actual_hunks=(), causal_cuts=(),
-        impact_cone=None, impact_risks=(), protected_target_ids=(),
-        protected_preservation_ids=(), suggested_action_families=(),
-        locked_check_ids=(), cumulative_diff="", failed_mechanisms=(),
-        forbidden_mechanisms=(), editable_source_slices=(),
-        expected_next_effects=(),
+    from reachpatch.repair.execution_objective import InitialPatchObjective
+    objective = InitialPatchObjective(
+        objective_id="objective", goal_contracts=(), public_context=(),
+        current_full_diff="", current_patch_hash="empty",
     )
     monkeypatch.setenv("REACHPATCH_RA51_ATTEMPT", "2")
 
     prompt = DeepSeekAgent._prompt(objective)
 
-    assert "independent generation retry 2" in prompt
-    assert "materially different" in prompt
+    assert "independent generation retry 2" in prompt.lower()
+    assert "do not repeat a rejected algorithm or exact diff" in prompt

@@ -1,7 +1,7 @@
 from pathlib import Path
 import json
 
-from reachpatch.models.evidence import EvidenceRecord, PublicEvidence, public_evidence_from_instance
+from reachpatch.models.evidence import EvidenceRecord, PublicEvidence, SourceHint, public_evidence_from_instance
 from reachpatch.requirement_graph.compiler import (
     ClaimRole, CompiledRequirementClaim, EvidenceSpan, _fallback,
     compile_goal_contracts, validate_compiled_claim,
@@ -214,3 +214,21 @@ def test_following_witness_does_not_promote_instead_as_operation(tmp_path):
     assert all(goal.operation != "instead" for goal in goals)
     target = next(goal for goal in goals if goal.operation == "wcs_pix2world")
     assert target.hard
+
+
+def test_public_maintainer_hint_can_ground_issue_operation(tmp_path):
+    issue = (
+        "socket.error exception is not wrapped in a requests exception.\n"
+        "Here is a traceback showing requests/models.py in iter_content.\n\n"
+        "Public maintainer hints:\n"
+        "No, this looks like an error.\n"
+        "`iter_content` doesn't expect socket errors, but it should. We need to fix this.\n"
+    )
+    hint = SourceHint("hint", "iter_content", "requests/models.py", 623, 663,
+                      "def iter_content(self): ...", ("issue",),
+                      "traceback and public maintainer operation", "B")
+    evidence = public_evidence_from_instance(issue, (), {}, tmp_path)
+    goals = compile_goal_contracts(issue, evidence, (hint,), None, tmp_path / "compile")
+    target = next(goal for goal in goals if goal.operation == "iter_content")
+    assert target.hard and target.authority == "B"
+    assert target.comparator == "RELATION_HOLDS" and target.expected is True

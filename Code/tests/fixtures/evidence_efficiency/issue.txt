@@ -1,0 +1,12 @@
+target fails on empty input
+
+target should not fail and should return an empty list for empty input:
+
+```python
+from pkg import target
+assert target([]) == []
+```
+
+For nonempty input target must still return a list containing only the first
+element. None is not a valid sequence and must still raise TypeError.
+Existing public tests are in test_pkg.py; do not change tests.

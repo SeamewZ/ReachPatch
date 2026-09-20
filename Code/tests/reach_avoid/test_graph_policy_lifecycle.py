@@ -4,10 +4,14 @@ from types import SimpleNamespace
 import pytest
 
 from reachpatch.models.evidence import TraceEvent
-from reachpatch.models.execution import ExecutableCheck, CheckRole, CheckStatus, GoalContract, EvidenceSpan
+from reachpatch.models.execution import (
+    CheckExecution, ExecutableCheck, CheckRole, CheckStatus, GoalContract,
+    EvidenceSpan,
+)
 from reachpatch.reach_avoid.dynamic_reach_avoid_graph import (
     DynamicReachAvoidGraph, CheckpointState, RepairHypothesis, GraphNodeKind as N,
-    GraphEdgeKind as E, register_validation_checks, update_graph_from_execution,
+    GraphEdgeKind as E, derive_validation_obligations,
+    register_validation_checks, update_graph_from_execution,
 )
 from reachpatch.reach_avoid.graph_policy import (
     compile_contract_obligations, evaluate_validation_closure, derive_frontier_actions,
@@ -45,6 +49,24 @@ def test_two_input_partition_oracle_gaps_do_not_cancel():
     assert uncovered_oracle_gaps(reports) == (reports[1],)
 
 
+def test_preservation_check_covers_already_satisfied_hard_contract():
+    g = graph()
+    contract = goal()
+    preservation = replace(probe(), role=CheckRole.PRESERVATION)
+    register_validation_checks(g, (preservation,))
+    ids = compile_contract_obligations(g, (contract,), (preservation,))
+    result = CheckExecution(
+        preservation.check_id, CheckStatus.PASS, None, runs=2, stable=True,
+        goal_id=contract.goal_id, role=CheckRole.PRESERVATION,
+        authority="B", entered_target_code=True,
+    )
+
+    closure = evaluate_validation_closure(g, "root", ids, (result,), ())
+
+    assert closure["closed"]
+    assert g.nodes[ids[0]].metadata["validation_roles"] == ("PRESERVATION",)
+
+
 def test_new_child_challenge_must_execute_before_closure():
     g = graph()
     ids = compile_contract_obligations(g, (goal(),), (probe(),))
@@ -53,7 +75,10 @@ def test_new_child_challenge_must_execute_before_closure():
     result = SimpleNamespace(check_id="check", stable=True, status=CheckStatus.PASS, authority="B", entered_target_code=True)
     report = evaluate_validation_closure(g, "root", ids, (result,), ())
     assert not report["closed"]
-    assert report["gaps"] == [{"obligation_id": "new-input", "reason": "OPEN_EXECUTABLE_CHALLENGE"}]
+    assert len(report["gaps"]) == 1
+    assert report["gaps"][0]["obligation_id"] == "new-input"
+    assert report["gaps"][0]["reason"] == "OPEN_EXECUTABLE_CHALLENGE"
+    assert report["gaps"][0]["question_id"] in g.nodes
     boundary = SimpleNamespace(**{**vars(result), "check_id": "boundary"})
     assert evaluate_validation_closure(g, "root", ids, (result, boundary), ())["closed"]
 
@@ -67,6 +92,54 @@ def test_action_exhaustion_survives_checkpoint_registration_and_timing_changes()
     exhaust_action(g, action, "NO_NEW_EVIDENCE")
     g.register_checkpoint(replace(cp, target_results={"check": {"status": "PASS", "stable": True, "duration_seconds": 9}}))
     assert not derive_frontier_actions(g, max_depth=3)
+
+
+def test_recovered_target_reopens_same_checkpoint_for_validation():
+    g = graph()
+    g.update_checkpoint(
+        "root", observation_ids=("preservation-run",),
+        preservation_results={"preserve": {"status": "PASS", "stable": True}},
+    )
+    # The first pass has no target and therefore asks for recovery.
+    missing = compile_contract_obligations(g, (goal(),), ())
+    result = SimpleNamespace(
+        check_id="preserve", stable=True, status=CheckStatus.PASS,
+        authority="A", entered_target_code=False,
+    )
+    evaluate_validation_closure(g, "root", missing, (result,), ())
+    recovery_action = next(
+        item for item in derive_frontier_actions(g, max_depth=3)
+        if item.kind == "RECOVER_EVIDENCE"
+    )
+    exhaust_action(g, recovery_action, "RECOVERED_TARGET")
+
+    recovered = probe()
+    compile_contract_obligations(g, (goal(),), (recovered,))
+    register_validation_checks(g, (recovered,))
+    batch = derive_validation_obligations(g, "root")
+
+    assert batch.target_obligations
+    actions = derive_frontier_actions(g, max_depth=3)
+    assert any(item.kind == "VALIDATE_CHECKPOINT" for item in actions)
+
+
+def test_recovered_target_validation_does_not_depend_on_available_edge_budget():
+    from reachpatch.reach_avoid.dynamic_reach_avoid_graph import DynamicGraphBudget
+
+    g = DynamicReachAvoidGraph(budget=DynamicGraphBudget(max_edges=1))
+    g.register_checkpoint(CheckpointState(
+        "root", None, "patch", "hash", observation_ids=("old-run",),
+        preservation_results={"preserve": {"status": "PASS", "stable": True}},
+    ))
+    # Consume the only edge before recovery registers its target.
+    g.add_node(N.ORACLE, node_id="existing")
+    g.add_edge(E.DERIVED_FROM, "root", "existing")
+    recovered = probe()
+    register_validation_checks(g, (recovered,))
+
+    actions = derive_frontier_actions(g, max_depth=3)
+
+    assert any(item.kind == "VALIDATE_CHECKPOINT" for item in actions)
 
 
 def test_local_exhaustion_leaves_another_graph_checkpoint_open():

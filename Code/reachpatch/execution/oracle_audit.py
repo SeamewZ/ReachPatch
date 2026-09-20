@@ -135,6 +135,28 @@ def audit_return_oracles(tree: Path, graph: Any, goals: Sequence[Any], checks: S
         goal = next((item for item in goals if item.goal_id == check.goal_id and item.hard), None)
         if goal is None:
             continue
+        # ``RELATION_HOLDS`` is certified by the executable probe's own
+        # non-constant assertion (the recovery layer rejects print-only and
+        # tautological probes before registration).  This audit can only
+        # replace a target's *return value*; it cannot preserve the injected
+        # dependency, exception path, state transition, or other relation
+        # established by such a probe.  Treating that unsupported mutation as
+        # an oracle gap used to downgrade a stable target PASS to
+        # KEEP_REPAIRING even though the mutation was unrelated to the
+        # contract under test.
+        if str(goal.comparator).upper() == "RELATION_HOLDS":
+            reports.append({
+                "obligation_id": contract_obligation_id(goal, check),
+                "goal_id": goal.goal_id,
+                "check_id": check.check_id,
+                "status": "AUDIT_NOT_APPLICABLE",
+                "blocks_certification": False,
+                "reason": (
+                    "Relation contract is enforced by a grounded self-checking "
+                    "probe; return-only intervention is not semantically valid."
+                ),
+            })
+            continue
         if goal.comparator in {"EXIT_ZERO", "NOT_RAISES"} and any(
             item.hard and item.parent_goal_id == goal.goal_id
             and item.facet_kind in {"RETURN_TYPE", "RETURN_LENGTH", "RETURN_STRUCTURE", "SEMANTIC_RESULT"}

@@ -63,7 +63,11 @@ def test_toy_search_backtracks_and_preserves_target(tmp_path):
         {"check_id": "preserve", "command": ("python", "-c", "from calc import calc; assert calc(0) == 0"), "role": "PRESERVATION", "authority": "A", "symbol_references": ("calc",)},
     )})
     run_root = tmp_path / "run"
-    result = ReachAvoidController(RepairPlayer(Generator())).run(instance, run_root=run_root)
+    from reachpatch.reach_avoid.controller import ReachAvoidConfig
+    from reachpatch.reach_avoid.dynamic_reach_avoid_graph import SearchBudget
+    # Explicit diversity experiment; the new production default is one cut.
+    result = ReachAvoidController(RepairPlayer(Generator()), ReachAvoidConfig(
+        search_budget=SearchBudget(branch_factor=3))).run(instance, run_root=run_root)
     assert result.status == "REACHED"
     summary = __import__("json").loads((run_root / "execution_summary.json").read_text())
     assert summary["p0_patch_hash"] != summary["final_patch_hash"]
@@ -85,3 +89,25 @@ def test_final_selector_excludes_rejected_high_score_checkpoint(tmp_path):
         rejected_patch_hashes={"rejected"},
     )
     assert select_final_checkpoint(state).checkpoint_id == "parent"
+
+
+def test_final_selector_does_not_replace_nonempty_p0_with_empty_bootstrap_on_tie(tmp_path):
+    bootstrap = StateCheckpoint(
+        "bootstrap", None, str(tmp_path / "base"), "base", "", "BOOTSTRAP", 0,
+    )
+    p0 = StateCheckpoint(
+        "p0", "bootstrap", str(tmp_path / "p0"), "patch", "diff --git a/a.py b/a.py\n",
+        "P0", 0,
+    )
+    state = ReachAvoidState(
+        clean_snapshot=tmp_path, working_checkpoint=p0, safe_checkpoint=p0,
+        best_checkpoint=p0, certified_checkpoint=None, goal_contracts=(),
+        target_checks=(), preservation_checks=(), challenge_checks=(), locked_checks=(),
+        active_failure=None, dynamic_failure_graph=None, failure_history={},
+        transition_history=[], revision_count=0, instance_id="case", run_id="run",
+        base_repository=tmp_path, base_commit="base", run_root=tmp_path,
+        generator_session=GeneratorSession("session"),
+        checkpoint_history={"bootstrap": bootstrap, "p0": p0},
+    )
+
+    assert select_final_checkpoint(state).checkpoint_id == "p0"

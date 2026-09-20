@@ -2,6 +2,8 @@
 from __future__ import annotations
 
 import ast
+from concurrent.futures import ThreadPoolExecutor
+from contextvars import copy_context
 import os
 import re
 import subprocess
@@ -66,6 +68,10 @@ from reachpatch.repair.execution_objective import (
 )
 from reachpatch.repair.initial_agent import InitialPatchAgent
 from reachpatch.requirement_graph.compiler import compile_goal_contracts
+from .evidence_context import (
+    claim_evidence_action, efficiency_report, initial_source_context,
+    resolve_checkpoint_questions,
+)
 
 from .repair_player import RepairPlayer
 
@@ -368,17 +374,27 @@ def incremental_mechanism_hash(incremental_diff: str) -> str:
 @dataclass(frozen=True, slots=True)
 class ReachAvoidConfig:
     max_real_patch_revisions: int = 8
-    initial_generator_attempts: int = 2
+    initial_generator_attempts: int = 1
     max_no_progress_generator_attempts: int = 2
     execution_budget_seconds: float = 3600.0
-    target_recovery_attempts: int = 2
+    target_recovery_attempts: int = 1
     target_recovery_max_probes: int = 6
     target_recovery_stability_runs: int = 2
+    # The fixed-interaction arm intentionally performs one unconditional
+    # post-P0 recovery dialogue.  Give that ablation its own bounded turn
+    # budget so it cannot consume the case-wide patch-search allowance.
+    fixed_recovery_max_agent_turns: int = 6
+    # Independent executable obligations use isolated subprocesses.  A small
+    # bounded pool preserves every paired observation while avoiding a
+    # validation wall-time explosion on repositories with slow test startup.
+    validation_workers: int = 2
     graph_budget: DynamicGraphBudget = field(default_factory=DynamicGraphBudget)
     search_budget: SearchBudget = field(default_factory=SearchBudget)
     max_case_model_calls: int = 160
     max_case_tokens: int = 1_000_000
     final_validation_reserve_seconds: float = 30.0
+    evidence_reuse_enabled: bool = True
+    demand_driven_interaction_enabled: bool = True
 
     def __post_init__(self) -> None:
         if not 1 <= self.max_real_patch_revisions <= 8:
@@ -397,6 +413,10 @@ class ReachAvoidConfig:
             raise ValueError("target_recovery_max_probes must be positive")
         if self.target_recovery_stability_runs < 2:
             raise ValueError("target_recovery_stability_runs must be at least two")
+        if self.fixed_recovery_max_agent_turns < 1:
+            raise ValueError("fixed_recovery_max_agent_turns must be positive")
+        if self.validation_workers < 1:
+            raise ValueError("validation_workers must be positive")
 
 
 @dataclass(slots=True)
@@ -625,11 +645,28 @@ class ReachAvoidController:
         tree: Path,
         checks: tuple[ExecutableCheck, ...],
         clean: Path,
+        *,
+        max_workers: int = 1,
     ) -> tuple[CheckExecution, ...]:
-        return tuple(
-            execute_check(tree, check, stability_runs=2, base_tree=clean)
-            for check in checks
-        )
+        def execute_one(check: ExecutableCheck) -> CheckExecution:
+            return execute_check(tree, check, stability_runs=2, base_tree=clean)
+
+        workers = min(max(1, int(max_workers)), len(checks))
+        if workers <= 1:
+            return tuple(execute_one(check) for check in checks)
+        # Context variables carry the one case-wide execution budget.  Each
+        # worker needs a distinct Context object, but all point to the same
+        # budget instance so wall/execution accounting remains global.
+        contexts = [copy_context() for _ in checks]
+        with ThreadPoolExecutor(max_workers=workers,
+                                thread_name_prefix="reachpatch-validation") as pool:
+            futures = [
+                pool.submit(context.run, execute_one, check)
+                for context, check in zip(contexts, checks)
+            ]
+            # Consume in input order so graph observations and sealed logs are
+            # deterministic even when subprocesses finish out of order.
+            return tuple(future.result() for future in futures)
 
     @staticmethod
     def _split(
@@ -688,19 +725,34 @@ class ReachAvoidController:
                              checks: tuple[ExecutableCheck, ...], clean: Path,
                              *, phase: str) -> tuple[CheckExecution, ...]:
         budget = active_case_budget.get()
-        collected = []
-        for check in checks:
-            cache_key = validation_cache_key(tree, clean, check) if budget else None
+        collected: list[CheckExecution | None] = [None] * len(checks)
+        cache_keys: list[str | None] = [None] * len(checks)
+        misses: list[tuple[int, ExecutableCheck]] = []
+        for index, check in enumerate(checks):
+            cache_key = (
+                validation_cache_key(tree, clean, check)
+                if budget and self.config.evidence_reuse_enabled else None
+            )
+            cache_keys[index] = cache_key
             cached = budget.execution_cache.get(cache_key) if budget and cache_key else None
             if cached is not None:
                 state.dynamic_failure_graph.record_update("VALIDATION_CACHE_HIT", cache_key=cache_key, check_id=check.check_id, phase=phase)
-                result = cached
+                collected[index] = cached
             else:
-                result = self._execute_queue(tree, (check,), clean)[0]
+                misses.append((index, check))
+        if misses:
+            executed = self._execute_queue(
+                tree, tuple(check for _, check in misses), clean,
+                max_workers=self.config.validation_workers,
+            )
+            for (index, _), result in zip(misses, executed):
+                collected[index] = result
+                cache_key = cache_keys[index]
                 if budget and cache_key and result.stable and result.status in {CheckStatus.PASS, CheckStatus.FAIL}:
                     budget.execution_cache[cache_key] = result
-            collected.append(result)
-        results = tuple(collected)
+        if any(result is None for result in collected):
+            raise RuntimeError("validation queue left an executable obligation without a result")
+        results = tuple(result for result in collected if result is not None)
         graph = state.dynamic_failure_graph
         patch_hash = diff_between(clean, tree).patch_hash
         with (state.run_root / "validation_execution_log.jsonl").open("a", encoding="utf-8") as handle:
@@ -1082,7 +1134,9 @@ class ReachAvoidController:
             "transport", None,
         )
         source_hints = build_requirement_source_hints(clean, instance.issue, public.checks)
-        goals = compile_goal_contracts(instance.issue, public, source_hints, transport, root)
+        # No semantic-model call on the default path. Retain deterministic
+        # alignment of both issue spans and public executable contracts.
+        goals = compile_goal_contracts(instance.issue, public, source_hints, None, root)
         # ``_compile_goals_with_tool`` persists its raw protocol artifact
         # before deterministic fallback/alignment is merged. Persist the
         # actual production goals separately so sealed runs are auditable.
@@ -1097,6 +1151,13 @@ class ReachAvoidController:
             source_hints=source_hints, public_checks=public.checks,
             budget=self.config.graph_budget,
         )
+        graph.add_node(
+            GraphNodeKind.OBSERVATION, node_id="evidence-policy", status="ACTIVE",
+            metadata={
+                "evidence_reuse_enabled": self.config.evidence_reuse_enabled,
+                "demand_driven_interaction_enabled": self.config.demand_driven_interaction_enabled,
+            },
+        )
         recovery_config = TargetRecoveryConfig(
             max_probes=self.config.target_recovery_max_probes,
             stability_runs=self.config.target_recovery_stability_runs,
@@ -1107,9 +1168,10 @@ class ReachAvoidController:
             check_timeout_seconds=float(
                 os.environ.get("REACHPATCH_RECOVERY_CHECK_TIMEOUT_SECONDS", "120")
             ),
+            demand_driven=self.config.demand_driven_interaction_enabled,
         )
         pre_recovery = recover_target_checks(
-            repository, clean, clean, goals, public, transport, root,
+            repository, clean, clean, goals, public, None, root,
             recovery_config,
             source_hints=source_hints, dynamic_graph=graph,
         )
@@ -1152,6 +1214,9 @@ class ReachAvoidController:
             mechanical=run_mechanical_checks(clean, blank, source_tree=clean),
         )
         state.working_checkpoint = boot
+        state.checkpoint_history[boot.checkpoint_id] = boot
+        graph.register_checkpoint(CheckpointState(boot.checkpoint_id, None,
+            boot.cumulative_diff, boot.patch_hash, status="BOOTSTRAP"))
         context.store.write_state(state)
         initial = InitialPatchObjective(
             objective_id=stable_id("initial-execution-objective", run_id),
@@ -1161,7 +1226,7 @@ class ReachAvoidController:
             },),
             current_full_diff=blank.canonical_diff,
             current_patch_hash=blank.patch_hash,
-            graph_context=graph.initial_generation_context(),
+            graph_context=initial_source_context(graph),
         )
         state.phase = ReachAvoidPhase.INITIAL_GENERATION
         state.current_repair_objective = initial
@@ -1223,87 +1288,57 @@ class ReachAvoidController:
         update_safe_checkpoint(state, p0)
         update_best_checkpoint(state, p0)
 
-        state.phase = ReachAvoidPhase.TARGET_RECOVERY
-        # Stage B must observe the P0 execution, but once Stage A has already
-        # recovered trusted targets there is no need to rerun every public
-        # candidate.  Verify one representative target and merge its evidence
-        # with the complete Stage-A set; unresolved Stage-A cases still get the
-        # full configured probe budget.
-        post_recovery_config = recovery_config
-        post_public = public
-        post_transport = transport
-        if pre_recovery.target_checks and not (
-            {goal.goal_id for goal in goals if goal.hard} - {check.goal_id for check in pre_recovery.target_checks}
-        ):
-            post_recovery_config = replace(
-                recovery_config, max_probes=1, candidate_allowance=0,
+        # The production policy is demand-driven: deterministic Stage-A
+        # evidence is reused and Stage B runs only for an unresolved graph
+        # question.  The fixed-interaction ablation deliberately preserves
+        # the old unconditional post-P0 recovery dialogue so matched runs can
+        # measure the model calls/tokens avoided by this scheduler decision.
+        if not self.config.demand_driven_interaction_enabled and transport is not None:
+            previous_phase = state.phase
+            state.phase = ReachAvoidPhase.TARGET_RECOVERY
+            fixed_config = replace(
+                recovery_config,
+                max_agent_turns=min(
+                    recovery_config.max_agent_turns,
+                    self.config.fixed_recovery_max_agent_turns,
+                ),
+                demand_driven=False,
             )
-            # Stage B starts from the trusted executable evidence recovered
-            # in Stage A. Reclassify that exact command against clean and let
-            # the validation queue below execute it on P0; asking the model to
-            # rediscover a new probe here wastes recovery turns and can exhaust
-            # the case budget before the first actionable target failure.
-            post_public = replace(
-                public,
-                checks=tuple({
-                    item.check_id: item for item in (
-                        *pre_recovery.target_checks,
-                        *getattr(public, "checks", ()),
-                    )
-                }.values()),
+            graph.record_update(
+                "FIXED_RECOVERY_SCHEDULED",
+                checkpoint_id=p0.checkpoint_id,
+                max_agent_turns=fixed_config.max_agent_turns,
+                previous_phase=str(previous_phase),
             )
-            post_transport = None
-        recovery = recover_target_checks(
-            repository, clean, Path(p0.snapshot_tree), goals, post_public,
-            post_transport, root, post_recovery_config,
-            source_hints=source_hints, dynamic_graph=graph,
-        )
-        update_graph_from_recovery(graph, recovery)
-        recovery = TargetRecoveryResult(
-            target_checks=tuple({
-                item.check_id: item for item in (
-                    *pre_recovery.target_checks, *recovery.target_checks,
+            try:
+                fixed_recovery = recover_target_checks(
+                    repository, clean, Path(p0.snapshot_tree), goals, public,
+                    transport, root, fixed_config, source_hints=source_hints,
+                    dynamic_graph=graph,
                 )
-            }.values()),
-            preservation_checks=tuple({
-                item.check_id: item for item in (
-                    *pre_recovery.preservation_checks,
-                    *recovery.preservation_checks,
-                )
-            }.values()),
-            rejected_candidates=tuple((
-                *pre_recovery.rejected_candidates,
-                *recovery.rejected_candidates,
-            )),
-            blocked_candidates=tuple((
-                *pre_recovery.blocked_candidates,
-                *recovery.blocked_candidates,
-            )),
-            unresolved_goal_ids=recovery.unresolved_goal_ids,
-            agent_events=tuple((
-                *pre_recovery.agent_events, *recovery.agent_events,
-            )),
-            timed_out=pre_recovery.timed_out or recovery.timed_out,
-            attempt_count=(
-                pre_recovery.attempt_count + recovery.attempt_count
-            ),
-            exhausted_reasons=tuple(dict.fromkeys((
-                *pre_recovery.exhausted_reasons,
-                *recovery.exhausted_reasons,
-            ))),
-        )
-        state.target_checks = tuple({item.check_id: item for item in (*state.target_checks, *recovery.target_checks)}.values())[: self.config.target_recovery_max_probes]
-        state.preservation_checks = tuple({item.check_id: item for item in (*state.preservation_checks, *recovery.preservation_checks)}.values())
-        state.target_recovery = recovery
+            finally:
+                state.phase = previous_phase
+            update_graph_from_recovery(graph, fixed_recovery)
+            state.target_checks = tuple({
+                item.check_id: item
+                for item in (*state.target_checks, *fixed_recovery.target_checks)
+            }.values())[: self.config.target_recovery_max_probes]
+            state.preservation_checks = tuple({
+                item.check_id: item
+                for item in (*state.preservation_checks, *fixed_recovery.preservation_checks)
+            }.values())
+            state.target_recovery = fixed_recovery
+        else:
+            state.target_recovery = pre_recovery
         context.store.write_state(state)
-        # Keep searching even when recovery is unresolved; later execution
-        # evidence can make the graph and probe recoveries actionable.
 
         hard_goal_ids = tuple(
             str(goal.goal_id) for goal in goals
             if bool(getattr(goal, "hard", False))
         )
-        compile_contract_obligations(graph, goals, state.target_checks)
+        compile_contract_obligations(
+            graph, goals, (*state.target_checks, *state.preservation_checks),
+        )
 
         api_failures = 0
         empty_attempts = 0
@@ -1319,6 +1354,13 @@ class ReachAvoidController:
             if timed_action is not None:
                 graph.record_update("ACTION_COMPLETED", action_id=timed_action.action_id,
                     kind=timed_action.kind, duration_seconds=time.monotonic() - action_started)
+                action_node = graph.nodes.get(timed_action.action_id)
+                if action_node is not None and action_node.status == "SELECTED":
+                    graph.nodes[action_node.node_id] = replace(
+                        action_node, status="COMPLETED",
+                        metadata={**action_node.metadata,
+                                  "duration_seconds": time.monotonic() - action_started},
+                    )
             active_hypothesis = None
             # Select the next node globally from the unified graph.  A
             # rejected sibling can therefore never become the implicit parent
@@ -1329,7 +1371,8 @@ class ReachAvoidController:
                 and (active_case_budget.get() is None or active_case_budget.get().remaining_wall > self.config.final_validation_reserve_seconds))
             actions = derive_frontier_actions(graph, max_depth=self.config.search_budget.max_depth,
                 generation_allowed=generation_allowed,
-                max_exploratory_probes=self.config.search_budget.max_exploratory_probes_per_checkpoint)
+                max_exploratory_probes=self.config.search_budget.max_exploratory_probes_per_checkpoint,
+                demand_driven=self.config.demand_driven_interaction_enabled)
             selected_action = select_next_action(graph, actions)
             timed_action = selected_action
             action_started = time.monotonic()
@@ -1368,6 +1411,12 @@ class ReachAvoidController:
                              if key in state.checkpoint_history}
                 snapshots[state.working_checkpoint.checkpoint_id] = working
                 reports = execute_sibling_probes(graph, (cell,), snapshots, clean=clean, max_probes=1)
+                resolve_checkpoint_questions(
+                    graph, state.working_checkpoint.checkpoint_id, ("FALSIFY",),
+                    "SUPPORTED" if reports else "BLOCKED",
+                    evidence_ids=tuple(report.get("probe_id", "") for report in reports),
+                    blocking_reason=None if reports else "PROBE_NOT_EXECUTED",
+                )
                 cp_node = graph.nodes[state.working_checkpoint.checkpoint_id]
                 graph.nodes[cp_node.node_id] = replace(cp_node, metadata={**cp_node.metadata,
                     "exploratory_probe_attempts": cp_node.metadata.get("exploratory_probe_attempts", 0) + 1})
@@ -1395,6 +1444,11 @@ class ReachAvoidController:
             targets_before, preservation_before, challenges_before = self._split(
                 parent_results, state,
             )
+            if parent_results:
+                resolve_checkpoint_questions(
+                    graph, state.working_checkpoint.checkpoint_id, ("VALIDATE",),
+                    "SUPPORTED", evidence_ids=tuple(item.check_id for item in parent_results),
+                )
             graph_checkpoint = CheckpointState(
                 checkpoint_id=state.working_checkpoint.checkpoint_id,
                 parent_checkpoint_id=state.working_checkpoint.parent_checkpoint_id,
@@ -1442,6 +1496,10 @@ class ReachAvoidController:
                 ))
                 state.checkpoint_history[synchronized.checkpoint_id] = synchronized
                 update_working_checkpoint(state, synchronized)
+                if state.best_checkpoint and state.best_checkpoint.checkpoint_id == synchronized.checkpoint_id:
+                    state.best_checkpoint = synchronized
+                if state.safe_checkpoint and state.safe_checkpoint.checkpoint_id == synchronized.checkpoint_id:
+                    state.safe_checkpoint = synchronized
                 graph.update_checkpoint(synchronized.checkpoint_id, locked_successes=tuple(lock.check_id for lock in new_locks))
 
             potentially_reached = all_reach_conditions_pass(
@@ -1454,7 +1512,9 @@ class ReachAvoidController:
                 wall_seconds=min(60.0, max(0.0, self.config.execution_budget_seconds - (time.monotonic() - started))),
             ) if potentially_reached else ()
             audit_gaps = uncovered_oracle_gaps(oracle_review)
-            obligation_ids = compile_contract_obligations(graph, goals, state.target_checks)
+            obligation_ids = compile_contract_obligations(
+                graph, goals, (*state.target_checks, *state.preservation_checks),
+            )
             closure = evaluate_validation_closure(graph, state.working_checkpoint.checkpoint_id, obligation_ids,
                                                    parent_results, oracle_review)
             frontier_action = select_frontier_action_from_graph(graph, state.working_checkpoint.checkpoint_id, oracle_gaps=audit_gaps)
@@ -1488,10 +1548,22 @@ class ReachAvoidController:
                     for item in parent_results
                 ) or bool(
                     set(hard_goal_ids)
-                    - {str(item.goal_id) for item in state.target_checks if item.goal_id}
+                    - {
+                        str(item.goal_id)
+                        for item in (*state.target_checks, *state.preservation_checks)
+                        if item.goal_id and item.trusted
+                    }
                 )
                 if unresolved and recovery_rounds < self.config.target_recovery_attempts:
+                    evidence = {"gaps": closure.get("gaps", ()),
+                        "observations": [(item.check_id, item.semantic_signature) for item in parent_results],
+                        "goals": [goal.to_dict() for goal in goals]}
+                    if not claim_evidence_action(graph, state.working_checkpoint.checkpoint_id,
+                            "RECOVER_EVIDENCE", "Recover the missing executable contract", evidence):
+                        exhaust_action(graph, selected_action, "NO_NEW_RECOVERY_EVIDENCE")
+                        continue
                     recovery_rounds += 1
+                    state.phase = ReachAvoidPhase.TARGET_RECOVERY
                     recovery = recover_target_checks(
                         repository, clean, working, goals, public,
                         transport, root, recovery_config, source_hints=source_hints,
@@ -1506,6 +1578,32 @@ class ReachAvoidController:
                     state.target_checks = tuple({item.check_id: item for item in (*state.target_checks, *recovery.target_checks)}.values())[: self.config.target_recovery_max_probes]
                     state.preservation_checks = tuple({item.check_id: item for item in (*state.preservation_checks, *recovery.preservation_checks)}.values())
                     state.target_recovery = recovery
+                    # Recovery changes the executable evidence universe. Bind
+                    # the new handles and contract facets immediately so the
+                    # same checkpoint acquires a pending VALIDATE action on
+                    # the next scheduler turn. Without this hand-off, the old
+                    # recovery question is resolved while the recovered target
+                    # is absent from REQUIRES_VALIDATION edges, leaving the
+                    # global frontier falsely empty.
+                    compile_contract_obligations(
+                        graph, goals,
+                        (*state.target_checks, *state.preservation_checks),
+                    )
+                    register_validation_checks(
+                        graph, self._checks(state),
+                        locked_ids=tuple(lock.check_id for lock in state.locked_checks),
+                    )
+                    derive_validation_obligations(
+                        graph, state.working_checkpoint.checkpoint_id,
+                    )
+                    resolve_checkpoint_questions(
+                        graph, state.working_checkpoint.checkpoint_id,
+                        ("TARGET_RECOVERY", "RECOVER_EVIDENCE"),
+                        "SUPPORTED" if recovery.target_checks else "BLOCKED",
+                        evidence_ids=("recovery-history",) if "recovery-history" in graph.nodes else (),
+                        blocking_reason=None if recovery.target_checks else
+                            ",".join(recovery.exhausted_reasons) or "NO_TRUSTED_TARGET",
+                    )
                     continue
                 terminal_status = "EVIDENCE_LIMITED" if unresolved else "MECHANISM_EXHAUSTED"
                 exhaust_action(graph, selected_action, terminal_status)
@@ -1678,6 +1776,13 @@ class ReachAvoidController:
                         and node.metadata.get("source_branch_id") in {branch_id for cut in selected_cuts for branch_id in cut.branch_ids})[-6:],
                 )
             parent = state.working_checkpoint
+            if not claim_evidence_action(graph, parent.checkpoint_id, "REPAIR",
+                    active_hypothesis.proposed_mechanism if active_hypothesis else active.kind.value,
+                    {"failure": active.signature,
+                     "observation": self._observation_hash(active_execution) if active_execution else self._blockers(mechanical_before),
+                     "causal_cuts": objective.causal_cut_ids}):
+                exhaust_action(graph, selected_action, "NO_NEW_REPAIR_EVIDENCE")
+                continue
             state.phase = ReachAvoidPhase.REPAIR
             try:
                 trial_result = self.repair_player.revise_working_patch(state, objective)
@@ -1849,7 +1954,10 @@ class ReachAvoidController:
                     wall_seconds=min(60.0, max(0.0, self.config.execution_budget_seconds - (time.monotonic() - started))),
                 )
                 closure = evaluate_validation_closure(graph, trial.checkpoint_id,
-                    compile_contract_obligations(graph, goals, state.target_checks), trial_results, trial_audit)
+                    compile_contract_obligations(
+                        graph, goals,
+                        (*state.target_checks, *state.preservation_checks),
+                    ), trial_results, trial_audit)
                 if uncovered_oracle_gaps(trial_audit) or not closure["closed"]:
                     decision = TransitionDecision.KEEP_REPAIRING
             certificate = self._certificate(
@@ -1864,6 +1972,17 @@ class ReachAvoidController:
             )
             state.transition_history.append(certificate)
             graph.record_transition(parent.checkpoint_id, trial.checkpoint_id, decision.value, evidence_ids=(certificate.certificate_id,))
+            resolve_checkpoint_questions(
+                graph, parent.checkpoint_id, ("REPAIR",),
+                "REFUTED" if decision is TransitionDecision.REJECT_TRIAL else "SUPPORTED",
+                evidence_ids=(trial.checkpoint_id,),
+                blocking_reason=("TRIAL_REJECTED" if decision is TransitionDecision.REJECT_TRIAL else None),
+            )
+            if decision is TransitionDecision.REACHED:
+                resolve_checkpoint_questions(
+                    graph, trial.checkpoint_id, ("CERTIFY",), "SUPPORTED",
+                    evidence_ids=(trial.checkpoint_id,),
+                )
 
             remaining_siblings = tuple(hypotheses[1:])
             if decision is TransitionDecision.REJECT_TRIAL:
@@ -1957,15 +2076,23 @@ class ReachAvoidController:
         try:
             try:
                 return self._run_execution_driven(case, run_root=run_root)
-            except CaseBudgetExhausted:
+            except CaseBudgetExhausted as error:
                 if budget.state is None:
                     raise  # No patch checkpoint exists to seal.
-                return self._output(budget.state, select_final_checkpoint(budget.state), "BEST_EFFORT_BUDGET_EXHAUSTED")
+                reason = str(error)
+                status = ("EVIDENCE_LIMITED_CONTEXT" if "CONTEXT" in reason
+                          else "BEST_EFFORT_BUDGET_EXHAUSTED")
+                budget.state.dynamic_failure_graph.record_update(
+                    "CASE_LIMIT_REACHED", reason=reason, terminal_status=status,
+                )
+                return self._output(budget.state, select_final_checkpoint(budget.state), status)
         finally:
             if original_transport is not None:
                 agent.transport = original_transport
             if budget.state is not None:
                 (budget.state.run_root / "case_budget.json").write_text(canonical_json(budget.summary()) + "\n", encoding="utf-8")
+                (budget.state.run_root / "token_efficiency.json").write_text(
+                    canonical_json(efficiency_report(budget.state.dynamic_failure_graph, budget)) + "\n", encoding="utf-8")
             active_case_budget.reset(token)
 
     def run(

@@ -85,7 +85,7 @@ class RepairToolExecutor:
         intervals = self._read_intervals.setdefault(Path(path).as_posix(), [])
         redundant = any(start >= left and end <= right for left, right in intervals)
         intervals.append((start, end))
-        return {
+        result = {
             "path": Path(path).as_posix(),
             "start_line": start,
             "end_line": end,
@@ -97,6 +97,12 @@ class RepairToolExecutor:
             "next_start_line": None if end >= len(lines) else end + 1,
             "redundant": redundant,
         }
+        from reachpatch.reach_avoid.evidence_context import read_evidence
+        from reachpatch.models.base import content_hash
+        # The source hash invalidates prior intervals after an edit. Never
+        # return an old snippet just because its filename/line range matches.
+        return read_evidence(self.state.dynamic_failure_graph, Path(path).as_posix(),
+                             content_hash(lines), start, end, result)
 
     def search_symbol(self, symbol: str) -> dict[str, Any]:
         raw_symbol = str(symbol).strip()
@@ -206,31 +212,6 @@ class RepairToolExecutor:
     def _apply_incremental(self, patch: str) -> None:
         apply_patch_action(self.tree, patch)
 
-    def _apply_cumulative_as_incremental(self, patch: str) -> bool:
-        current = diff_between(self.state.clean_snapshot, self.tree)
-        if current.empty:
-            return False
-        temporary = Path(tempfile.mkdtemp(prefix="reachpatch-cumulative-", dir=self.state.run_root))
-        expected = temporary / "expected"
-        try:
-            copy_source_tree(self.state.clean_snapshot, expected)
-            apply_patch_action(expected, patch)
-            proposed = diff_between(self.state.clean_snapshot, expected)
-            # A cumulative response must carry every currently changed file.
-            # Otherwise it is an incremental patch that merely also applies to
-            # clean and must be applied directly to the current working tree.
-            if not set(current.changed_files).issubset(proposed.changed_files):
-                return False
-            incremental = diff_between(self.tree, expected)
-            if incremental.empty:
-                raise RuntimeError("model returned the already-applied cumulative patch")
-            apply_unified_diff(self.tree, incremental.canonical_diff)
-            return True
-        except RuntimeError:
-            return False
-        finally:
-            shutil.rmtree(temporary, ignore_errors=True)
-
     def apply_patch(self, patch: str) -> dict[str, Any]:
         patch = str(patch)
         if not patch.strip():
@@ -240,9 +221,14 @@ class RepairToolExecutor:
         copy_source_tree(self.tree, backup)
         before = diff_between(self.state.clean_snapshot, self.tree)
         try:
-            normalized_cumulative = self._apply_cumulative_as_incremental(patch)
-            if not normalized_cumulative:
-                self._apply_incremental(patch)
+            # The staging tree is an exact copy of the designated parent
+            # checkpoint. Tool edits are therefore always parent-relative.
+            # Inferring a base-relative cumulative patch from file overlap is
+            # unsound: an imports-only child edit can apply to clean and would
+            # silently erase a parent's catch/guard in the same file. The
+            # controller derives the authoritative base->child full diff after
+            # this incremental edit succeeds.
+            self._apply_incremental(patch)
             after = diff_between(self.state.clean_snapshot, self.tree)
             if after.patch_hash == before.patch_hash:
                 raise RuntimeError("patch made no executable tree change")
@@ -258,7 +244,7 @@ class RepairToolExecutor:
             "before_patch_hash": before.patch_hash,
             "after_patch_hash": after.patch_hash,
             "changed_files": after.changed_files,
-            "normalized_cumulative_response": normalized_cumulative,
+            "applied_to_parent_snapshot": True,
             "validation_status": self.validation_status(),
         }
 

@@ -4,6 +4,7 @@ from __future__ import annotations
 from contextvars import ContextVar
 from dataclasses import dataclass, field
 from functools import wraps
+import hashlib
 import json
 import time
 from typing import Any
@@ -26,6 +27,8 @@ class CaseBudget:
     execution_used: float = 0.0
     events: list[dict[str, Any]] = field(default_factory=list)
     execution_cache: dict[str, Any] = field(default_factory=dict, repr=False)
+    model_request_counts: dict[str, int] = field(default_factory=dict, repr=False)
+    model_action_counts: dict[str, int] = field(default_factory=dict, repr=False)
     state: Any = field(default=None, repr=False)
 
     @property
@@ -40,6 +43,8 @@ class CaseBudget:
 
     def summary(self) -> dict[str, Any]:
         return {"model_calls": self.model_calls, "tokens": self.tokens,
+                "usage": {key: sum(event.get("usage", {}).get(key, 0) or 0 for event in self.events)
+                          for key in ("prompt_tokens", "completion_tokens", "total_tokens", "prompt_cache_hit_tokens", "prompt_cache_miss_tokens")},
                 "execution_seconds": self.execution_used, "remaining_wall_seconds": self.remaining_wall,
                 "max_model_calls": self.max_model_calls, "max_tokens": self.max_tokens,
                 "events": self.events}
@@ -76,8 +81,27 @@ class BudgetedTransport:
         # UTF-8 byte count is a conservative input reservation, not a claim of
         # exact tokenization. Include tool schemas in the reservation.
         input_bound = len(json.dumps((messages, kwargs.get("tools", ())), ensure_ascii=False).encode("utf-8"))
-        output_limit = min(int(kwargs.get("max_tokens", 4096)), budget.max_tokens - budget.tokens - input_bound)
+        stage = str(getattr(budget.state, "phase", "EVIDENCE_RECOVERY"))
+        request_payload = json.dumps(
+            (stage, messages, kwargs.get("tools", ())),
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+            default=str,
+        ).encode("utf-8")
+        request_fingerprint = hashlib.sha256(request_payload).hexdigest()
+        prior_request_count = budget.model_request_counts.get(request_fingerprint, 0)
+        budget.model_request_counts[request_fingerprint] = prior_request_count + 1
+        # Reserve the last 20% for post-generation evidence and repair. This
+        # is a request admission bound, not a measurement of consumed tokens.
+        reserve = int(budget.max_tokens * .2) if stage == "INITIAL_GENERATION" else 0
+        available = budget.max_tokens - budget.tokens - reserve
+        output_limit = min(int(kwargs.get("max_tokens", 4096)), available - input_bound)
         if output_limit <= 0:
+            budget.events.append({"kind": "MODEL_REJECTED", "stage": stage,
+                "reason": "TOKEN_BUDGET", "input_reservation": input_bound,
+                "remaining_tokens": budget.max_tokens - budget.tokens,
+                "protected_tokens": reserve})
             raise CaseBudgetExhausted("TOKEN_BUDGET")
         kwargs["max_tokens"] = output_limit
         kwargs["timeout_seconds"] = min(float(kwargs.get("timeout_seconds", 120.0)),
@@ -89,12 +113,53 @@ class BudgetedTransport:
         try:
             response = self.transport.complete(messages, **kwargs)
         except BaseException:
-            budget.events.append({"kind": "MODEL_ERROR", "charged_tokens": reserved})
+            budget.events.append({"kind": "MODEL_ERROR", "stage": stage,
+                                  "charged_tokens": reserved, "usage_reported": False})
             raise
         usage = response.get("_usage", response.get("usage", {})) or {}
         actual = usage.get("total_tokens")
         charged = int(actual) if isinstance(actual, (int, float)) and actual >= 0 else reserved
         budget.tokens += charged - reserved
-        budget.events.append({"kind": "MODEL", "charged_tokens": charged,
-                              "usage_reported": actual is not None, "seconds": time.monotonic() - started})
+        tool_names: list[str] = []
+        novel_tool_actions = 0
+        duplicate_tool_actions = 0
+        for call in response.get("tool_calls", ()) or ():
+            function = call.get("function", {}) if isinstance(call, dict) else {}
+            name = str(function.get("name", ""))
+            arguments = function.get("arguments", "")
+            tool_names.append(name)
+            action_payload = json.dumps(
+                (stage, name, arguments), ensure_ascii=False, sort_keys=True,
+                separators=(",", ":"), default=str,
+            ).encode("utf-8")
+            action_fingerprint = hashlib.sha256(action_payload).hexdigest()
+            prior_action_count = budget.model_action_counts.get(action_fingerprint, 0)
+            budget.model_action_counts[action_fingerprint] = prior_action_count + 1
+            if prior_action_count:
+                duplicate_tool_actions += 1
+            else:
+                novel_tool_actions += 1
+        content = str(response.get("content", "") or "").strip()
+        budget.events.append({
+            "kind": "MODEL",
+            "charged_tokens": charged,
+            "stage": stage,
+            "usage": usage,
+            "input_reservation": input_bound,
+            "usage_reported": actual is not None,
+            "seconds": time.monotonic() - started,
+            # Store only hashes and tool names: enough to audit repeated work
+            # without copying prompts, source, issue text, or tool arguments.
+            "request_fingerprint": request_fingerprint,
+            "exact_request_duplicate": bool(prior_request_count),
+            "tool_call_count": len(tool_names),
+            "tool_names": tool_names,
+            "novel_tool_action_count": novel_tool_actions,
+            "duplicate_tool_action_count": duplicate_tool_actions,
+            "has_text_response": bool(content),
+            "response_content_hash": (
+                hashlib.sha256(content.encode("utf-8")).hexdigest()
+                if content else None
+            ),
+        })
         return response

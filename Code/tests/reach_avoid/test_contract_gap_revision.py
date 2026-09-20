@@ -48,6 +48,31 @@ def test_grounded_stronger_probe_binds_to_parent_family_not_unrelated_goal():
     assert match_grounded_probe_goal(goals, replace_probe(probe, "unrelated")) is None
 
 
+def test_grounded_relation_accepts_only_falsifiable_target_assertion_probe():
+    relation = GoalContract(
+        "relation", "iter_content", ("iter_content",), "RELATION_HOLDS", True,
+        (EvidenceSpan(0, 31, "iter_content should handle errors"),), "B", True,
+        evidence_span_ids=("maintainer-hint",),
+    )
+    contract = ObservationContract("public relation", {"exit_code": 0},
+                                   "process", "EXIT_ZERO")
+    valid = SimpleNamespace(
+        requirement_id="relation", contract=contract,
+        source="response.iter_content()\nassert handled\n",
+    )
+    vacuous = SimpleNamespace(
+        requirement_id="relation", contract=contract,
+        source="assert True\n",
+    )
+    print_only = SimpleNamespace(
+        requirement_id="relation", contract=contract,
+        source="try:\n    response.iter_content()\nexcept Exception as exc:\n    print(type(exc))\n",
+    )
+    assert match_grounded_probe_goal((relation,), valid) == relation
+    assert match_grounded_probe_goal((relation,), vacuous) is None
+    assert match_grounded_probe_goal((relation,), print_only) is None
+
+
 def replace_probe(probe, requirement_id):
     return SimpleNamespace(requirement_id=requirement_id, contract=probe.contract)
 
