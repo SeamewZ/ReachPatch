@@ -45,6 +45,9 @@ def environment(protocol, cell, root):
         env["REACHPATCH_" + name.upper()] = str(int(enabled))
     if protocol.get("source_tree_root"):
         env["REACHPATCH_SOURCE_TREE_ROOT"] = protocol["source_tree_root"]
+    if protocol.get("dataset_root"):
+        env["REACHPATCH_DATASET_ROOT"] = protocol["dataset_root"]
+        env["REACHPATCH_EXPECTED_PUBLIC_COUNT"] = str(len(protocol["case_ids"]))
     return env
 
 
@@ -158,7 +161,7 @@ def seal_study(root, protocol):
 
 
 def evaluate(root, protocol):
-    if protocol["scope"] != "development":
+    if protocol["scope"] not in {"development", "verified"}:
         raise ValueError("public smoke has no official harness outcome")
     # This is the first access to official data. Both the cohort seal and all
     # underlying patches are checked before the file is opened.
@@ -168,7 +171,8 @@ def evaluate(root, protocol):
     seal = seal_study(root, protocol)
     if stored != seal:
         raise RuntimeError("study seal changed")
-    official_path = CODE / "dataset/patchpsro_55_unique51/official_instances.jsonl"
+    official_path = Path(protocol.get("official_dataset_path") or
+                         CODE / "dataset/patchpsro_55_unique51/official_instances.jsonl")
     official = [json.loads(line) for line in official_path.read_text().splitlines() if line.strip()]
     official = [r for r in official if r["instance_id"] in protocol["case_ids"]]
     if len(official) != len(protocol["case_ids"]):
@@ -265,17 +269,21 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("command", choices=("init", "run", "analyze", "evaluate"))
     parser.add_argument("--root", required=True, type=Path)
-    parser.add_argument("--scope", choices=("public_smoke", "development"), default="public_smoke")
+    parser.add_argument("--scope", choices=("public_smoke", "development", "verified"), default="public_smoke")
     parser.add_argument("--count", type=int, default=30)
     parser.add_argument("--repetitions", type=int, default=3)
     parser.add_argument("--seed", type=int, default=20260920)
     parser.add_argument("--key-path", type=Path)
     parser.add_argument("--source-tree-root", type=Path)
     parser.add_argument("--evaluate", action="store_true")
+    parser.add_argument("--dataset-root", type=Path)
+    parser.add_argument("--official-dataset-path", type=Path)
     args = parser.parse_args()
     root = args.root.resolve()
     if args.command == "init":
-        freeze_protocol(root, make_protocol(args.scope, args.count, args.repetitions, args.seed, args.source_tree_root))
+        freeze_protocol(root, make_protocol(args.scope, args.count, args.repetitions, args.seed,
+                                            args.source_tree_root, args.dataset_root,
+                                            args.official_dataset_path))
     elif args.command == "run":
         if args.key_path is None:
             parser.error("run requires --key-path")

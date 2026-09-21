@@ -1,0 +1,3553 @@
+{
+  "schema": "evidence-study-v1",
+  "scope": "verified",
+  "host_runtime": {
+    "python": "/home/slt/miniconda3/bin/python",
+    "python_version": "3.12.2 | packaged by conda-forge | (main, Feb 16 2024, 20:50:58) [GCC 12.3.0]",
+    "tools": {
+      "rg": "/home/slt/.local/lib/node_modules/@openai/codex/node_modules/@openai/codex-linux-x64/vendor/x86_64-unknown-linux-musl/codex-path/rg",
+      "git": "/usr/bin/git",
+      "docker": "/usr/bin/docker",
+      "bwrap": "/usr/bin/bwrap"
+    },
+    "tool_hashes": {
+      "rg": "e62198eb19b136b88c330af83647b5a962cb99b6b1f066758568f12de1974849",
+      "git": "3dfa19605e97b9363bcff3a62df8db10fa393fa4e69b962ae5ea7ddb7d34505d",
+      "docker": "a34fef78491da673e6220065b8cb8c04dc3aeb5629a7c78ca92b9a0da6ff9592",
+      "bwrap": "131c2f0861c0e01728c7edad89db04e0277d67454d4611450917769566750903"
+    }
+  },
+  "source_tree_root": "/home/slt/ReachPatch/Code/experiments/swe_verified_20260922/case_trees",
+  "dataset_root": "/home/slt/ReachPatch/Code/experiments/swe_verified_20260922/public",
+  "official_dataset_path": "/home/slt/ReachPatch/Code/experiments/swe_verified_20260922/private_official/official_instances.jsonl",
+  "public_fixture_sha256": "4d4152b01253556f001fa0e08a42b5a04bfda3d28e779b88f8688bc2b2946ab2",
+  "model": "deepseek-flash",
+  "temperature": 0,
+  "provider_seed": "NOT_SUPPORTED_BY_TRANSPORT",
+  "randomization_seed": 20260922,
+  "repetitions": 1,
+  "case_ids": [
+    "astropy__astropy-14539",
+    "django__django-14792",
+    "matplotlib__matplotlib-26466",
+    "mwaskom__seaborn-3187",
+    "pallets__flask-5014",
+    "psf__requests-2931",
+    "pydata__xarray-4629",
+    "pylint-dev__pylint-6386",
+    "pytest-dev__pytest-6197",
+    "scikit-learn__scikit-learn-14894",
+    "sphinx-doc__sphinx-8595",
+    "sympy__sympy-14531",
+    "astropy__astropy-13398",
+    "django__django-15851",
+    "matplotlib__matplotlib-24149",
+    "mwaskom__seaborn-3069",
+    "psf__requests-5414",
+    "pydata__xarray-3095",
+    "pylint-dev__pylint-6903",
+    "pytest-dev__pytest-5631",
+    "scikit-learn__scikit-learn-9288",
+    "sphinx-doc__sphinx-8120",
+    "sympy__sympy-22456",
+    "astropy__astropy-7671",
+    "django__django-12209",
+    "matplotlib__matplotlib-25332",
+    "psf__requests-1724",
+    "pydata__xarray-7393",
+    "pylint-dev__pylint-4970",
+    "pytest-dev__pytest-5840",
+    "scikit-learn__scikit-learn-13439",
+    "sphinx-doc__sphinx-8265",
+    "sympy__sympy-20916",
+    "astropy__astropy-12907",
+    "django__django-13670",
+    "matplotlib__matplotlib-25960",
+    "psf__requests-6028",
+    "pydata__xarray-6721",
+    "pylint-dev__pylint-7277",
+    "pytest-dev__pytest-10051",
+    "scikit-learn__scikit-learn-25102",
+    "sphinx-doc__sphinx-9230",
+    "sympy__sympy-17655",
+    "astropy__astropy-14309",
+    "django__django-11951",
+    "matplotlib__matplotlib-26291",
+    "psf__requests-1142",
+    "pydata__xarray-4687",
+    "pylint-dev__pylint-7080",
+    "pytest-dev__pytest-5262",
+    "scikit-learn__scikit-learn-13135",
+    "sphinx-doc__sphinx-8035",
+    "sympy__sympy-13480",
+    "astropy__astropy-13033",
+    "django__django-13121",
+    "matplotlib__matplotlib-13989",
+    "psf__requests-1766",
+    "pydata__xarray-7233",
+    "pylint-dev__pylint-6528",
+    "pytest-dev__pytest-7571",
+    "scikit-learn__scikit-learn-10297",
+    "sphinx-doc__sphinx-9229",
+    "sympy__sympy-21930",
+    "astropy__astropy-7336",
+    "django__django-12774",
+    "matplotlib__matplotlib-24026",
+    "psf__requests-1921",
+    "pydata__xarray-3677",
+    "pylint-dev__pylint-8898",
+    "pytest-dev__pytest-7982",
+    "scikit-learn__scikit-learn-25747",
+    "sphinx-doc__sphinx-7889",
+    "sympy__sympy-23413",
+    "astropy__astropy-14508",
+    "django__django-13279",
+    "matplotlib__matplotlib-21568",
+    "psf__requests-2317",
+    "pydata__xarray-4094",
+    "pylint-dev__pylint-4604",
+    "pytest-dev__pytest-5787",
+    "scikit-learn__scikit-learn-26194",
+    "sphinx-doc__sphinx-9711",
+    "sympy__sympy-19783",
+    "astropy__astropy-14598",
+    "django__django-11433",
+    "matplotlib__matplotlib-20859",
+    "pydata__xarray-6461",
+    "pylint-dev__pylint-4551",
+    "pytest-dev__pytest-10356",
+    "scikit-learn__scikit-learn-13124",
+    "sphinx-doc__sphinx-8056",
+    "sympy__sympy-13615",
+    "astropy__astropy-7606",
+    "django__django-13741",
+    "matplotlib__matplotlib-24570",
+    "pydata__xarray-6938",
+    "pylint-dev__pylint-4661",
+    "pytest-dev__pytest-7490",
+    "scikit-learn__scikit-learn-13142",
+    "sphinx-doc__sphinx-9602"
+  ],
+  "arms": {
+    "F00": {
+      "demand": false,
+      "reuse": false,
+      "policy": {
+        "suppress_same_version_actions": false,
+        "reuse_source_evidence": false,
+        "compact_duplicate_payloads": false,
+        "reuse_validation_results": false,
+        "recovery_on_gap": false,
+        "falsification_on_question": false
+      },
+      "config": {
+        "max_real_patch_revisions": 2,
+        "initial_generator_attempts": 1,
+        "max_no_progress_generator_attempts": 2,
+        "execution_budget_seconds": 900,
+        "target_recovery_attempts": 1,
+        "target_recovery_max_probes": 6,
+        "target_recovery_stability_runs": 2,
+        "fixed_recovery_max_agent_turns": 6,
+        "validation_workers": 2,
+        "graph_budget": {
+          "max_files": 30,
+          "max_symbols": 800,
+          "max_edges": 4000,
+          "initial_caller_depth": 1,
+          "initial_callee_depth": 1,
+          "max_expansion_depth": 3,
+          "wall_seconds": 45
+        },
+        "search_budget": {
+          "branch_factor": 1,
+          "max_depth": 3,
+          "max_evaluated_patch_nodes": 8,
+          "max_children_per_causal_cut": 1,
+          "max_root_recoveries": 2,
+          "max_exploratory_probes_per_checkpoint": 2
+        },
+        "max_case_model_calls": 40,
+        "max_case_tokens": 250000,
+        "final_validation_reserve_seconds": 30.0,
+        "evidence_reuse_enabled": false,
+        "demand_driven_interaction_enabled": false,
+        "suppress_same_version_actions": null,
+        "reuse_source_evidence": null,
+        "compact_duplicate_payloads": null,
+        "reuse_validation_results": null,
+        "recovery_on_gap": null,
+        "falsification_on_question": null
+      }
+    },
+    "F10": {
+      "demand": true,
+      "reuse": false,
+      "policy": {
+        "suppress_same_version_actions": false,
+        "reuse_source_evidence": false,
+        "compact_duplicate_payloads": false,
+        "reuse_validation_results": false,
+        "recovery_on_gap": true,
+        "falsification_on_question": true
+      },
+      "config": {
+        "max_real_patch_revisions": 2,
+        "initial_generator_attempts": 1,
+        "max_no_progress_generator_attempts": 2,
+        "execution_budget_seconds": 900,
+        "target_recovery_attempts": 1,
+        "target_recovery_max_probes": 6,
+        "target_recovery_stability_runs": 2,
+        "fixed_recovery_max_agent_turns": 6,
+        "validation_workers": 2,
+        "graph_budget": {
+          "max_files": 30,
+          "max_symbols": 800,
+          "max_edges": 4000,
+          "initial_caller_depth": 1,
+          "initial_callee_depth": 1,
+          "max_expansion_depth": 3,
+          "wall_seconds": 45
+        },
+        "search_budget": {
+          "branch_factor": 1,
+          "max_depth": 3,
+          "max_evaluated_patch_nodes": 8,
+          "max_children_per_causal_cut": 1,
+          "max_root_recoveries": 2,
+          "max_exploratory_probes_per_checkpoint": 2
+        },
+        "max_case_model_calls": 40,
+        "max_case_tokens": 250000,
+        "final_validation_reserve_seconds": 30.0,
+        "evidence_reuse_enabled": false,
+        "demand_driven_interaction_enabled": true,
+        "suppress_same_version_actions": null,
+        "reuse_source_evidence": null,
+        "compact_duplicate_payloads": null,
+        "reuse_validation_results": null,
+        "recovery_on_gap": null,
+        "falsification_on_question": null
+      }
+    },
+    "F01": {
+      "demand": false,
+      "reuse": true,
+      "policy": {
+        "suppress_same_version_actions": true,
+        "reuse_source_evidence": true,
+        "compact_duplicate_payloads": true,
+        "reuse_validation_results": true,
+        "recovery_on_gap": false,
+        "falsification_on_question": false
+      },
+      "config": {
+        "max_real_patch_revisions": 2,
+        "initial_generator_attempts": 1,
+        "max_no_progress_generator_attempts": 2,
+        "execution_budget_seconds": 900,
+        "target_recovery_attempts": 1,
+        "target_recovery_max_probes": 6,
+        "target_recovery_stability_runs": 2,
+        "fixed_recovery_max_agent_turns": 6,
+        "validation_workers": 2,
+        "graph_budget": {
+          "max_files": 30,
+          "max_symbols": 800,
+          "max_edges": 4000,
+          "initial_caller_depth": 1,
+          "initial_callee_depth": 1,
+          "max_expansion_depth": 3,
+          "wall_seconds": 45
+        },
+        "search_budget": {
+          "branch_factor": 1,
+          "max_depth": 3,
+          "max_evaluated_patch_nodes": 8,
+          "max_children_per_causal_cut": 1,
+          "max_root_recoveries": 2,
+          "max_exploratory_probes_per_checkpoint": 2
+        },
+        "max_case_model_calls": 40,
+        "max_case_tokens": 250000,
+        "final_validation_reserve_seconds": 30.0,
+        "evidence_reuse_enabled": true,
+        "demand_driven_interaction_enabled": false,
+        "suppress_same_version_actions": null,
+        "reuse_source_evidence": null,
+        "compact_duplicate_payloads": null,
+        "reuse_validation_results": null,
+        "recovery_on_gap": null,
+        "falsification_on_question": null
+      }
+    },
+    "F11": {
+      "demand": true,
+      "reuse": true,
+      "policy": {
+        "suppress_same_version_actions": true,
+        "reuse_source_evidence": true,
+        "compact_duplicate_payloads": true,
+        "reuse_validation_results": true,
+        "recovery_on_gap": true,
+        "falsification_on_question": true
+      },
+      "config": {
+        "max_real_patch_revisions": 2,
+        "initial_generator_attempts": 1,
+        "max_no_progress_generator_attempts": 2,
+        "execution_budget_seconds": 900,
+        "target_recovery_attempts": 1,
+        "target_recovery_max_probes": 6,
+        "target_recovery_stability_runs": 2,
+        "fixed_recovery_max_agent_turns": 6,
+        "validation_workers": 2,
+        "graph_budget": {
+          "max_files": 30,
+          "max_symbols": 800,
+          "max_edges": 4000,
+          "initial_caller_depth": 1,
+          "initial_callee_depth": 1,
+          "max_expansion_depth": 3,
+          "wall_seconds": 45
+        },
+        "search_budget": {
+          "branch_factor": 1,
+          "max_depth": 3,
+          "max_evaluated_patch_nodes": 8,
+          "max_children_per_causal_cut": 1,
+          "max_root_recoveries": 2,
+          "max_exploratory_probes_per_checkpoint": 2
+        },
+        "max_case_model_calls": 40,
+        "max_case_tokens": 250000,
+        "final_validation_reserve_seconds": 30.0,
+        "evidence_reuse_enabled": true,
+        "demand_driven_interaction_enabled": true,
+        "suppress_same_version_actions": null,
+        "reuse_source_evidence": null,
+        "compact_duplicate_payloads": null,
+        "reuse_validation_results": null,
+        "recovery_on_gap": null,
+        "falsification_on_question": null
+      }
+    }
+  },
+  "max_attempts_per_cell": 1,
+  "infra_evaluation_retries": 2,
+  "parallel_blocks": 2,
+  "minimum_free_disk_gib": 100,
+  "primary_cost": "ALL_ATTEMPT_PROVIDER_TOTAL_TOKENS",
+  "noninferiority": "NOT_TESTED_IN_DEVELOPMENT_NO_MARGIN_CHOSEN",
+  "analysis": {
+    "bootstrap_unit": "issue",
+    "bootstrap_samples": 10000,
+    "seed": 20260922,
+    "multiplicity": "EXPLORATORY_NO_CONFIRMATORY_P_VALUES"
+  },
+  "implementation_hash": "58907a9bd3283d8eebbd00d2997a28f9aecc341da9cb0c3db840ed236f385744",
+  "public_sha256": "37be17c0866a570461f327ebd7335f1f29c869657663bbacbc40e5b693165323",
+  "cells": [
+    {
+      "cell_id": "b000-r0-F11",
+      "instance_id": "matplotlib__matplotlib-24570",
+      "repetition": 0,
+      "arm": "F11",
+      "block": 0,
+      "position": 0
+    },
+    {
+      "cell_id": "b000-r0-F01",
+      "instance_id": "matplotlib__matplotlib-24570",
+      "repetition": 0,
+      "arm": "F01",
+      "block": 0,
+      "position": 1
+    },
+    {
+      "cell_id": "b000-r0-F10",
+      "instance_id": "matplotlib__matplotlib-24570",
+      "repetition": 0,
+      "arm": "F10",
+      "block": 0,
+      "position": 2
+    },
+    {
+      "cell_id": "b000-r0-F00",
+      "instance_id": "matplotlib__matplotlib-24570",
+      "repetition": 0,
+      "arm": "F00",
+      "block": 0,
+      "position": 3
+    },
+    {
+      "cell_id": "b001-r0-F10",
+      "instance_id": "psf__requests-1766",
+      "repetition": 0,
+      "arm": "F10",
+      "block": 1,
+      "position": 0
+    },
+    {
+      "cell_id": "b001-r0-F11",
+      "instance_id": "psf__requests-1766",
+      "repetition": 0,
+      "arm": "F11",
+      "block": 1,
+      "position": 1
+    },
+    {
+      "cell_id": "b001-r0-F01",
+      "instance_id": "psf__requests-1766",
+      "repetition": 0,
+      "arm": "F01",
+      "block": 1,
+      "position": 2
+    },
+    {
+      "cell_id": "b001-r0-F00",
+      "instance_id": "psf__requests-1766",
+      "repetition": 0,
+      "arm": "F00",
+      "block": 1,
+      "position": 3
+    },
+    {
+      "cell_id": "b002-r0-F01",
+      "instance_id": "matplotlib__matplotlib-24149",
+      "repetition": 0,
+      "arm": "F01",
+      "block": 2,
+      "position": 0
+    },
+    {
+      "cell_id": "b002-r0-F11",
+      "instance_id": "matplotlib__matplotlib-24149",
+      "repetition": 0,
+      "arm": "F11",
+      "block": 2,
+      "position": 1
+    },
+    {
+      "cell_id": "b002-r0-F10",
+      "instance_id": "matplotlib__matplotlib-24149",
+      "repetition": 0,
+      "arm": "F10",
+      "block": 2,
+      "position": 2
+    },
+    {
+      "cell_id": "b002-r0-F00",
+      "instance_id": "matplotlib__matplotlib-24149",
+      "repetition": 0,
+      "arm": "F00",
+      "block": 2,
+      "position": 3
+    },
+    {
+      "cell_id": "b003-r0-F00",
+      "instance_id": "sphinx-doc__sphinx-8056",
+      "repetition": 0,
+      "arm": "F00",
+      "block": 3,
+      "position": 0
+    },
+    {
+      "cell_id": "b003-r0-F01",
+      "instance_id": "sphinx-doc__sphinx-8056",
+      "repetition": 0,
+      "arm": "F01",
+      "block": 3,
+      "position": 1
+    },
+    {
+      "cell_id": "b003-r0-F11",
+      "instance_id": "sphinx-doc__sphinx-8056",
+      "repetition": 0,
+      "arm": "F11",
+      "block": 3,
+      "position": 2
+    },
+    {
+      "cell_id": "b003-r0-F10",
+      "instance_id": "sphinx-doc__sphinx-8056",
+      "repetition": 0,
+      "arm": "F10",
+      "block": 3,
+      "position": 3
+    },
+    {
+      "cell_id": "b004-r0-F11",
+      "instance_id": "matplotlib__matplotlib-26466",
+      "repetition": 0,
+      "arm": "F11",
+      "block": 4,
+      "position": 0
+    },
+    {
+      "cell_id": "b004-r0-F00",
+      "instance_id": "matplotlib__matplotlib-26466",
+      "repetition": 0,
+      "arm": "F00",
+      "block": 4,
+      "position": 1
+    },
+    {
+      "cell_id": "b004-r0-F01",
+      "instance_id": "matplotlib__matplotlib-26466",
+      "repetition": 0,
+      "arm": "F01",
+      "block": 4,
+      "position": 2
+    },
+    {
+      "cell_id": "b004-r0-F10",
+      "instance_id": "matplotlib__matplotlib-26466",
+      "repetition": 0,
+      "arm": "F10",
+      "block": 4,
+      "position": 3
+    },
+    {
+      "cell_id": "b005-r0-F01",
+      "instance_id": "pytest-dev__pytest-10356",
+      "repetition": 0,
+      "arm": "F01",
+      "block": 5,
+      "position": 0
+    },
+    {
+      "cell_id": "b005-r0-F00",
+      "instance_id": "pytest-dev__pytest-10356",
+      "repetition": 0,
+      "arm": "F00",
+      "block": 5,
+      "position": 1
+    },
+    {
+      "cell_id": "b005-r0-F10",
+      "instance_id": "pytest-dev__pytest-10356",
+      "repetition": 0,
+      "arm": "F10",
+      "block": 5,
+      "position": 2
+    },
+    {
+      "cell_id": "b005-r0-F11",
+      "instance_id": "pytest-dev__pytest-10356",
+      "repetition": 0,
+      "arm": "F11",
+      "block": 5,
+      "position": 3
+    },
+    {
+      "cell_id": "b006-r0-F01",
+      "instance_id": "pylint-dev__pylint-6903",
+      "repetition": 0,
+      "arm": "F01",
+      "block": 6,
+      "position": 0
+    },
+    {
+      "cell_id": "b006-r0-F11",
+      "instance_id": "pylint-dev__pylint-6903",
+      "repetition": 0,
+      "arm": "F11",
+      "block": 6,
+      "position": 1
+    },
+    {
+      "cell_id": "b006-r0-F10",
+      "instance_id": "pylint-dev__pylint-6903",
+      "repetition": 0,
+      "arm": "F10",
+      "block": 6,
+      "position": 2
+    },
+    {
+      "cell_id": "b006-r0-F00",
+      "instance_id": "pylint-dev__pylint-6903",
+      "repetition": 0,
+      "arm": "F00",
+      "block": 6,
+      "position": 3
+    },
+    {
+      "cell_id": "b007-r0-F10",
+      "instance_id": "matplotlib__matplotlib-26291",
+      "repetition": 0,
+      "arm": "F10",
+      "block": 7,
+      "position": 0
+    },
+    {
+      "cell_id": "b007-r0-F11",
+      "instance_id": "matplotlib__matplotlib-26291",
+      "repetition": 0,
+      "arm": "F11",
+      "block": 7,
+      "position": 1
+    },
+    {
+      "cell_id": "b007-r0-F01",
+      "instance_id": "matplotlib__matplotlib-26291",
+      "repetition": 0,
+      "arm": "F01",
+      "block": 7,
+      "position": 2
+    },
+    {
+      "cell_id": "b007-r0-F00",
+      "instance_id": "matplotlib__matplotlib-26291",
+      "repetition": 0,
+      "arm": "F00",
+      "block": 7,
+      "position": 3
+    },
+    {
+      "cell_id": "b008-r0-F01",
+      "instance_id": "astropy__astropy-14539",
+      "repetition": 0,
+      "arm": "F01",
+      "block": 8,
+      "position": 0
+    },
+    {
+      "cell_id": "b008-r0-F10",
+      "instance_id": "astropy__astropy-14539",
+      "repetition": 0,
+      "arm": "F10",
+      "block": 8,
+      "position": 1
+    },
+    {
+      "cell_id": "b008-r0-F00",
+      "instance_id": "astropy__astropy-14539",
+      "repetition": 0,
+      "arm": "F00",
+      "block": 8,
+      "position": 2
+    },
+    {
+      "cell_id": "b008-r0-F11",
+      "instance_id": "astropy__astropy-14539",
+      "repetition": 0,
+      "arm": "F11",
+      "block": 8,
+      "position": 3
+    },
+    {
+      "cell_id": "b009-r0-F11",
+      "instance_id": "scikit-learn__scikit-learn-26194",
+      "repetition": 0,
+      "arm": "F11",
+      "block": 9,
+      "position": 0
+    },
+    {
+      "cell_id": "b009-r0-F10",
+      "instance_id": "scikit-learn__scikit-learn-26194",
+      "repetition": 0,
+      "arm": "F10",
+      "block": 9,
+      "position": 1
+    },
+    {
+      "cell_id": "b009-r0-F01",
+      "instance_id": "scikit-learn__scikit-learn-26194",
+      "repetition": 0,
+      "arm": "F01",
+      "block": 9,
+      "position": 2
+    },
+    {
+      "cell_id": "b009-r0-F00",
+      "instance_id": "scikit-learn__scikit-learn-26194",
+      "repetition": 0,
+      "arm": "F00",
+      "block": 9,
+      "position": 3
+    },
+    {
+      "cell_id": "b010-r0-F01",
+      "instance_id": "scikit-learn__scikit-learn-10297",
+      "repetition": 0,
+      "arm": "F01",
+      "block": 10,
+      "position": 0
+    },
+    {
+      "cell_id": "b010-r0-F10",
+      "instance_id": "scikit-learn__scikit-learn-10297",
+      "repetition": 0,
+      "arm": "F10",
+      "block": 10,
+      "position": 1
+    },
+    {
+      "cell_id": "b010-r0-F00",
+      "instance_id": "scikit-learn__scikit-learn-10297",
+      "repetition": 0,
+      "arm": "F00",
+      "block": 10,
+      "position": 2
+    },
+    {
+      "cell_id": "b010-r0-F11",
+      "instance_id": "scikit-learn__scikit-learn-10297",
+      "repetition": 0,
+      "arm": "F11",
+      "block": 10,
+      "position": 3
+    },
+    {
+      "cell_id": "b011-r0-F11",
+      "instance_id": "pytest-dev__pytest-5262",
+      "repetition": 0,
+      "arm": "F11",
+      "block": 11,
+      "position": 0
+    },
+    {
+      "cell_id": "b011-r0-F00",
+      "instance_id": "pytest-dev__pytest-5262",
+      "repetition": 0,
+      "arm": "F00",
+      "block": 11,
+      "position": 1
+    },
+    {
+      "cell_id": "b011-r0-F01",
+      "instance_id": "pytest-dev__pytest-5262",
+      "repetition": 0,
+      "arm": "F01",
+      "block": 11,
+      "position": 2
+    },
+    {
+      "cell_id": "b011-r0-F10",
+      "instance_id": "pytest-dev__pytest-5262",
+      "repetition": 0,
+      "arm": "F10",
+      "block": 11,
+      "position": 3
+    },
+    {
+      "cell_id": "b012-r0-F00",
+      "instance_id": "matplotlib__matplotlib-21568",
+      "repetition": 0,
+      "arm": "F00",
+      "block": 12,
+      "position": 0
+    },
+    {
+      "cell_id": "b012-r0-F01",
+      "instance_id": "matplotlib__matplotlib-21568",
+      "repetition": 0,
+      "arm": "F01",
+      "block": 12,
+      "position": 1
+    },
+    {
+      "cell_id": "b012-r0-F10",
+      "instance_id": "matplotlib__matplotlib-21568",
+      "repetition": 0,
+      "arm": "F10",
+      "block": 12,
+      "position": 2
+    },
+    {
+      "cell_id": "b012-r0-F11",
+      "instance_id": "matplotlib__matplotlib-21568",
+      "repetition": 0,
+      "arm": "F11",
+      "block": 12,
+      "position": 3
+    },
+    {
+      "cell_id": "b013-r0-F00",
+      "instance_id": "sphinx-doc__sphinx-9711",
+      "repetition": 0,
+      "arm": "F00",
+      "block": 13,
+      "position": 0
+    },
+    {
+      "cell_id": "b013-r0-F01",
+      "instance_id": "sphinx-doc__sphinx-9711",
+      "repetition": 0,
+      "arm": "F01",
+      "block": 13,
+      "position": 1
+    },
+    {
+      "cell_id": "b013-r0-F10",
+      "instance_id": "sphinx-doc__sphinx-9711",
+      "repetition": 0,
+      "arm": "F10",
+      "block": 13,
+      "position": 2
+    },
+    {
+      "cell_id": "b013-r0-F11",
+      "instance_id": "sphinx-doc__sphinx-9711",
+      "repetition": 0,
+      "arm": "F11",
+      "block": 13,
+      "position": 3
+    },
+    {
+      "cell_id": "b014-r0-F10",
+      "instance_id": "sympy__sympy-20916",
+      "repetition": 0,
+      "arm": "F10",
+      "block": 14,
+      "position": 0
+    },
+    {
+      "cell_id": "b014-r0-F01",
+      "instance_id": "sympy__sympy-20916",
+      "repetition": 0,
+      "arm": "F01",
+      "block": 14,
+      "position": 1
+    },
+    {
+      "cell_id": "b014-r0-F00",
+      "instance_id": "sympy__sympy-20916",
+      "repetition": 0,
+      "arm": "F00",
+      "block": 14,
+      "position": 2
+    },
+    {
+      "cell_id": "b014-r0-F11",
+      "instance_id": "sympy__sympy-20916",
+      "repetition": 0,
+      "arm": "F11",
+      "block": 14,
+      "position": 3
+    },
+    {
+      "cell_id": "b015-r0-F11",
+      "instance_id": "pylint-dev__pylint-6528",
+      "repetition": 0,
+      "arm": "F11",
+      "block": 15,
+      "position": 0
+    },
+    {
+      "cell_id": "b015-r0-F00",
+      "instance_id": "pylint-dev__pylint-6528",
+      "repetition": 0,
+      "arm": "F00",
+      "block": 15,
+      "position": 1
+    },
+    {
+      "cell_id": "b015-r0-F01",
+      "instance_id": "pylint-dev__pylint-6528",
+      "repetition": 0,
+      "arm": "F01",
+      "block": 15,
+      "position": 2
+    },
+    {
+      "cell_id": "b015-r0-F10",
+      "instance_id": "pylint-dev__pylint-6528",
+      "repetition": 0,
+      "arm": "F10",
+      "block": 15,
+      "position": 3
+    },
+    {
+      "cell_id": "b016-r0-F11",
+      "instance_id": "sympy__sympy-21930",
+      "repetition": 0,
+      "arm": "F11",
+      "block": 16,
+      "position": 0
+    },
+    {
+      "cell_id": "b016-r0-F00",
+      "instance_id": "sympy__sympy-21930",
+      "repetition": 0,
+      "arm": "F00",
+      "block": 16,
+      "position": 1
+    },
+    {
+      "cell_id": "b016-r0-F01",
+      "instance_id": "sympy__sympy-21930",
+      "repetition": 0,
+      "arm": "F01",
+      "block": 16,
+      "position": 2
+    },
+    {
+      "cell_id": "b016-r0-F10",
+      "instance_id": "sympy__sympy-21930",
+      "repetition": 0,
+      "arm": "F10",
+      "block": 16,
+      "position": 3
+    },
+    {
+      "cell_id": "b017-r0-F01",
+      "instance_id": "matplotlib__matplotlib-24026",
+      "repetition": 0,
+      "arm": "F01",
+      "block": 17,
+      "position": 0
+    },
+    {
+      "cell_id": "b017-r0-F10",
+      "instance_id": "matplotlib__matplotlib-24026",
+      "repetition": 0,
+      "arm": "F10",
+      "block": 17,
+      "position": 1
+    },
+    {
+      "cell_id": "b017-r0-F11",
+      "instance_id": "matplotlib__matplotlib-24026",
+      "repetition": 0,
+      "arm": "F11",
+      "block": 17,
+      "position": 2
+    },
+    {
+      "cell_id": "b017-r0-F00",
+      "instance_id": "matplotlib__matplotlib-24026",
+      "repetition": 0,
+      "arm": "F00",
+      "block": 17,
+      "position": 3
+    },
+    {
+      "cell_id": "b018-r0-F10",
+      "instance_id": "django__django-14792",
+      "repetition": 0,
+      "arm": "F10",
+      "block": 18,
+      "position": 0
+    },
+    {
+      "cell_id": "b018-r0-F11",
+      "instance_id": "django__django-14792",
+      "repetition": 0,
+      "arm": "F11",
+      "block": 18,
+      "position": 1
+    },
+    {
+      "cell_id": "b018-r0-F00",
+      "instance_id": "django__django-14792",
+      "repetition": 0,
+      "arm": "F00",
+      "block": 18,
+      "position": 2
+    },
+    {
+      "cell_id": "b018-r0-F01",
+      "instance_id": "django__django-14792",
+      "repetition": 0,
+      "arm": "F01",
+      "block": 18,
+      "position": 3
+    },
+    {
+      "cell_id": "b019-r0-F10",
+      "instance_id": "pylint-dev__pylint-8898",
+      "repetition": 0,
+      "arm": "F10",
+      "block": 19,
+      "position": 0
+    },
+    {
+      "cell_id": "b019-r0-F00",
+      "instance_id": "pylint-dev__pylint-8898",
+      "repetition": 0,
+      "arm": "F00",
+      "block": 19,
+      "position": 1
+    },
+    {
+      "cell_id": "b019-r0-F11",
+      "instance_id": "pylint-dev__pylint-8898",
+      "repetition": 0,
+      "arm": "F11",
+      "block": 19,
+      "position": 2
+    },
+    {
+      "cell_id": "b019-r0-F01",
+      "instance_id": "pylint-dev__pylint-8898",
+      "repetition": 0,
+      "arm": "F01",
+      "block": 19,
+      "position": 3
+    },
+    {
+      "cell_id": "b020-r0-F11",
+      "instance_id": "scikit-learn__scikit-learn-13142",
+      "repetition": 0,
+      "arm": "F11",
+      "block": 20,
+      "position": 0
+    },
+    {
+      "cell_id": "b020-r0-F10",
+      "instance_id": "scikit-learn__scikit-learn-13142",
+      "repetition": 0,
+      "arm": "F10",
+      "block": 20,
+      "position": 1
+    },
+    {
+      "cell_id": "b020-r0-F01",
+      "instance_id": "scikit-learn__scikit-learn-13142",
+      "repetition": 0,
+      "arm": "F01",
+      "block": 20,
+      "position": 2
+    },
+    {
+      "cell_id": "b020-r0-F00",
+      "instance_id": "scikit-learn__scikit-learn-13142",
+      "repetition": 0,
+      "arm": "F00",
+      "block": 20,
+      "position": 3
+    },
+    {
+      "cell_id": "b021-r0-F10",
+      "instance_id": "pydata__xarray-3095",
+      "repetition": 0,
+      "arm": "F10",
+      "block": 21,
+      "position": 0
+    },
+    {
+      "cell_id": "b021-r0-F00",
+      "instance_id": "pydata__xarray-3095",
+      "repetition": 0,
+      "arm": "F00",
+      "block": 21,
+      "position": 1
+    },
+    {
+      "cell_id": "b021-r0-F11",
+      "instance_id": "pydata__xarray-3095",
+      "repetition": 0,
+      "arm": "F11",
+      "block": 21,
+      "position": 2
+    },
+    {
+      "cell_id": "b021-r0-F01",
+      "instance_id": "pydata__xarray-3095",
+      "repetition": 0,
+      "arm": "F01",
+      "block": 21,
+      "position": 3
+    },
+    {
+      "cell_id": "b022-r0-F00",
+      "instance_id": "pydata__xarray-3677",
+      "repetition": 0,
+      "arm": "F00",
+      "block": 22,
+      "position": 0
+    },
+    {
+      "cell_id": "b022-r0-F01",
+      "instance_id": "pydata__xarray-3677",
+      "repetition": 0,
+      "arm": "F01",
+      "block": 22,
+      "position": 1
+    },
+    {
+      "cell_id": "b022-r0-F10",
+      "instance_id": "pydata__xarray-3677",
+      "repetition": 0,
+      "arm": "F10",
+      "block": 22,
+      "position": 2
+    },
+    {
+      "cell_id": "b022-r0-F11",
+      "instance_id": "pydata__xarray-3677",
+      "repetition": 0,
+      "arm": "F11",
+      "block": 22,
+      "position": 3
+    },
+    {
+      "cell_id": "b023-r0-F01",
+      "instance_id": "pytest-dev__pytest-10051",
+      "repetition": 0,
+      "arm": "F01",
+      "block": 23,
+      "position": 0
+    },
+    {
+      "cell_id": "b023-r0-F10",
+      "instance_id": "pytest-dev__pytest-10051",
+      "repetition": 0,
+      "arm": "F10",
+      "block": 23,
+      "position": 1
+    },
+    {
+      "cell_id": "b023-r0-F00",
+      "instance_id": "pytest-dev__pytest-10051",
+      "repetition": 0,
+      "arm": "F00",
+      "block": 23,
+      "position": 2
+    },
+    {
+      "cell_id": "b023-r0-F11",
+      "instance_id": "pytest-dev__pytest-10051",
+      "repetition": 0,
+      "arm": "F11",
+      "block": 23,
+      "position": 3
+    },
+    {
+      "cell_id": "b024-r0-F00",
+      "instance_id": "psf__requests-1142",
+      "repetition": 0,
+      "arm": "F00",
+      "block": 24,
+      "position": 0
+    },
+    {
+      "cell_id": "b024-r0-F10",
+      "instance_id": "psf__requests-1142",
+      "repetition": 0,
+      "arm": "F10",
+      "block": 24,
+      "position": 1
+    },
+    {
+      "cell_id": "b024-r0-F01",
+      "instance_id": "psf__requests-1142",
+      "repetition": 0,
+      "arm": "F01",
+      "block": 24,
+      "position": 2
+    },
+    {
+      "cell_id": "b024-r0-F11",
+      "instance_id": "psf__requests-1142",
+      "repetition": 0,
+      "arm": "F11",
+      "block": 24,
+      "position": 3
+    },
+    {
+      "cell_id": "b025-r0-F00",
+      "instance_id": "pylint-dev__pylint-4970",
+      "repetition": 0,
+      "arm": "F00",
+      "block": 25,
+      "position": 0
+    },
+    {
+      "cell_id": "b025-r0-F01",
+      "instance_id": "pylint-dev__pylint-4970",
+      "repetition": 0,
+      "arm": "F01",
+      "block": 25,
+      "position": 1
+    },
+    {
+      "cell_id": "b025-r0-F10",
+      "instance_id": "pylint-dev__pylint-4970",
+      "repetition": 0,
+      "arm": "F10",
+      "block": 25,
+      "position": 2
+    },
+    {
+      "cell_id": "b025-r0-F11",
+      "instance_id": "pylint-dev__pylint-4970",
+      "repetition": 0,
+      "arm": "F11",
+      "block": 25,
+      "position": 3
+    },
+    {
+      "cell_id": "b026-r0-F10",
+      "instance_id": "django__django-11433",
+      "repetition": 0,
+      "arm": "F10",
+      "block": 26,
+      "position": 0
+    },
+    {
+      "cell_id": "b026-r0-F00",
+      "instance_id": "django__django-11433",
+      "repetition": 0,
+      "arm": "F00",
+      "block": 26,
+      "position": 1
+    },
+    {
+      "cell_id": "b026-r0-F01",
+      "instance_id": "django__django-11433",
+      "repetition": 0,
+      "arm": "F01",
+      "block": 26,
+      "position": 2
+    },
+    {
+      "cell_id": "b026-r0-F11",
+      "instance_id": "django__django-11433",
+      "repetition": 0,
+      "arm": "F11",
+      "block": 26,
+      "position": 3
+    },
+    {
+      "cell_id": "b027-r0-F01",
+      "instance_id": "sphinx-doc__sphinx-7889",
+      "repetition": 0,
+      "arm": "F01",
+      "block": 27,
+      "position": 0
+    },
+    {
+      "cell_id": "b027-r0-F00",
+      "instance_id": "sphinx-doc__sphinx-7889",
+      "repetition": 0,
+      "arm": "F00",
+      "block": 27,
+      "position": 1
+    },
+    {
+      "cell_id": "b027-r0-F10",
+      "instance_id": "sphinx-doc__sphinx-7889",
+      "repetition": 0,
+      "arm": "F10",
+      "block": 27,
+      "position": 2
+    },
+    {
+      "cell_id": "b027-r0-F11",
+      "instance_id": "sphinx-doc__sphinx-7889",
+      "repetition": 0,
+      "arm": "F11",
+      "block": 27,
+      "position": 3
+    },
+    {
+      "cell_id": "b028-r0-F10",
+      "instance_id": "astropy__astropy-13398",
+      "repetition": 0,
+      "arm": "F10",
+      "block": 28,
+      "position": 0
+    },
+    {
+      "cell_id": "b028-r0-F01",
+      "instance_id": "astropy__astropy-13398",
+      "repetition": 0,
+      "arm": "F01",
+      "block": 28,
+      "position": 1
+    },
+    {
+      "cell_id": "b028-r0-F00",
+      "instance_id": "astropy__astropy-13398",
+      "repetition": 0,
+      "arm": "F00",
+      "block": 28,
+      "position": 2
+    },
+    {
+      "cell_id": "b028-r0-F11",
+      "instance_id": "astropy__astropy-13398",
+      "repetition": 0,
+      "arm": "F11",
+      "block": 28,
+      "position": 3
+    },
+    {
+      "cell_id": "b029-r0-F00",
+      "instance_id": "pylint-dev__pylint-7277",
+      "repetition": 0,
+      "arm": "F00",
+      "block": 29,
+      "position": 0
+    },
+    {
+      "cell_id": "b029-r0-F01",
+      "instance_id": "pylint-dev__pylint-7277",
+      "repetition": 0,
+      "arm": "F01",
+      "block": 29,
+      "position": 1
+    },
+    {
+      "cell_id": "b029-r0-F11",
+      "instance_id": "pylint-dev__pylint-7277",
+      "repetition": 0,
+      "arm": "F11",
+      "block": 29,
+      "position": 2
+    },
+    {
+      "cell_id": "b029-r0-F10",
+      "instance_id": "pylint-dev__pylint-7277",
+      "repetition": 0,
+      "arm": "F10",
+      "block": 29,
+      "position": 3
+    },
+    {
+      "cell_id": "b030-r0-F11",
+      "instance_id": "pydata__xarray-4094",
+      "repetition": 0,
+      "arm": "F11",
+      "block": 30,
+      "position": 0
+    },
+    {
+      "cell_id": "b030-r0-F00",
+      "instance_id": "pydata__xarray-4094",
+      "repetition": 0,
+      "arm": "F00",
+      "block": 30,
+      "position": 1
+    },
+    {
+      "cell_id": "b030-r0-F10",
+      "instance_id": "pydata__xarray-4094",
+      "repetition": 0,
+      "arm": "F10",
+      "block": 30,
+      "position": 2
+    },
+    {
+      "cell_id": "b030-r0-F01",
+      "instance_id": "pydata__xarray-4094",
+      "repetition": 0,
+      "arm": "F01",
+      "block": 30,
+      "position": 3
+    },
+    {
+      "cell_id": "b031-r0-F00",
+      "instance_id": "mwaskom__seaborn-3069",
+      "repetition": 0,
+      "arm": "F00",
+      "block": 31,
+      "position": 0
+    },
+    {
+      "cell_id": "b031-r0-F01",
+      "instance_id": "mwaskom__seaborn-3069",
+      "repetition": 0,
+      "arm": "F01",
+      "block": 31,
+      "position": 1
+    },
+    {
+      "cell_id": "b031-r0-F11",
+      "instance_id": "mwaskom__seaborn-3069",
+      "repetition": 0,
+      "arm": "F11",
+      "block": 31,
+      "position": 2
+    },
+    {
+      "cell_id": "b031-r0-F10",
+      "instance_id": "mwaskom__seaborn-3069",
+      "repetition": 0,
+      "arm": "F10",
+      "block": 31,
+      "position": 3
+    },
+    {
+      "cell_id": "b032-r0-F00",
+      "instance_id": "astropy__astropy-14598",
+      "repetition": 0,
+      "arm": "F00",
+      "block": 32,
+      "position": 0
+    },
+    {
+      "cell_id": "b032-r0-F10",
+      "instance_id": "astropy__astropy-14598",
+      "repetition": 0,
+      "arm": "F10",
+      "block": 32,
+      "position": 1
+    },
+    {
+      "cell_id": "b032-r0-F01",
+      "instance_id": "astropy__astropy-14598",
+      "repetition": 0,
+      "arm": "F01",
+      "block": 32,
+      "position": 2
+    },
+    {
+      "cell_id": "b032-r0-F11",
+      "instance_id": "astropy__astropy-14598",
+      "repetition": 0,
+      "arm": "F11",
+      "block": 32,
+      "position": 3
+    },
+    {
+      "cell_id": "b033-r0-F00",
+      "instance_id": "django__django-13670",
+      "repetition": 0,
+      "arm": "F00",
+      "block": 33,
+      "position": 0
+    },
+    {
+      "cell_id": "b033-r0-F11",
+      "instance_id": "django__django-13670",
+      "repetition": 0,
+      "arm": "F11",
+      "block": 33,
+      "position": 1
+    },
+    {
+      "cell_id": "b033-r0-F01",
+      "instance_id": "django__django-13670",
+      "repetition": 0,
+      "arm": "F01",
+      "block": 33,
+      "position": 2
+    },
+    {
+      "cell_id": "b033-r0-F10",
+      "instance_id": "django__django-13670",
+      "repetition": 0,
+      "arm": "F10",
+      "block": 33,
+      "position": 3
+    },
+    {
+      "cell_id": "b034-r0-F00",
+      "instance_id": "pydata__xarray-4629",
+      "repetition": 0,
+      "arm": "F00",
+      "block": 34,
+      "position": 0
+    },
+    {
+      "cell_id": "b034-r0-F01",
+      "instance_id": "pydata__xarray-4629",
+      "repetition": 0,
+      "arm": "F01",
+      "block": 34,
+      "position": 1
+    },
+    {
+      "cell_id": "b034-r0-F11",
+      "instance_id": "pydata__xarray-4629",
+      "repetition": 0,
+      "arm": "F11",
+      "block": 34,
+      "position": 2
+    },
+    {
+      "cell_id": "b034-r0-F10",
+      "instance_id": "pydata__xarray-4629",
+      "repetition": 0,
+      "arm": "F10",
+      "block": 34,
+      "position": 3
+    },
+    {
+      "cell_id": "b035-r0-F11",
+      "instance_id": "sphinx-doc__sphinx-8120",
+      "repetition": 0,
+      "arm": "F11",
+      "block": 35,
+      "position": 0
+    },
+    {
+      "cell_id": "b035-r0-F00",
+      "instance_id": "sphinx-doc__sphinx-8120",
+      "repetition": 0,
+      "arm": "F00",
+      "block": 35,
+      "position": 1
+    },
+    {
+      "cell_id": "b035-r0-F01",
+      "instance_id": "sphinx-doc__sphinx-8120",
+      "repetition": 0,
+      "arm": "F01",
+      "block": 35,
+      "position": 2
+    },
+    {
+      "cell_id": "b035-r0-F10",
+      "instance_id": "sphinx-doc__sphinx-8120",
+      "repetition": 0,
+      "arm": "F10",
+      "block": 35,
+      "position": 3
+    },
+    {
+      "cell_id": "b036-r0-F01",
+      "instance_id": "psf__requests-1921",
+      "repetition": 0,
+      "arm": "F01",
+      "block": 36,
+      "position": 0
+    },
+    {
+      "cell_id": "b036-r0-F10",
+      "instance_id": "psf__requests-1921",
+      "repetition": 0,
+      "arm": "F10",
+      "block": 36,
+      "position": 1
+    },
+    {
+      "cell_id": "b036-r0-F00",
+      "instance_id": "psf__requests-1921",
+      "repetition": 0,
+      "arm": "F00",
+      "block": 36,
+      "position": 2
+    },
+    {
+      "cell_id": "b036-r0-F11",
+      "instance_id": "psf__requests-1921",
+      "repetition": 0,
+      "arm": "F11",
+      "block": 36,
+      "position": 3
+    },
+    {
+      "cell_id": "b037-r0-F10",
+      "instance_id": "pytest-dev__pytest-6197",
+      "repetition": 0,
+      "arm": "F10",
+      "block": 37,
+      "position": 0
+    },
+    {
+      "cell_id": "b037-r0-F01",
+      "instance_id": "pytest-dev__pytest-6197",
+      "repetition": 0,
+      "arm": "F01",
+      "block": 37,
+      "position": 1
+    },
+    {
+      "cell_id": "b037-r0-F00",
+      "instance_id": "pytest-dev__pytest-6197",
+      "repetition": 0,
+      "arm": "F00",
+      "block": 37,
+      "position": 2
+    },
+    {
+      "cell_id": "b037-r0-F11",
+      "instance_id": "pytest-dev__pytest-6197",
+      "repetition": 0,
+      "arm": "F11",
+      "block": 37,
+      "position": 3
+    },
+    {
+      "cell_id": "b038-r0-F11",
+      "instance_id": "sphinx-doc__sphinx-8265",
+      "repetition": 0,
+      "arm": "F11",
+      "block": 38,
+      "position": 0
+    },
+    {
+      "cell_id": "b038-r0-F10",
+      "instance_id": "sphinx-doc__sphinx-8265",
+      "repetition": 0,
+      "arm": "F10",
+      "block": 38,
+      "position": 1
+    },
+    {
+      "cell_id": "b038-r0-F00",
+      "instance_id": "sphinx-doc__sphinx-8265",
+      "repetition": 0,
+      "arm": "F00",
+      "block": 38,
+      "position": 2
+    },
+    {
+      "cell_id": "b038-r0-F01",
+      "instance_id": "sphinx-doc__sphinx-8265",
+      "repetition": 0,
+      "arm": "F01",
+      "block": 38,
+      "position": 3
+    },
+    {
+      "cell_id": "b039-r0-F00",
+      "instance_id": "pylint-dev__pylint-6386",
+      "repetition": 0,
+      "arm": "F00",
+      "block": 39,
+      "position": 0
+    },
+    {
+      "cell_id": "b039-r0-F01",
+      "instance_id": "pylint-dev__pylint-6386",
+      "repetition": 0,
+      "arm": "F01",
+      "block": 39,
+      "position": 1
+    },
+    {
+      "cell_id": "b039-r0-F10",
+      "instance_id": "pylint-dev__pylint-6386",
+      "repetition": 0,
+      "arm": "F10",
+      "block": 39,
+      "position": 2
+    },
+    {
+      "cell_id": "b039-r0-F11",
+      "instance_id": "pylint-dev__pylint-6386",
+      "repetition": 0,
+      "arm": "F11",
+      "block": 39,
+      "position": 3
+    },
+    {
+      "cell_id": "b040-r0-F00",
+      "instance_id": "pylint-dev__pylint-4604",
+      "repetition": 0,
+      "arm": "F00",
+      "block": 40,
+      "position": 0
+    },
+    {
+      "cell_id": "b040-r0-F10",
+      "instance_id": "pylint-dev__pylint-4604",
+      "repetition": 0,
+      "arm": "F10",
+      "block": 40,
+      "position": 1
+    },
+    {
+      "cell_id": "b040-r0-F11",
+      "instance_id": "pylint-dev__pylint-4604",
+      "repetition": 0,
+      "arm": "F11",
+      "block": 40,
+      "position": 2
+    },
+    {
+      "cell_id": "b040-r0-F01",
+      "instance_id": "pylint-dev__pylint-4604",
+      "repetition": 0,
+      "arm": "F01",
+      "block": 40,
+      "position": 3
+    },
+    {
+      "cell_id": "b041-r0-F10",
+      "instance_id": "astropy__astropy-14309",
+      "repetition": 0,
+      "arm": "F10",
+      "block": 41,
+      "position": 0
+    },
+    {
+      "cell_id": "b041-r0-F11",
+      "instance_id": "astropy__astropy-14309",
+      "repetition": 0,
+      "arm": "F11",
+      "block": 41,
+      "position": 1
+    },
+    {
+      "cell_id": "b041-r0-F01",
+      "instance_id": "astropy__astropy-14309",
+      "repetition": 0,
+      "arm": "F01",
+      "block": 41,
+      "position": 2
+    },
+    {
+      "cell_id": "b041-r0-F00",
+      "instance_id": "astropy__astropy-14309",
+      "repetition": 0,
+      "arm": "F00",
+      "block": 41,
+      "position": 3
+    },
+    {
+      "cell_id": "b042-r0-F10",
+      "instance_id": "sympy__sympy-17655",
+      "repetition": 0,
+      "arm": "F10",
+      "block": 42,
+      "position": 0
+    },
+    {
+      "cell_id": "b042-r0-F00",
+      "instance_id": "sympy__sympy-17655",
+      "repetition": 0,
+      "arm": "F00",
+      "block": 42,
+      "position": 1
+    },
+    {
+      "cell_id": "b042-r0-F01",
+      "instance_id": "sympy__sympy-17655",
+      "repetition": 0,
+      "arm": "F01",
+      "block": 42,
+      "position": 2
+    },
+    {
+      "cell_id": "b042-r0-F11",
+      "instance_id": "sympy__sympy-17655",
+      "repetition": 0,
+      "arm": "F11",
+      "block": 42,
+      "position": 3
+    },
+    {
+      "cell_id": "b043-r0-F00",
+      "instance_id": "pylint-dev__pylint-4551",
+      "repetition": 0,
+      "arm": "F00",
+      "block": 43,
+      "position": 0
+    },
+    {
+      "cell_id": "b043-r0-F11",
+      "instance_id": "pylint-dev__pylint-4551",
+      "repetition": 0,
+      "arm": "F11",
+      "block": 43,
+      "position": 1
+    },
+    {
+      "cell_id": "b043-r0-F01",
+      "instance_id": "pylint-dev__pylint-4551",
+      "repetition": 0,
+      "arm": "F01",
+      "block": 43,
+      "position": 2
+    },
+    {
+      "cell_id": "b043-r0-F10",
+      "instance_id": "pylint-dev__pylint-4551",
+      "repetition": 0,
+      "arm": "F10",
+      "block": 43,
+      "position": 3
+    },
+    {
+      "cell_id": "b044-r0-F10",
+      "instance_id": "scikit-learn__scikit-learn-9288",
+      "repetition": 0,
+      "arm": "F10",
+      "block": 44,
+      "position": 0
+    },
+    {
+      "cell_id": "b044-r0-F00",
+      "instance_id": "scikit-learn__scikit-learn-9288",
+      "repetition": 0,
+      "arm": "F00",
+      "block": 44,
+      "position": 1
+    },
+    {
+      "cell_id": "b044-r0-F11",
+      "instance_id": "scikit-learn__scikit-learn-9288",
+      "repetition": 0,
+      "arm": "F11",
+      "block": 44,
+      "position": 2
+    },
+    {
+      "cell_id": "b044-r0-F01",
+      "instance_id": "scikit-learn__scikit-learn-9288",
+      "repetition": 0,
+      "arm": "F01",
+      "block": 44,
+      "position": 3
+    },
+    {
+      "cell_id": "b045-r0-F01",
+      "instance_id": "psf__requests-1724",
+      "repetition": 0,
+      "arm": "F01",
+      "block": 45,
+      "position": 0
+    },
+    {
+      "cell_id": "b045-r0-F11",
+      "instance_id": "psf__requests-1724",
+      "repetition": 0,
+      "arm": "F11",
+      "block": 45,
+      "position": 1
+    },
+    {
+      "cell_id": "b045-r0-F10",
+      "instance_id": "psf__requests-1724",
+      "repetition": 0,
+      "arm": "F10",
+      "block": 45,
+      "position": 2
+    },
+    {
+      "cell_id": "b045-r0-F00",
+      "instance_id": "psf__requests-1724",
+      "repetition": 0,
+      "arm": "F00",
+      "block": 45,
+      "position": 3
+    },
+    {
+      "cell_id": "b046-r0-F10",
+      "instance_id": "psf__requests-2931",
+      "repetition": 0,
+      "arm": "F10",
+      "block": 46,
+      "position": 0
+    },
+    {
+      "cell_id": "b046-r0-F00",
+      "instance_id": "psf__requests-2931",
+      "repetition": 0,
+      "arm": "F00",
+      "block": 46,
+      "position": 1
+    },
+    {
+      "cell_id": "b046-r0-F01",
+      "instance_id": "psf__requests-2931",
+      "repetition": 0,
+      "arm": "F01",
+      "block": 46,
+      "position": 2
+    },
+    {
+      "cell_id": "b046-r0-F11",
+      "instance_id": "psf__requests-2931",
+      "repetition": 0,
+      "arm": "F11",
+      "block": 46,
+      "position": 3
+    },
+    {
+      "cell_id": "b047-r0-F11",
+      "instance_id": "pydata__xarray-4687",
+      "repetition": 0,
+      "arm": "F11",
+      "block": 47,
+      "position": 0
+    },
+    {
+      "cell_id": "b047-r0-F10",
+      "instance_id": "pydata__xarray-4687",
+      "repetition": 0,
+      "arm": "F10",
+      "block": 47,
+      "position": 1
+    },
+    {
+      "cell_id": "b047-r0-F00",
+      "instance_id": "pydata__xarray-4687",
+      "repetition": 0,
+      "arm": "F00",
+      "block": 47,
+      "position": 2
+    },
+    {
+      "cell_id": "b047-r0-F01",
+      "instance_id": "pydata__xarray-4687",
+      "repetition": 0,
+      "arm": "F01",
+      "block": 47,
+      "position": 3
+    },
+    {
+      "cell_id": "b048-r0-F11",
+      "instance_id": "sympy__sympy-13480",
+      "repetition": 0,
+      "arm": "F11",
+      "block": 48,
+      "position": 0
+    },
+    {
+      "cell_id": "b048-r0-F01",
+      "instance_id": "sympy__sympy-13480",
+      "repetition": 0,
+      "arm": "F01",
+      "block": 48,
+      "position": 1
+    },
+    {
+      "cell_id": "b048-r0-F00",
+      "instance_id": "sympy__sympy-13480",
+      "repetition": 0,
+      "arm": "F00",
+      "block": 48,
+      "position": 2
+    },
+    {
+      "cell_id": "b048-r0-F10",
+      "instance_id": "sympy__sympy-13480",
+      "repetition": 0,
+      "arm": "F10",
+      "block": 48,
+      "position": 3
+    },
+    {
+      "cell_id": "b049-r0-F10",
+      "instance_id": "django__django-11951",
+      "repetition": 0,
+      "arm": "F10",
+      "block": 49,
+      "position": 0
+    },
+    {
+      "cell_id": "b049-r0-F00",
+      "instance_id": "django__django-11951",
+      "repetition": 0,
+      "arm": "F00",
+      "block": 49,
+      "position": 1
+    },
+    {
+      "cell_id": "b049-r0-F01",
+      "instance_id": "django__django-11951",
+      "repetition": 0,
+      "arm": "F01",
+      "block": 49,
+      "position": 2
+    },
+    {
+      "cell_id": "b049-r0-F11",
+      "instance_id": "django__django-11951",
+      "repetition": 0,
+      "arm": "F11",
+      "block": 49,
+      "position": 3
+    },
+    {
+      "cell_id": "b050-r0-F10",
+      "instance_id": "astropy__astropy-13033",
+      "repetition": 0,
+      "arm": "F10",
+      "block": 50,
+      "position": 0
+    },
+    {
+      "cell_id": "b050-r0-F00",
+      "instance_id": "astropy__astropy-13033",
+      "repetition": 0,
+      "arm": "F00",
+      "block": 50,
+      "position": 1
+    },
+    {
+      "cell_id": "b050-r0-F11",
+      "instance_id": "astropy__astropy-13033",
+      "repetition": 0,
+      "arm": "F11",
+      "block": 50,
+      "position": 2
+    },
+    {
+      "cell_id": "b050-r0-F01",
+      "instance_id": "astropy__astropy-13033",
+      "repetition": 0,
+      "arm": "F01",
+      "block": 50,
+      "position": 3
+    },
+    {
+      "cell_id": "b051-r0-F10",
+      "instance_id": "scikit-learn__scikit-learn-13124",
+      "repetition": 0,
+      "arm": "F10",
+      "block": 51,
+      "position": 0
+    },
+    {
+      "cell_id": "b051-r0-F00",
+      "instance_id": "scikit-learn__scikit-learn-13124",
+      "repetition": 0,
+      "arm": "F00",
+      "block": 51,
+      "position": 1
+    },
+    {
+      "cell_id": "b051-r0-F11",
+      "instance_id": "scikit-learn__scikit-learn-13124",
+      "repetition": 0,
+      "arm": "F11",
+      "block": 51,
+      "position": 2
+    },
+    {
+      "cell_id": "b051-r0-F01",
+      "instance_id": "scikit-learn__scikit-learn-13124",
+      "repetition": 0,
+      "arm": "F01",
+      "block": 51,
+      "position": 3
+    },
+    {
+      "cell_id": "b052-r0-F11",
+      "instance_id": "psf__requests-6028",
+      "repetition": 0,
+      "arm": "F11",
+      "block": 52,
+      "position": 0
+    },
+    {
+      "cell_id": "b052-r0-F01",
+      "instance_id": "psf__requests-6028",
+      "repetition": 0,
+      "arm": "F01",
+      "block": 52,
+      "position": 1
+    },
+    {
+      "cell_id": "b052-r0-F00",
+      "instance_id": "psf__requests-6028",
+      "repetition": 0,
+      "arm": "F00",
+      "block": 52,
+      "position": 2
+    },
+    {
+      "cell_id": "b052-r0-F10",
+      "instance_id": "psf__requests-6028",
+      "repetition": 0,
+      "arm": "F10",
+      "block": 52,
+      "position": 3
+    },
+    {
+      "cell_id": "b053-r0-F10",
+      "instance_id": "django__django-13741",
+      "repetition": 0,
+      "arm": "F10",
+      "block": 53,
+      "position": 0
+    },
+    {
+      "cell_id": "b053-r0-F00",
+      "instance_id": "django__django-13741",
+      "repetition": 0,
+      "arm": "F00",
+      "block": 53,
+      "position": 1
+    },
+    {
+      "cell_id": "b053-r0-F01",
+      "instance_id": "django__django-13741",
+      "repetition": 0,
+      "arm": "F01",
+      "block": 53,
+      "position": 2
+    },
+    {
+      "cell_id": "b053-r0-F11",
+      "instance_id": "django__django-13741",
+      "repetition": 0,
+      "arm": "F11",
+      "block": 53,
+      "position": 3
+    },
+    {
+      "cell_id": "b054-r0-F11",
+      "instance_id": "matplotlib__matplotlib-13989",
+      "repetition": 0,
+      "arm": "F11",
+      "block": 54,
+      "position": 0
+    },
+    {
+      "cell_id": "b054-r0-F00",
+      "instance_id": "matplotlib__matplotlib-13989",
+      "repetition": 0,
+      "arm": "F00",
+      "block": 54,
+      "position": 1
+    },
+    {
+      "cell_id": "b054-r0-F01",
+      "instance_id": "matplotlib__matplotlib-13989",
+      "repetition": 0,
+      "arm": "F01",
+      "block": 54,
+      "position": 2
+    },
+    {
+      "cell_id": "b054-r0-F10",
+      "instance_id": "matplotlib__matplotlib-13989",
+      "repetition": 0,
+      "arm": "F10",
+      "block": 54,
+      "position": 3
+    },
+    {
+      "cell_id": "b055-r0-F00",
+      "instance_id": "pydata__xarray-6938",
+      "repetition": 0,
+      "arm": "F00",
+      "block": 55,
+      "position": 0
+    },
+    {
+      "cell_id": "b055-r0-F01",
+      "instance_id": "pydata__xarray-6938",
+      "repetition": 0,
+      "arm": "F01",
+      "block": 55,
+      "position": 1
+    },
+    {
+      "cell_id": "b055-r0-F10",
+      "instance_id": "pydata__xarray-6938",
+      "repetition": 0,
+      "arm": "F10",
+      "block": 55,
+      "position": 2
+    },
+    {
+      "cell_id": "b055-r0-F11",
+      "instance_id": "pydata__xarray-6938",
+      "repetition": 0,
+      "arm": "F11",
+      "block": 55,
+      "position": 3
+    },
+    {
+      "cell_id": "b056-r0-F10",
+      "instance_id": "sphinx-doc__sphinx-9229",
+      "repetition": 0,
+      "arm": "F10",
+      "block": 56,
+      "position": 0
+    },
+    {
+      "cell_id": "b056-r0-F00",
+      "instance_id": "sphinx-doc__sphinx-9229",
+      "repetition": 0,
+      "arm": "F00",
+      "block": 56,
+      "position": 1
+    },
+    {
+      "cell_id": "b056-r0-F01",
+      "instance_id": "sphinx-doc__sphinx-9229",
+      "repetition": 0,
+      "arm": "F01",
+      "block": 56,
+      "position": 2
+    },
+    {
+      "cell_id": "b056-r0-F11",
+      "instance_id": "sphinx-doc__sphinx-9229",
+      "repetition": 0,
+      "arm": "F11",
+      "block": 56,
+      "position": 3
+    },
+    {
+      "cell_id": "b057-r0-F01",
+      "instance_id": "django__django-13279",
+      "repetition": 0,
+      "arm": "F01",
+      "block": 57,
+      "position": 0
+    },
+    {
+      "cell_id": "b057-r0-F00",
+      "instance_id": "django__django-13279",
+      "repetition": 0,
+      "arm": "F00",
+      "block": 57,
+      "position": 1
+    },
+    {
+      "cell_id": "b057-r0-F11",
+      "instance_id": "django__django-13279",
+      "repetition": 0,
+      "arm": "F11",
+      "block": 57,
+      "position": 2
+    },
+    {
+      "cell_id": "b057-r0-F10",
+      "instance_id": "django__django-13279",
+      "repetition": 0,
+      "arm": "F10",
+      "block": 57,
+      "position": 3
+    },
+    {
+      "cell_id": "b058-r0-F11",
+      "instance_id": "scikit-learn__scikit-learn-13439",
+      "repetition": 0,
+      "arm": "F11",
+      "block": 58,
+      "position": 0
+    },
+    {
+      "cell_id": "b058-r0-F10",
+      "instance_id": "scikit-learn__scikit-learn-13439",
+      "repetition": 0,
+      "arm": "F10",
+      "block": 58,
+      "position": 1
+    },
+    {
+      "cell_id": "b058-r0-F00",
+      "instance_id": "scikit-learn__scikit-learn-13439",
+      "repetition": 0,
+      "arm": "F00",
+      "block": 58,
+      "position": 2
+    },
+    {
+      "cell_id": "b058-r0-F01",
+      "instance_id": "scikit-learn__scikit-learn-13439",
+      "repetition": 0,
+      "arm": "F01",
+      "block": 58,
+      "position": 3
+    },
+    {
+      "cell_id": "b059-r0-F00",
+      "instance_id": "mwaskom__seaborn-3187",
+      "repetition": 0,
+      "arm": "F00",
+      "block": 59,
+      "position": 0
+    },
+    {
+      "cell_id": "b059-r0-F10",
+      "instance_id": "mwaskom__seaborn-3187",
+      "repetition": 0,
+      "arm": "F10",
+      "block": 59,
+      "position": 1
+    },
+    {
+      "cell_id": "b059-r0-F01",
+      "instance_id": "mwaskom__seaborn-3187",
+      "repetition": 0,
+      "arm": "F01",
+      "block": 59,
+      "position": 2
+    },
+    {
+      "cell_id": "b059-r0-F11",
+      "instance_id": "mwaskom__seaborn-3187",
+      "repetition": 0,
+      "arm": "F11",
+      "block": 59,
+      "position": 3
+    },
+    {
+      "cell_id": "b060-r0-F11",
+      "instance_id": "scikit-learn__scikit-learn-25747",
+      "repetition": 0,
+      "arm": "F11",
+      "block": 60,
+      "position": 0
+    },
+    {
+      "cell_id": "b060-r0-F00",
+      "instance_id": "scikit-learn__scikit-learn-25747",
+      "repetition": 0,
+      "arm": "F00",
+      "block": 60,
+      "position": 1
+    },
+    {
+      "cell_id": "b060-r0-F10",
+      "instance_id": "scikit-learn__scikit-learn-25747",
+      "repetition": 0,
+      "arm": "F10",
+      "block": 60,
+      "position": 2
+    },
+    {
+      "cell_id": "b060-r0-F01",
+      "instance_id": "scikit-learn__scikit-learn-25747",
+      "repetition": 0,
+      "arm": "F01",
+      "block": 60,
+      "position": 3
+    },
+    {
+      "cell_id": "b061-r0-F11",
+      "instance_id": "scikit-learn__scikit-learn-13135",
+      "repetition": 0,
+      "arm": "F11",
+      "block": 61,
+      "position": 0
+    },
+    {
+      "cell_id": "b061-r0-F10",
+      "instance_id": "scikit-learn__scikit-learn-13135",
+      "repetition": 0,
+      "arm": "F10",
+      "block": 61,
+      "position": 1
+    },
+    {
+      "cell_id": "b061-r0-F01",
+      "instance_id": "scikit-learn__scikit-learn-13135",
+      "repetition": 0,
+      "arm": "F01",
+      "block": 61,
+      "position": 2
+    },
+    {
+      "cell_id": "b061-r0-F00",
+      "instance_id": "scikit-learn__scikit-learn-13135",
+      "repetition": 0,
+      "arm": "F00",
+      "block": 61,
+      "position": 3
+    },
+    {
+      "cell_id": "b062-r0-F01",
+      "instance_id": "sphinx-doc__sphinx-9602",
+      "repetition": 0,
+      "arm": "F01",
+      "block": 62,
+      "position": 0
+    },
+    {
+      "cell_id": "b062-r0-F11",
+      "instance_id": "sphinx-doc__sphinx-9602",
+      "repetition": 0,
+      "arm": "F11",
+      "block": 62,
+      "position": 1
+    },
+    {
+      "cell_id": "b062-r0-F10",
+      "instance_id": "sphinx-doc__sphinx-9602",
+      "repetition": 0,
+      "arm": "F10",
+      "block": 62,
+      "position": 2
+    },
+    {
+      "cell_id": "b062-r0-F00",
+      "instance_id": "sphinx-doc__sphinx-9602",
+      "repetition": 0,
+      "arm": "F00",
+      "block": 62,
+      "position": 3
+    },
+    {
+      "cell_id": "b063-r0-F00",
+      "instance_id": "django__django-13121",
+      "repetition": 0,
+      "arm": "F00",
+      "block": 63,
+      "position": 0
+    },
+    {
+      "cell_id": "b063-r0-F01",
+      "instance_id": "django__django-13121",
+      "repetition": 0,
+      "arm": "F01",
+      "block": 63,
+      "position": 1
+    },
+    {
+      "cell_id": "b063-r0-F11",
+      "instance_id": "django__django-13121",
+      "repetition": 0,
+      "arm": "F11",
+      "block": 63,
+      "position": 2
+    },
+    {
+      "cell_id": "b063-r0-F10",
+      "instance_id": "django__django-13121",
+      "repetition": 0,
+      "arm": "F10",
+      "block": 63,
+      "position": 3
+    },
+    {
+      "cell_id": "b064-r0-F01",
+      "instance_id": "sympy__sympy-22456",
+      "repetition": 0,
+      "arm": "F01",
+      "block": 64,
+      "position": 0
+    },
+    {
+      "cell_id": "b064-r0-F11",
+      "instance_id": "sympy__sympy-22456",
+      "repetition": 0,
+      "arm": "F11",
+      "block": 64,
+      "position": 1
+    },
+    {
+      "cell_id": "b064-r0-F00",
+      "instance_id": "sympy__sympy-22456",
+      "repetition": 0,
+      "arm": "F00",
+      "block": 64,
+      "position": 2
+    },
+    {
+      "cell_id": "b064-r0-F10",
+      "instance_id": "sympy__sympy-22456",
+      "repetition": 0,
+      "arm": "F10",
+      "block": 64,
+      "position": 3
+    },
+    {
+      "cell_id": "b065-r0-F00",
+      "instance_id": "pydata__xarray-6721",
+      "repetition": 0,
+      "arm": "F00",
+      "block": 65,
+      "position": 0
+    },
+    {
+      "cell_id": "b065-r0-F10",
+      "instance_id": "pydata__xarray-6721",
+      "repetition": 0,
+      "arm": "F10",
+      "block": 65,
+      "position": 1
+    },
+    {
+      "cell_id": "b065-r0-F01",
+      "instance_id": "pydata__xarray-6721",
+      "repetition": 0,
+      "arm": "F01",
+      "block": 65,
+      "position": 2
+    },
+    {
+      "cell_id": "b065-r0-F11",
+      "instance_id": "pydata__xarray-6721",
+      "repetition": 0,
+      "arm": "F11",
+      "block": 65,
+      "position": 3
+    },
+    {
+      "cell_id": "b066-r0-F01",
+      "instance_id": "pydata__xarray-7393",
+      "repetition": 0,
+      "arm": "F01",
+      "block": 66,
+      "position": 0
+    },
+    {
+      "cell_id": "b066-r0-F00",
+      "instance_id": "pydata__xarray-7393",
+      "repetition": 0,
+      "arm": "F00",
+      "block": 66,
+      "position": 1
+    },
+    {
+      "cell_id": "b066-r0-F10",
+      "instance_id": "pydata__xarray-7393",
+      "repetition": 0,
+      "arm": "F10",
+      "block": 66,
+      "position": 2
+    },
+    {
+      "cell_id": "b066-r0-F11",
+      "instance_id": "pydata__xarray-7393",
+      "repetition": 0,
+      "arm": "F11",
+      "block": 66,
+      "position": 3
+    },
+    {
+      "cell_id": "b067-r0-F01",
+      "instance_id": "django__django-12209",
+      "repetition": 0,
+      "arm": "F01",
+      "block": 67,
+      "position": 0
+    },
+    {
+      "cell_id": "b067-r0-F10",
+      "instance_id": "django__django-12209",
+      "repetition": 0,
+      "arm": "F10",
+      "block": 67,
+      "position": 1
+    },
+    {
+      "cell_id": "b067-r0-F11",
+      "instance_id": "django__django-12209",
+      "repetition": 0,
+      "arm": "F11",
+      "block": 67,
+      "position": 2
+    },
+    {
+      "cell_id": "b067-r0-F00",
+      "instance_id": "django__django-12209",
+      "repetition": 0,
+      "arm": "F00",
+      "block": 67,
+      "position": 3
+    },
+    {
+      "cell_id": "b068-r0-F01",
+      "instance_id": "psf__requests-5414",
+      "repetition": 0,
+      "arm": "F01",
+      "block": 68,
+      "position": 0
+    },
+    {
+      "cell_id": "b068-r0-F00",
+      "instance_id": "psf__requests-5414",
+      "repetition": 0,
+      "arm": "F00",
+      "block": 68,
+      "position": 1
+    },
+    {
+      "cell_id": "b068-r0-F10",
+      "instance_id": "psf__requests-5414",
+      "repetition": 0,
+      "arm": "F10",
+      "block": 68,
+      "position": 2
+    },
+    {
+      "cell_id": "b068-r0-F11",
+      "instance_id": "psf__requests-5414",
+      "repetition": 0,
+      "arm": "F11",
+      "block": 68,
+      "position": 3
+    },
+    {
+      "cell_id": "b069-r0-F01",
+      "instance_id": "pallets__flask-5014",
+      "repetition": 0,
+      "arm": "F01",
+      "block": 69,
+      "position": 0
+    },
+    {
+      "cell_id": "b069-r0-F11",
+      "instance_id": "pallets__flask-5014",
+      "repetition": 0,
+      "arm": "F11",
+      "block": 69,
+      "position": 1
+    },
+    {
+      "cell_id": "b069-r0-F00",
+      "instance_id": "pallets__flask-5014",
+      "repetition": 0,
+      "arm": "F00",
+      "block": 69,
+      "position": 2
+    },
+    {
+      "cell_id": "b069-r0-F10",
+      "instance_id": "pallets__flask-5014",
+      "repetition": 0,
+      "arm": "F10",
+      "block": 69,
+      "position": 3
+    },
+    {
+      "cell_id": "b070-r0-F00",
+      "instance_id": "psf__requests-2317",
+      "repetition": 0,
+      "arm": "F00",
+      "block": 70,
+      "position": 0
+    },
+    {
+      "cell_id": "b070-r0-F01",
+      "instance_id": "psf__requests-2317",
+      "repetition": 0,
+      "arm": "F01",
+      "block": 70,
+      "position": 1
+    },
+    {
+      "cell_id": "b070-r0-F11",
+      "instance_id": "psf__requests-2317",
+      "repetition": 0,
+      "arm": "F11",
+      "block": 70,
+      "position": 2
+    },
+    {
+      "cell_id": "b070-r0-F10",
+      "instance_id": "psf__requests-2317",
+      "repetition": 0,
+      "arm": "F10",
+      "block": 70,
+      "position": 3
+    },
+    {
+      "cell_id": "b071-r0-F01",
+      "instance_id": "matplotlib__matplotlib-20859",
+      "repetition": 0,
+      "arm": "F01",
+      "block": 71,
+      "position": 0
+    },
+    {
+      "cell_id": "b071-r0-F11",
+      "instance_id": "matplotlib__matplotlib-20859",
+      "repetition": 0,
+      "arm": "F11",
+      "block": 71,
+      "position": 1
+    },
+    {
+      "cell_id": "b071-r0-F10",
+      "instance_id": "matplotlib__matplotlib-20859",
+      "repetition": 0,
+      "arm": "F10",
+      "block": 71,
+      "position": 2
+    },
+    {
+      "cell_id": "b071-r0-F00",
+      "instance_id": "matplotlib__matplotlib-20859",
+      "repetition": 0,
+      "arm": "F00",
+      "block": 71,
+      "position": 3
+    },
+    {
+      "cell_id": "b072-r0-F11",
+      "instance_id": "pydata__xarray-7233",
+      "repetition": 0,
+      "arm": "F11",
+      "block": 72,
+      "position": 0
+    },
+    {
+      "cell_id": "b072-r0-F01",
+      "instance_id": "pydata__xarray-7233",
+      "repetition": 0,
+      "arm": "F01",
+      "block": 72,
+      "position": 1
+    },
+    {
+      "cell_id": "b072-r0-F10",
+      "instance_id": "pydata__xarray-7233",
+      "repetition": 0,
+      "arm": "F10",
+      "block": 72,
+      "position": 2
+    },
+    {
+      "cell_id": "b072-r0-F00",
+      "instance_id": "pydata__xarray-7233",
+      "repetition": 0,
+      "arm": "F00",
+      "block": 72,
+      "position": 3
+    },
+    {
+      "cell_id": "b073-r0-F00",
+      "instance_id": "matplotlib__matplotlib-25332",
+      "repetition": 0,
+      "arm": "F00",
+      "block": 73,
+      "position": 0
+    },
+    {
+      "cell_id": "b073-r0-F10",
+      "instance_id": "matplotlib__matplotlib-25332",
+      "repetition": 0,
+      "arm": "F10",
+      "block": 73,
+      "position": 1
+    },
+    {
+      "cell_id": "b073-r0-F01",
+      "instance_id": "matplotlib__matplotlib-25332",
+      "repetition": 0,
+      "arm": "F01",
+      "block": 73,
+      "position": 2
+    },
+    {
+      "cell_id": "b073-r0-F11",
+      "instance_id": "matplotlib__matplotlib-25332",
+      "repetition": 0,
+      "arm": "F11",
+      "block": 73,
+      "position": 3
+    },
+    {
+      "cell_id": "b074-r0-F00",
+      "instance_id": "pytest-dev__pytest-7571",
+      "repetition": 0,
+      "arm": "F00",
+      "block": 74,
+      "position": 0
+    },
+    {
+      "cell_id": "b074-r0-F10",
+      "instance_id": "pytest-dev__pytest-7571",
+      "repetition": 0,
+      "arm": "F10",
+      "block": 74,
+      "position": 1
+    },
+    {
+      "cell_id": "b074-r0-F01",
+      "instance_id": "pytest-dev__pytest-7571",
+      "repetition": 0,
+      "arm": "F01",
+      "block": 74,
+      "position": 2
+    },
+    {
+      "cell_id": "b074-r0-F11",
+      "instance_id": "pytest-dev__pytest-7571",
+      "repetition": 0,
+      "arm": "F11",
+      "block": 74,
+      "position": 3
+    },
+    {
+      "cell_id": "b075-r0-F00",
+      "instance_id": "sympy__sympy-19783",
+      "repetition": 0,
+      "arm": "F00",
+      "block": 75,
+      "position": 0
+    },
+    {
+      "cell_id": "b075-r0-F10",
+      "instance_id": "sympy__sympy-19783",
+      "repetition": 0,
+      "arm": "F10",
+      "block": 75,
+      "position": 1
+    },
+    {
+      "cell_id": "b075-r0-F11",
+      "instance_id": "sympy__sympy-19783",
+      "repetition": 0,
+      "arm": "F11",
+      "block": 75,
+      "position": 2
+    },
+    {
+      "cell_id": "b075-r0-F01",
+      "instance_id": "sympy__sympy-19783",
+      "repetition": 0,
+      "arm": "F01",
+      "block": 75,
+      "position": 3
+    },
+    {
+      "cell_id": "b076-r0-F00",
+      "instance_id": "sphinx-doc__sphinx-9230",
+      "repetition": 0,
+      "arm": "F00",
+      "block": 76,
+      "position": 0
+    },
+    {
+      "cell_id": "b076-r0-F01",
+      "instance_id": "sphinx-doc__sphinx-9230",
+      "repetition": 0,
+      "arm": "F01",
+      "block": 76,
+      "position": 1
+    },
+    {
+      "cell_id": "b076-r0-F11",
+      "instance_id": "sphinx-doc__sphinx-9230",
+      "repetition": 0,
+      "arm": "F11",
+      "block": 76,
+      "position": 2
+    },
+    {
+      "cell_id": "b076-r0-F10",
+      "instance_id": "sphinx-doc__sphinx-9230",
+      "repetition": 0,
+      "arm": "F10",
+      "block": 76,
+      "position": 3
+    },
+    {
+      "cell_id": "b077-r0-F11",
+      "instance_id": "pytest-dev__pytest-7490",
+      "repetition": 0,
+      "arm": "F11",
+      "block": 77,
+      "position": 0
+    },
+    {
+      "cell_id": "b077-r0-F00",
+      "instance_id": "pytest-dev__pytest-7490",
+      "repetition": 0,
+      "arm": "F00",
+      "block": 77,
+      "position": 1
+    },
+    {
+      "cell_id": "b077-r0-F01",
+      "instance_id": "pytest-dev__pytest-7490",
+      "repetition": 0,
+      "arm": "F01",
+      "block": 77,
+      "position": 2
+    },
+    {
+      "cell_id": "b077-r0-F10",
+      "instance_id": "pytest-dev__pytest-7490",
+      "repetition": 0,
+      "arm": "F10",
+      "block": 77,
+      "position": 3
+    },
+    {
+      "cell_id": "b078-r0-F11",
+      "instance_id": "django__django-15851",
+      "repetition": 0,
+      "arm": "F11",
+      "block": 78,
+      "position": 0
+    },
+    {
+      "cell_id": "b078-r0-F01",
+      "instance_id": "django__django-15851",
+      "repetition": 0,
+      "arm": "F01",
+      "block": 78,
+      "position": 1
+    },
+    {
+      "cell_id": "b078-r0-F00",
+      "instance_id": "django__django-15851",
+      "repetition": 0,
+      "arm": "F00",
+      "block": 78,
+      "position": 2
+    },
+    {
+      "cell_id": "b078-r0-F10",
+      "instance_id": "django__django-15851",
+      "repetition": 0,
+      "arm": "F10",
+      "block": 78,
+      "position": 3
+    },
+    {
+      "cell_id": "b079-r0-F11",
+      "instance_id": "matplotlib__matplotlib-25960",
+      "repetition": 0,
+      "arm": "F11",
+      "block": 79,
+      "position": 0
+    },
+    {
+      "cell_id": "b079-r0-F00",
+      "instance_id": "matplotlib__matplotlib-25960",
+      "repetition": 0,
+      "arm": "F00",
+      "block": 79,
+      "position": 1
+    },
+    {
+      "cell_id": "b079-r0-F01",
+      "instance_id": "matplotlib__matplotlib-25960",
+      "repetition": 0,
+      "arm": "F01",
+      "block": 79,
+      "position": 2
+    },
+    {
+      "cell_id": "b079-r0-F10",
+      "instance_id": "matplotlib__matplotlib-25960",
+      "repetition": 0,
+      "arm": "F10",
+      "block": 79,
+      "position": 3
+    },
+    {
+      "cell_id": "b080-r0-F10",
+      "instance_id": "scikit-learn__scikit-learn-14894",
+      "repetition": 0,
+      "arm": "F10",
+      "block": 80,
+      "position": 0
+    },
+    {
+      "cell_id": "b080-r0-F11",
+      "instance_id": "scikit-learn__scikit-learn-14894",
+      "repetition": 0,
+      "arm": "F11",
+      "block": 80,
+      "position": 1
+    },
+    {
+      "cell_id": "b080-r0-F00",
+      "instance_id": "scikit-learn__scikit-learn-14894",
+      "repetition": 0,
+      "arm": "F00",
+      "block": 80,
+      "position": 2
+    },
+    {
+      "cell_id": "b080-r0-F01",
+      "instance_id": "scikit-learn__scikit-learn-14894",
+      "repetition": 0,
+      "arm": "F01",
+      "block": 80,
+      "position": 3
+    },
+    {
+      "cell_id": "b081-r0-F00",
+      "instance_id": "sympy__sympy-23413",
+      "repetition": 0,
+      "arm": "F00",
+      "block": 81,
+      "position": 0
+    },
+    {
+      "cell_id": "b081-r0-F01",
+      "instance_id": "sympy__sympy-23413",
+      "repetition": 0,
+      "arm": "F01",
+      "block": 81,
+      "position": 1
+    },
+    {
+      "cell_id": "b081-r0-F10",
+      "instance_id": "sympy__sympy-23413",
+      "repetition": 0,
+      "arm": "F10",
+      "block": 81,
+      "position": 2
+    },
+    {
+      "cell_id": "b081-r0-F11",
+      "instance_id": "sympy__sympy-23413",
+      "repetition": 0,
+      "arm": "F11",
+      "block": 81,
+      "position": 3
+    },
+    {
+      "cell_id": "b082-r0-F10",
+      "instance_id": "astropy__astropy-7336",
+      "repetition": 0,
+      "arm": "F10",
+      "block": 82,
+      "position": 0
+    },
+    {
+      "cell_id": "b082-r0-F11",
+      "instance_id": "astropy__astropy-7336",
+      "repetition": 0,
+      "arm": "F11",
+      "block": 82,
+      "position": 1
+    },
+    {
+      "cell_id": "b082-r0-F00",
+      "instance_id": "astropy__astropy-7336",
+      "repetition": 0,
+      "arm": "F00",
+      "block": 82,
+      "position": 2
+    },
+    {
+      "cell_id": "b082-r0-F01",
+      "instance_id": "astropy__astropy-7336",
+      "repetition": 0,
+      "arm": "F01",
+      "block": 82,
+      "position": 3
+    },
+    {
+      "cell_id": "b083-r0-F10",
+      "instance_id": "pylint-dev__pylint-4661",
+      "repetition": 0,
+      "arm": "F10",
+      "block": 83,
+      "position": 0
+    },
+    {
+      "cell_id": "b083-r0-F00",
+      "instance_id": "pylint-dev__pylint-4661",
+      "repetition": 0,
+      "arm": "F00",
+      "block": 83,
+      "position": 1
+    },
+    {
+      "cell_id": "b083-r0-F01",
+      "instance_id": "pylint-dev__pylint-4661",
+      "repetition": 0,
+      "arm": "F01",
+      "block": 83,
+      "position": 2
+    },
+    {
+      "cell_id": "b083-r0-F11",
+      "instance_id": "pylint-dev__pylint-4661",
+      "repetition": 0,
+      "arm": "F11",
+      "block": 83,
+      "position": 3
+    },
+    {
+      "cell_id": "b084-r0-F01",
+      "instance_id": "pylint-dev__pylint-7080",
+      "repetition": 0,
+      "arm": "F01",
+      "block": 84,
+      "position": 0
+    },
+    {
+      "cell_id": "b084-r0-F00",
+      "instance_id": "pylint-dev__pylint-7080",
+      "repetition": 0,
+      "arm": "F00",
+      "block": 84,
+      "position": 1
+    },
+    {
+      "cell_id": "b084-r0-F11",
+      "instance_id": "pylint-dev__pylint-7080",
+      "repetition": 0,
+      "arm": "F11",
+      "block": 84,
+      "position": 2
+    },
+    {
+      "cell_id": "b084-r0-F10",
+      "instance_id": "pylint-dev__pylint-7080",
+      "repetition": 0,
+      "arm": "F10",
+      "block": 84,
+      "position": 3
+    },
+    {
+      "cell_id": "b085-r0-F00",
+      "instance_id": "scikit-learn__scikit-learn-25102",
+      "repetition": 0,
+      "arm": "F00",
+      "block": 85,
+      "position": 0
+    },
+    {
+      "cell_id": "b085-r0-F10",
+      "instance_id": "scikit-learn__scikit-learn-25102",
+      "repetition": 0,
+      "arm": "F10",
+      "block": 85,
+      "position": 1
+    },
+    {
+      "cell_id": "b085-r0-F11",
+      "instance_id": "scikit-learn__scikit-learn-25102",
+      "repetition": 0,
+      "arm": "F11",
+      "block": 85,
+      "position": 2
+    },
+    {
+      "cell_id": "b085-r0-F01",
+      "instance_id": "scikit-learn__scikit-learn-25102",
+      "repetition": 0,
+      "arm": "F01",
+      "block": 85,
+      "position": 3
+    },
+    {
+      "cell_id": "b086-r0-F11",
+      "instance_id": "astropy__astropy-7606",
+      "repetition": 0,
+      "arm": "F11",
+      "block": 86,
+      "position": 0
+    },
+    {
+      "cell_id": "b086-r0-F01",
+      "instance_id": "astropy__astropy-7606",
+      "repetition": 0,
+      "arm": "F01",
+      "block": 86,
+      "position": 1
+    },
+    {
+      "cell_id": "b086-r0-F00",
+      "instance_id": "astropy__astropy-7606",
+      "repetition": 0,
+      "arm": "F00",
+      "block": 86,
+      "position": 2
+    },
+    {
+      "cell_id": "b086-r0-F10",
+      "instance_id": "astropy__astropy-7606",
+      "repetition": 0,
+      "arm": "F10",
+      "block": 86,
+      "position": 3
+    },
+    {
+      "cell_id": "b087-r0-F01",
+      "instance_id": "astropy__astropy-14508",
+      "repetition": 0,
+      "arm": "F01",
+      "block": 87,
+      "position": 0
+    },
+    {
+      "cell_id": "b087-r0-F00",
+      "instance_id": "astropy__astropy-14508",
+      "repetition": 0,
+      "arm": "F00",
+      "block": 87,
+      "position": 1
+    },
+    {
+      "cell_id": "b087-r0-F11",
+      "instance_id": "astropy__astropy-14508",
+      "repetition": 0,
+      "arm": "F11",
+      "block": 87,
+      "position": 2
+    },
+    {
+      "cell_id": "b087-r0-F10",
+      "instance_id": "astropy__astropy-14508",
+      "repetition": 0,
+      "arm": "F10",
+      "block": 87,
+      "position": 3
+    },
+    {
+      "cell_id": "b088-r0-F11",
+      "instance_id": "pytest-dev__pytest-5840",
+      "repetition": 0,
+      "arm": "F11",
+      "block": 88,
+      "position": 0
+    },
+    {
+      "cell_id": "b088-r0-F00",
+      "instance_id": "pytest-dev__pytest-5840",
+      "repetition": 0,
+      "arm": "F00",
+      "block": 88,
+      "position": 1
+    },
+    {
+      "cell_id": "b088-r0-F01",
+      "instance_id": "pytest-dev__pytest-5840",
+      "repetition": 0,
+      "arm": "F01",
+      "block": 88,
+      "position": 2
+    },
+    {
+      "cell_id": "b088-r0-F10",
+      "instance_id": "pytest-dev__pytest-5840",
+      "repetition": 0,
+      "arm": "F10",
+      "block": 88,
+      "position": 3
+    },
+    {
+      "cell_id": "b089-r0-F11",
+      "instance_id": "sphinx-doc__sphinx-8035",
+      "repetition": 0,
+      "arm": "F11",
+      "block": 89,
+      "position": 0
+    },
+    {
+      "cell_id": "b089-r0-F01",
+      "instance_id": "sphinx-doc__sphinx-8035",
+      "repetition": 0,
+      "arm": "F01",
+      "block": 89,
+      "position": 1
+    },
+    {
+      "cell_id": "b089-r0-F10",
+      "instance_id": "sphinx-doc__sphinx-8035",
+      "repetition": 0,
+      "arm": "F10",
+      "block": 89,
+      "position": 2
+    },
+    {
+      "cell_id": "b089-r0-F00",
+      "instance_id": "sphinx-doc__sphinx-8035",
+      "repetition": 0,
+      "arm": "F00",
+      "block": 89,
+      "position": 3
+    },
+    {
+      "cell_id": "b090-r0-F01",
+      "instance_id": "pytest-dev__pytest-7982",
+      "repetition": 0,
+      "arm": "F01",
+      "block": 90,
+      "position": 0
+    },
+    {
+      "cell_id": "b090-r0-F11",
+      "instance_id": "pytest-dev__pytest-7982",
+      "repetition": 0,
+      "arm": "F11",
+      "block": 90,
+      "position": 1
+    },
+    {
+      "cell_id": "b090-r0-F00",
+      "instance_id": "pytest-dev__pytest-7982",
+      "repetition": 0,
+      "arm": "F00",
+      "block": 90,
+      "position": 2
+    },
+    {
+      "cell_id": "b090-r0-F10",
+      "instance_id": "pytest-dev__pytest-7982",
+      "repetition": 0,
+      "arm": "F10",
+      "block": 90,
+      "position": 3
+    },
+    {
+      "cell_id": "b091-r0-F10",
+      "instance_id": "astropy__astropy-7671",
+      "repetition": 0,
+      "arm": "F10",
+      "block": 91,
+      "position": 0
+    },
+    {
+      "cell_id": "b091-r0-F00",
+      "instance_id": "astropy__astropy-7671",
+      "repetition": 0,
+      "arm": "F00",
+      "block": 91,
+      "position": 1
+    },
+    {
+      "cell_id": "b091-r0-F11",
+      "instance_id": "astropy__astropy-7671",
+      "repetition": 0,
+      "arm": "F11",
+      "block": 91,
+      "position": 2
+    },
+    {
+      "cell_id": "b091-r0-F01",
+      "instance_id": "astropy__astropy-7671",
+      "repetition": 0,
+      "arm": "F01",
+      "block": 91,
+      "position": 3
+    },
+    {
+      "cell_id": "b092-r0-F01",
+      "instance_id": "pytest-dev__pytest-5787",
+      "repetition": 0,
+      "arm": "F01",
+      "block": 92,
+      "position": 0
+    },
+    {
+      "cell_id": "b092-r0-F00",
+      "instance_id": "pytest-dev__pytest-5787",
+      "repetition": 0,
+      "arm": "F00",
+      "block": 92,
+      "position": 1
+    },
+    {
+      "cell_id": "b092-r0-F11",
+      "instance_id": "pytest-dev__pytest-5787",
+      "repetition": 0,
+      "arm": "F11",
+      "block": 92,
+      "position": 2
+    },
+    {
+      "cell_id": "b092-r0-F10",
+      "instance_id": "pytest-dev__pytest-5787",
+      "repetition": 0,
+      "arm": "F10",
+      "block": 92,
+      "position": 3
+    },
+    {
+      "cell_id": "b093-r0-F01",
+      "instance_id": "astropy__astropy-12907",
+      "repetition": 0,
+      "arm": "F01",
+      "block": 93,
+      "position": 0
+    },
+    {
+      "cell_id": "b093-r0-F00",
+      "instance_id": "astropy__astropy-12907",
+      "repetition": 0,
+      "arm": "F00",
+      "block": 93,
+      "position": 1
+    },
+    {
+      "cell_id": "b093-r0-F11",
+      "instance_id": "astropy__astropy-12907",
+      "repetition": 0,
+      "arm": "F11",
+      "block": 93,
+      "position": 2
+    },
+    {
+      "cell_id": "b093-r0-F10",
+      "instance_id": "astropy__astropy-12907",
+      "repetition": 0,
+      "arm": "F10",
+      "block": 93,
+      "position": 3
+    },
+    {
+      "cell_id": "b094-r0-F11",
+      "instance_id": "pytest-dev__pytest-5631",
+      "repetition": 0,
+      "arm": "F11",
+      "block": 94,
+      "position": 0
+    },
+    {
+      "cell_id": "b094-r0-F10",
+      "instance_id": "pytest-dev__pytest-5631",
+      "repetition": 0,
+      "arm": "F10",
+      "block": 94,
+      "position": 1
+    },
+    {
+      "cell_id": "b094-r0-F01",
+      "instance_id": "pytest-dev__pytest-5631",
+      "repetition": 0,
+      "arm": "F01",
+      "block": 94,
+      "position": 2
+    },
+    {
+      "cell_id": "b094-r0-F00",
+      "instance_id": "pytest-dev__pytest-5631",
+      "repetition": 0,
+      "arm": "F00",
+      "block": 94,
+      "position": 3
+    },
+    {
+      "cell_id": "b095-r0-F01",
+      "instance_id": "django__django-12774",
+      "repetition": 0,
+      "arm": "F01",
+      "block": 95,
+      "position": 0
+    },
+    {
+      "cell_id": "b095-r0-F11",
+      "instance_id": "django__django-12774",
+      "repetition": 0,
+      "arm": "F11",
+      "block": 95,
+      "position": 1
+    },
+    {
+      "cell_id": "b095-r0-F10",
+      "instance_id": "django__django-12774",
+      "repetition": 0,
+      "arm": "F10",
+      "block": 95,
+      "position": 2
+    },
+    {
+      "cell_id": "b095-r0-F00",
+      "instance_id": "django__django-12774",
+      "repetition": 0,
+      "arm": "F00",
+      "block": 95,
+      "position": 3
+    },
+    {
+      "cell_id": "b096-r0-F11",
+      "instance_id": "pydata__xarray-6461",
+      "repetition": 0,
+      "arm": "F11",
+      "block": 96,
+      "position": 0
+    },
+    {
+      "cell_id": "b096-r0-F00",
+      "instance_id": "pydata__xarray-6461",
+      "repetition": 0,
+      "arm": "F00",
+      "block": 96,
+      "position": 1
+    },
+    {
+      "cell_id": "b096-r0-F01",
+      "instance_id": "pydata__xarray-6461",
+      "repetition": 0,
+      "arm": "F01",
+      "block": 96,
+      "position": 2
+    },
+    {
+      "cell_id": "b096-r0-F10",
+      "instance_id": "pydata__xarray-6461",
+      "repetition": 0,
+      "arm": "F10",
+      "block": 96,
+      "position": 3
+    },
+    {
+      "cell_id": "b097-r0-F10",
+      "instance_id": "sympy__sympy-14531",
+      "repetition": 0,
+      "arm": "F10",
+      "block": 97,
+      "position": 0
+    },
+    {
+      "cell_id": "b097-r0-F11",
+      "instance_id": "sympy__sympy-14531",
+      "repetition": 0,
+      "arm": "F11",
+      "block": 97,
+      "position": 1
+    },
+    {
+      "cell_id": "b097-r0-F00",
+      "instance_id": "sympy__sympy-14531",
+      "repetition": 0,
+      "arm": "F00",
+      "block": 97,
+      "position": 2
+    },
+    {
+      "cell_id": "b097-r0-F01",
+      "instance_id": "sympy__sympy-14531",
+      "repetition": 0,
+      "arm": "F01",
+      "block": 97,
+      "position": 3
+    },
+    {
+      "cell_id": "b098-r0-F11",
+      "instance_id": "sphinx-doc__sphinx-8595",
+      "repetition": 0,
+      "arm": "F11",
+      "block": 98,
+      "position": 0
+    },
+    {
+      "cell_id": "b098-r0-F01",
+      "instance_id": "sphinx-doc__sphinx-8595",
+      "repetition": 0,
+      "arm": "F01",
+      "block": 98,
+      "position": 1
+    },
+    {
+      "cell_id": "b098-r0-F00",
+      "instance_id": "sphinx-doc__sphinx-8595",
+      "repetition": 0,
+      "arm": "F00",
+      "block": 98,
+      "position": 2
+    },
+    {
+      "cell_id": "b098-r0-F10",
+      "instance_id": "sphinx-doc__sphinx-8595",
+      "repetition": 0,
+      "arm": "F10",
+      "block": 98,
+      "position": 3
+    },
+    {
+      "cell_id": "b099-r0-F01",
+      "instance_id": "sympy__sympy-13615",
+      "repetition": 0,
+      "arm": "F01",
+      "block": 99,
+      "position": 0
+    },
+    {
+      "cell_id": "b099-r0-F00",
+      "instance_id": "sympy__sympy-13615",
+      "repetition": 0,
+      "arm": "F00",
+      "block": 99,
+      "position": 1
+    },
+    {
+      "cell_id": "b099-r0-F10",
+      "instance_id": "sympy__sympy-13615",
+      "repetition": 0,
+      "arm": "F10",
+      "block": 99,
+      "position": 2
+    },
+    {
+      "cell_id": "b099-r0-F11",
+      "instance_id": "sympy__sympy-13615",
+      "repetition": 0,
+      "arm": "F11",
+      "block": 99,
+      "position": 3
+    }
+  ]
+}

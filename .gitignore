@@ -26,6 +26,17 @@ Code/experiments/swe51/results/
 Code/experiments/swe51/harness/
 Code/experiments/swe51/public_instances/
 Code/experiments/swe51/generation_summary.json
+Code/experiments/swe_verified_20260922/private_official/
+Code/experiments/swe_verified_20260922/public/official_instances.jsonl
+Code/experiments/swe_verified_20260922/repos/
+Code/experiments/swe_verified_20260922/case_trees/
+Code/experiments/swe_verified_20260922/raw/
+Code/experiments/swe_verified_preflight_20260922/runs/
+Code/experiments/swe_verified_preflight_20260922/failed_attempts/
+Code/experiments/evidence_study_verified100_20260922_r2/cells/*/backend/
+Code/experiments/evidence_study_verified100_20260922_r2/cells/*/generation.log
+Code/experiments/evidence_study_verified100_20260922_r2/cells/*/generation.owner.json
+Code/experiments/evidence_study_verified100_20260922_r2/evaluation/
 
 # Reach-Avoid 51 runtime trees and harness logs are local execution outputs.
 Code/experiments/reachavoid_51_final_v1_20260820/runs/

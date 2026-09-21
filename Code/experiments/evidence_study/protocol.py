@@ -46,16 +46,19 @@ def build_block_schedule(case_ids, arms, repetitions, seed):
     return cells
 
 
-def make_protocol(scope: str, count: int, repetitions: int, seed: int, source_tree_root: Path | None = None):
+def make_protocol(scope: str, count: int, repetitions: int, seed: int,
+                  source_tree_root: Path | None = None,
+                  dataset_root: Path | None = None,
+                  official_dataset_path: Path | None = None):
     tools = {name: shutil.which(name) for name in ("rg", "git", "docker", "bwrap")}
     if any(path is None for path in tools.values()):
         raise RuntimeError("study requires rg, git, docker and bubblewrap on PATH")
-    if scope not in {"public_smoke", "development"}:
-        raise ValueError("confirmatory data not yet provisioned; do not relabel development")
+    if scope not in {"public_smoke", "development", "verified"}:
+        raise ValueError("unsupported study scope")
     if scope == "public_smoke":
         cases = ["evidence-efficiency-public-smoke"]
         calls, tokens, wall, revisions = 18, 120000, 600, 2
-    else:
+    elif scope == "development":
         from experiments.reachavoid_51.runner import _public_rows
         rows = _public_rows()  # validates no hidden/gold fields
         if not 1 <= count <= len(rows):
@@ -76,6 +79,19 @@ def make_protocol(scope: str, count: int, repetitions: int, seed: int, source_tr
         calls, tokens, wall, revisions = 40, 250000, 900, 2
         if source_tree_root is None or not source_tree_root.is_dir():
             raise ValueError("development requires an explicit verified source-tree root")
+    else:
+        if dataset_root is None or not dataset_root.is_dir():
+            raise ValueError("verified requires an explicit public dataset root")
+        if source_tree_root is None or not source_tree_root.is_dir():
+            raise ValueError("verified requires an explicit source-tree root")
+        public_path = dataset_root / "generation_public_instances.jsonl"
+        if not public_path.is_file():
+            raise ValueError(f"verified public dataset is missing: {public_path}")
+        verified_rows = [json.loads(line) for line in public_path.read_text().splitlines() if line.strip()]
+        if not 1 <= count <= len(verified_rows):
+            raise ValueError("verified count outside prepared cohort")
+        cases = [str(row["instance_id"]) for row in verified_rows[:count]]
+        calls, tokens, wall, revisions = 40, 250000, 900, 2
     fixture = CODE / "tests/fixtures/evidence_efficiency"
     fixture_hash = digest(b"".join(p.name.encode() + b"\0" + p.read_bytes()
                                   for p in sorted(fixture.iterdir()) if p.is_file()))
@@ -87,10 +103,14 @@ def make_protocol(scope: str, count: int, repetitions: int, seed: int, source_tr
             evidence_reuse_enabled=reuse, demand_driven_interaction_enabled=demand)
         arms[name] = {"demand": demand, "reuse": reuse, "policy": config.evidence_policy(),
                       "config": asdict(config)}
+    public_path = (dataset_root / "generation_public_instances.jsonl"
+                   if scope == "verified" and dataset_root is not None else PUBLIC)
     return {"schema": "evidence-study-v1", "scope": scope,
             "host_runtime": {"python": sys.executable, "python_version": sys.version,
                              "tools": tools, "tool_hashes": {k: digest(Path(v).read_bytes()) for k, v in tools.items()}},
             "source_tree_root": str(source_tree_root.resolve()) if source_tree_root else None,
+            "dataset_root": str(dataset_root.resolve()) if dataset_root else None,
+            "official_dataset_path": str(official_dataset_path.resolve()) if official_dataset_path else None,
             "public_fixture_sha256": fixture_hash,
             "model": "deepseek-flash", "temperature": 0, "provider_seed": "NOT_SUPPORTED_BY_TRANSPORT",
             "randomization_seed": seed, "repetitions": repetitions,
@@ -101,7 +121,7 @@ def make_protocol(scope: str, count: int, repetitions: int, seed: int, source_tr
             "noninferiority": "NOT_TESTED_IN_DEVELOPMENT_NO_MARGIN_CHOSEN",
             "analysis": {"bootstrap_unit": "issue", "bootstrap_samples": 10000,
                          "seed": seed, "multiplicity": "EXPLORATORY_NO_CONFIRMATORY_P_VALUES"},
-            "implementation_hash": implementation_hash(), "public_sha256": digest(PUBLIC.read_bytes()),
+            "implementation_hash": implementation_hash(), "public_sha256": digest(public_path.read_bytes()),
             "cells": build_block_schedule(cases, tuple(arms), repetitions, seed)}
 
 
@@ -119,7 +139,9 @@ def validate_protocol(value):
         raise ValueError("public fixture changed after freeze")
     if value["implementation_hash"] != implementation_hash():
         raise ValueError("implementation changed after freeze; create a new study")
-    if value["public_sha256"] != digest(PUBLIC.read_bytes()):
+    public_path = (Path(value["dataset_root"]) / "generation_public_instances.jsonl"
+                   if value.get("scope") == "verified" else PUBLIC)
+    if value["public_sha256"] != digest(public_path.read_bytes()):
         raise ValueError("public dataset changed after freeze")
     if value["model"] != "deepseek-flash" or value["max_attempts_per_cell"] != 1:
         raise ValueError("unsupported model or retry policy")

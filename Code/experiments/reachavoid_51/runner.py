@@ -29,7 +29,10 @@ from reachpatch.repair import DeepSeekAgent, DeepSeekConfig, DeepSeekHTTPTranspo
 from reachpatch.reporting import PatchOutcomeComparison, summarize_patch_outcomes
 
 
-DATASET_ROOT = CODE_ROOT / "dataset" / "patchpsro_55_unique51"
+DATASET_ROOT = Path(os.environ.get(
+    "REACHPATCH_DATASET_ROOT",
+    str(CODE_ROOT / "dataset" / "swebench_verified" / "public"),
+)).resolve()
 PUBLIC_PATH = DATASET_ROOT / "generation_public_instances.jsonl"
 OFFICIAL_PATH = DATASET_ROOT / "official_instances.jsonl"
 DIAGNOSTIC_OFFICIAL_PATH = CODE_ROOT / "dataset" / "diagnostic10_official_instances.jsonl"
@@ -159,8 +162,9 @@ def _assert_public_value(value: Any, path: str = "root") -> None:
 
 def _public_rows() -> list[dict[str, Any]]:
     rows = _read_jsonl(PUBLIC_PATH)
-    if len(rows) != 51:
-        raise RuntimeError(f"expected 51 public instances, found {len(rows)}")
+    expected = int(os.environ.get("REACHPATCH_EXPECTED_PUBLIC_COUNT", "500"))
+    if len(rows) != expected:
+        raise RuntimeError(f"expected {expected} public instances, found {len(rows)}")
     ids = [str(row.get("instance_id", "")) for row in rows]
     if len(set(ids)) != len(ids):
         raise RuntimeError("public generation instance IDs are not unique")
