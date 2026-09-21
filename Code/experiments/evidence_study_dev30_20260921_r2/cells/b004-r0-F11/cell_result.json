@@ -1,0 +1,12 @@
+{
+  "status": "GENERATED",
+  "return_code": 0,
+  "elapsed_seconds": 616.5576829910278,
+  "journal_path": "/home/slt/ReachPatch/Code/experiments/evidence_study_dev30_20260921_r2/cells/b004-r0-F11/backend/runs/pytest-dev__pytest-5692/request_journal.jsonl",
+  "run_root": "/home/slt/ReachPatch/Code/experiments/evidence_study_dev30_20260921_r2/cells/b004-r0-F11/backend/runs/pytest-dev__pytest-5692",
+  "controller_certified": false,
+  "public_acceptance": false,
+  "patch_path": "/home/slt/ReachPatch/Code/experiments/evidence_study_dev30_20260921_r2/cells/b004-r0-F11/sealed_final.patch",
+  "patch_sha256": "b1dca99601fb69ed6631d54424df5619ee898b394e437b8f6d261324fbe70e25",
+  "attempt_id": "b004-r0-F11-a1"
+}

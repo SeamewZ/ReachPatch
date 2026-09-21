@@ -1,0 +1,14 @@
+diff --git a/django/utils/functional.py b/django/utils/functional.py
+--- a/django/utils/functional.py
++++ b/django/utils/functional.py
+@@ -365,6 +365,10 @@
+     __ne__ = new_method_proxy(operator.ne)
+     __hash__ = new_method_proxy(hash)
+ 
++    # Arithmetic operations support
++    __add__ = new_method_proxy(operator.add)
++    __radd__ = new_method_proxy(lambda a, b: operator.add(b, a))
++
+     # List/Tuple/Dictionary methods support
+     __getitem__ = new_method_proxy(operator.getitem)
+     __setitem__ = new_method_proxy(operator.setitem)

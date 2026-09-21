@@ -1,0 +1,909 @@
+{
+  "rows": [
+    {
+      "instance_id": "astropy__astropy-7746",
+      "arm": "F00",
+      "repetition": 0,
+      "resolved": false,
+      "patch_sha256": "1a9c6a714dd6fae6204870b397f0bffabff23a46ce6229979bda8bb7785448ba"
+    },
+    {
+      "instance_id": "sympy__sympy-22005",
+      "arm": "F00",
+      "repetition": 0,
+      "resolved": false,
+      "patch_sha256": "3f91a85b681472d74245e2a2d4df9c6247c88975da643c98658f14ab3d6a7efb"
+    },
+    {
+      "instance_id": "django__django-12908",
+      "arm": "F00",
+      "repetition": 0,
+      "resolved": false,
+      "patch_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "instance_id": "sympy__sympy-18835",
+      "arm": "F00",
+      "repetition": 0,
+      "resolved": false,
+      "patch_sha256": "e9568e601af79567d4e0e167b0a8f9aef26cd7875526cf4efaeddbad9aa5feab"
+    },
+    {
+      "instance_id": "pytest-dev__pytest-5692",
+      "arm": "F00",
+      "repetition": 0,
+      "resolved": false,
+      "patch_sha256": "e0a26b34419f19954e9962b00c9b681819a5c6eeea69fe32eed4cdc85649cf62"
+    },
+    {
+      "instance_id": "django__django-15400",
+      "arm": "F00",
+      "repetition": 0,
+      "resolved": true,
+      "patch_sha256": "3346ff01391b8ff2146a93ff6e01bbd22563e6a0d1c479e66e423d3d7225a0e5"
+    },
+    {
+      "instance_id": "sphinx-doc__sphinx-8721",
+      "arm": "F00",
+      "repetition": 0,
+      "resolved": true,
+      "patch_sha256": "6d1ac71c9669c1e2e0534d382bfaf4d99ee55485e9c39220ba07ad2ddad1bf88"
+    },
+    {
+      "instance_id": "django__django-15781",
+      "arm": "F00",
+      "repetition": 0,
+      "resolved": true,
+      "patch_sha256": "3621da720ddccc8879dff8552d805a4de39e2435cfdbac677ad59dc073b3c661"
+    },
+    {
+      "instance_id": "pytest-dev__pytest-7220",
+      "arm": "F00",
+      "repetition": 0,
+      "resolved": false,
+      "patch_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "instance_id": "django__django-10924",
+      "arm": "F00",
+      "repetition": 0,
+      "resolved": true,
+      "patch_sha256": "0e9ee103a2619157df40fbe994e3f4823303dcde70919383a74e5ae5506f860e"
+    },
+    {
+      "instance_id": "scikit-learn__scikit-learn-14092",
+      "arm": "F00",
+      "repetition": 0,
+      "resolved": false,
+      "patch_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "instance_id": "astropy__astropy-14365",
+      "arm": "F00",
+      "repetition": 0,
+      "resolved": false,
+      "patch_sha256": "18a45063017c6f7c64110bce88cb7ec09c063ac0284ca345cd741a6bb8677510"
+    },
+    {
+      "instance_id": "django__django-13448",
+      "arm": "F00",
+      "repetition": 0,
+      "resolved": false,
+      "patch_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "instance_id": "sympy__sympy-12454",
+      "arm": "F00",
+      "repetition": 0,
+      "resolved": false,
+      "patch_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "instance_id": "sympy__sympy-21171",
+      "arm": "F00",
+      "repetition": 0,
+      "resolved": false,
+      "patch_sha256": "efa03957dca2af067d89f542a4691950aacaaa0880efd7990cc47886bb5eb63b"
+    },
+    {
+      "instance_id": "pytest-dev__pytest-5413",
+      "arm": "F00",
+      "repetition": 0,
+      "resolved": true,
+      "patch_sha256": "d326727bbc446463d89ccfc4e8459f88b5f9c1393ce3d19ea8d95bb343004782"
+    },
+    {
+      "instance_id": "django__django-14017",
+      "arm": "F00",
+      "repetition": 0,
+      "resolved": true,
+      "patch_sha256": "5abe4b812c1ac5c24038639fec20218dd1394ce39ab6bed294e77355d662798f"
+    },
+    {
+      "instance_id": "sympy__sympy-18199",
+      "arm": "F00",
+      "repetition": 0,
+      "resolved": false,
+      "patch_sha256": "564234467fdffa1700f3c804e866e3cf43b9342f48488684d88f727c8731d1ee"
+    },
+    {
+      "instance_id": "astropy__astropy-14182",
+      "arm": "F00",
+      "repetition": 0,
+      "resolved": false,
+      "patch_sha256": "e3e7ed32eb8fcdbdcdc35aa82bc4429c9da4c6dcd98dffe0a575b303fd3677bc"
+    },
+    {
+      "instance_id": "sympy__sympy-20049",
+      "arm": "F00",
+      "repetition": 0,
+      "resolved": false,
+      "patch_sha256": "5f0980ab11404c356ea24f1923b60d95aaac25afb431de5b0387a14a3759809f"
+    },
+    {
+      "instance_id": "sympy__sympy-13437",
+      "arm": "F00",
+      "repetition": 0,
+      "resolved": false,
+      "patch_sha256": "a8cabd8d38e4cb335a184a58e67bef24f70c493624d0841ae0a1d15f0d371cc2"
+    },
+    {
+      "instance_id": "django__django-13768",
+      "arm": "F00",
+      "repetition": 0,
+      "resolved": true,
+      "patch_sha256": "7587822e7d1193027d8f4b4aa2a49b759916dc55a2e0fd085b233378fc8f7b3d"
+    },
+    {
+      "instance_id": "django__django-15695",
+      "arm": "F00",
+      "repetition": 0,
+      "resolved": false,
+      "patch_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "instance_id": "matplotlib__matplotlib-18869",
+      "arm": "F00",
+      "repetition": 0,
+      "resolved": false,
+      "patch_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "instance_id": "psf__requests-2148",
+      "arm": "F00",
+      "repetition": 0,
+      "resolved": false,
+      "patch_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "instance_id": "django__django-11905",
+      "arm": "F00",
+      "repetition": 0,
+      "resolved": false,
+      "patch_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "instance_id": "django__django-13925",
+      "arm": "F00",
+      "repetition": 0,
+      "resolved": false,
+      "patch_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "instance_id": "sympy__sympy-11870",
+      "arm": "F00",
+      "repetition": 0,
+      "resolved": false,
+      "patch_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "instance_id": "sphinx-doc__sphinx-8282",
+      "arm": "F00",
+      "repetition": 0,
+      "resolved": false,
+      "patch_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "instance_id": "scikit-learn__scikit-learn-11040",
+      "arm": "F00",
+      "repetition": 0,
+      "resolved": false,
+      "patch_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "instance_id": "astropy__astropy-7746",
+      "arm": "F10",
+      "repetition": 0,
+      "resolved": false,
+      "patch_sha256": "1a9c6a714dd6fae6204870b397f0bffabff23a46ce6229979bda8bb7785448ba"
+    },
+    {
+      "instance_id": "sympy__sympy-22005",
+      "arm": "F10",
+      "repetition": 0,
+      "resolved": false,
+      "patch_sha256": "3f91a85b681472d74245e2a2d4df9c6247c88975da643c98658f14ab3d6a7efb"
+    },
+    {
+      "instance_id": "django__django-12908",
+      "arm": "F10",
+      "repetition": 0,
+      "resolved": false,
+      "patch_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "instance_id": "sympy__sympy-18835",
+      "arm": "F10",
+      "repetition": 0,
+      "resolved": false,
+      "patch_sha256": "d1c5f1d3effae8da06b3aecd88a262c6be9af0d87513dc80ae47e2ebeefb317b"
+    },
+    {
+      "instance_id": "pytest-dev__pytest-5692",
+      "arm": "F10",
+      "repetition": 0,
+      "resolved": false,
+      "patch_sha256": "051f5f7efee7b2ee141a522336e659bea9363a9ff92b69358ec3e32ebee41027"
+    },
+    {
+      "instance_id": "django__django-15400",
+      "arm": "F10",
+      "repetition": 0,
+      "resolved": true,
+      "patch_sha256": "dcb4f53da557ad25a8afcd746a71ec8a11e5cc1958580269d9938a364efe7731"
+    },
+    {
+      "instance_id": "sphinx-doc__sphinx-8721",
+      "arm": "F10",
+      "repetition": 0,
+      "resolved": true,
+      "patch_sha256": "6d1ac71c9669c1e2e0534d382bfaf4d99ee55485e9c39220ba07ad2ddad1bf88"
+    },
+    {
+      "instance_id": "django__django-15781",
+      "arm": "F10",
+      "repetition": 0,
+      "resolved": true,
+      "patch_sha256": "3621da720ddccc8879dff8552d805a4de39e2435cfdbac677ad59dc073b3c661"
+    },
+    {
+      "instance_id": "pytest-dev__pytest-7220",
+      "arm": "F10",
+      "repetition": 0,
+      "resolved": false,
+      "patch_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "instance_id": "django__django-10924",
+      "arm": "F10",
+      "repetition": 0,
+      "resolved": true,
+      "patch_sha256": "0e9ee103a2619157df40fbe994e3f4823303dcde70919383a74e5ae5506f860e"
+    },
+    {
+      "instance_id": "scikit-learn__scikit-learn-14092",
+      "arm": "F10",
+      "repetition": 0,
+      "resolved": false,
+      "patch_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "instance_id": "astropy__astropy-14365",
+      "arm": "F10",
+      "repetition": 0,
+      "resolved": false,
+      "patch_sha256": "18a45063017c6f7c64110bce88cb7ec09c063ac0284ca345cd741a6bb8677510"
+    },
+    {
+      "instance_id": "django__django-13448",
+      "arm": "F10",
+      "repetition": 0,
+      "resolved": true,
+      "patch_sha256": "61903e8854252c2b12da4963e7ae4ada32a6fdc0bc3b136673f6e25b6f6fc7d3"
+    },
+    {
+      "instance_id": "sympy__sympy-12454",
+      "arm": "F10",
+      "repetition": 0,
+      "resolved": false,
+      "patch_sha256": "0250653fa1289fbfc6afab2a917e7f52c7aec0464cd5f2755b73f8361889fe4a"
+    },
+    {
+      "instance_id": "sympy__sympy-21171",
+      "arm": "F10",
+      "repetition": 0,
+      "resolved": false,
+      "patch_sha256": "efa03957dca2af067d89f542a4691950aacaaa0880efd7990cc47886bb5eb63b"
+    },
+    {
+      "instance_id": "pytest-dev__pytest-5413",
+      "arm": "F10",
+      "repetition": 0,
+      "resolved": true,
+      "patch_sha256": "d326727bbc446463d89ccfc4e8459f88b5f9c1393ce3d19ea8d95bb343004782"
+    },
+    {
+      "instance_id": "django__django-14017",
+      "arm": "F10",
+      "repetition": 0,
+      "resolved": true,
+      "patch_sha256": "5abe4b812c1ac5c24038639fec20218dd1394ce39ab6bed294e77355d662798f"
+    },
+    {
+      "instance_id": "sympy__sympy-18199",
+      "arm": "F10",
+      "repetition": 0,
+      "resolved": false,
+      "patch_sha256": "564234467fdffa1700f3c804e866e3cf43b9342f48488684d88f727c8731d1ee"
+    },
+    {
+      "instance_id": "astropy__astropy-14182",
+      "arm": "F10",
+      "repetition": 0,
+      "resolved": false,
+      "patch_sha256": "e3e7ed32eb8fcdbdcdc35aa82bc4429c9da4c6dcd98dffe0a575b303fd3677bc"
+    },
+    {
+      "instance_id": "sympy__sympy-20049",
+      "arm": "F10",
+      "repetition": 0,
+      "resolved": false,
+      "patch_sha256": "96596723c66374958d140626e58a380d9dba740207bf133d51b821b9c46daa96"
+    },
+    {
+      "instance_id": "sympy__sympy-13437",
+      "arm": "F10",
+      "repetition": 0,
+      "resolved": false,
+      "patch_sha256": "a8cabd8d38e4cb335a184a58e67bef24f70c493624d0841ae0a1d15f0d371cc2"
+    },
+    {
+      "instance_id": "django__django-13768",
+      "arm": "F10",
+      "repetition": 0,
+      "resolved": true,
+      "patch_sha256": "f9e9fb7de226b20f7a847fe9debde908c360ffaa670bd22c3868fb24d8807935"
+    },
+    {
+      "instance_id": "django__django-15695",
+      "arm": "F10",
+      "repetition": 0,
+      "resolved": false,
+      "patch_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "instance_id": "matplotlib__matplotlib-18869",
+      "arm": "F10",
+      "repetition": 0,
+      "resolved": false,
+      "patch_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "instance_id": "psf__requests-2148",
+      "arm": "F10",
+      "repetition": 0,
+      "resolved": false,
+      "patch_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "instance_id": "django__django-11905",
+      "arm": "F10",
+      "repetition": 0,
+      "resolved": false,
+      "patch_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "instance_id": "django__django-13925",
+      "arm": "F10",
+      "repetition": 0,
+      "resolved": false,
+      "patch_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "instance_id": "sympy__sympy-11870",
+      "arm": "F10",
+      "repetition": 0,
+      "resolved": false,
+      "patch_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "instance_id": "sphinx-doc__sphinx-8282",
+      "arm": "F10",
+      "repetition": 0,
+      "resolved": false,
+      "patch_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "instance_id": "scikit-learn__scikit-learn-11040",
+      "arm": "F10",
+      "repetition": 0,
+      "resolved": false,
+      "patch_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "instance_id": "astropy__astropy-7746",
+      "arm": "F01",
+      "repetition": 0,
+      "resolved": false,
+      "patch_sha256": "9cd00e3eed2de4fdf053f62cdcf95cf0961ce54c20d478e93361468d31bcd5f4"
+    },
+    {
+      "instance_id": "sympy__sympy-22005",
+      "arm": "F01",
+      "repetition": 0,
+      "resolved": false,
+      "patch_sha256": "3f91a85b681472d74245e2a2d4df9c6247c88975da643c98658f14ab3d6a7efb"
+    },
+    {
+      "instance_id": "django__django-12908",
+      "arm": "F01",
+      "repetition": 0,
+      "resolved": false,
+      "patch_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "instance_id": "sympy__sympy-18835",
+      "arm": "F01",
+      "repetition": 0,
+      "resolved": false,
+      "patch_sha256": "ced5e752ada608f33563fb4ee320695754724d94b4bdf9ea783eb04dfd5f106c"
+    },
+    {
+      "instance_id": "pytest-dev__pytest-5692",
+      "arm": "F01",
+      "repetition": 0,
+      "resolved": false,
+      "patch_sha256": "a6b9a929d4e1d9b11812db4fa00dddc854ce7345f4648357844c4feb76b9ae09"
+    },
+    {
+      "instance_id": "django__django-15400",
+      "arm": "F01",
+      "repetition": 0,
+      "resolved": true,
+      "patch_sha256": "3346ff01391b8ff2146a93ff6e01bbd22563e6a0d1c479e66e423d3d7225a0e5"
+    },
+    {
+      "instance_id": "sphinx-doc__sphinx-8721",
+      "arm": "F01",
+      "repetition": 0,
+      "resolved": true,
+      "patch_sha256": "3161320402efb00fe892a1b3af9cbcc54f91f72dbac991deeff0a04449a28ebf"
+    },
+    {
+      "instance_id": "django__django-15781",
+      "arm": "F01",
+      "repetition": 0,
+      "resolved": true,
+      "patch_sha256": "3621da720ddccc8879dff8552d805a4de39e2435cfdbac677ad59dc073b3c661"
+    },
+    {
+      "instance_id": "pytest-dev__pytest-7220",
+      "arm": "F01",
+      "repetition": 0,
+      "resolved": false,
+      "patch_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "instance_id": "django__django-10924",
+      "arm": "F01",
+      "repetition": 0,
+      "resolved": true,
+      "patch_sha256": "0e9ee103a2619157df40fbe994e3f4823303dcde70919383a74e5ae5506f860e"
+    },
+    {
+      "instance_id": "scikit-learn__scikit-learn-14092",
+      "arm": "F01",
+      "repetition": 0,
+      "resolved": false,
+      "patch_sha256": "f227b5e6a358830b8365d4653fbd0979ba370fea2bae170186a2c5b0f978640b"
+    },
+    {
+      "instance_id": "astropy__astropy-14365",
+      "arm": "F01",
+      "repetition": 0,
+      "resolved": false,
+      "patch_sha256": "18a45063017c6f7c64110bce88cb7ec09c063ac0284ca345cd741a6bb8677510"
+    },
+    {
+      "instance_id": "django__django-13448",
+      "arm": "F01",
+      "repetition": 0,
+      "resolved": true,
+      "patch_sha256": "c8c129fb0467212cd9543fe780129b6cdef4f8ee3c8d62d181c88c444cefbf92"
+    },
+    {
+      "instance_id": "sympy__sympy-12454",
+      "arm": "F01",
+      "repetition": 0,
+      "resolved": false,
+      "patch_sha256": "0250653fa1289fbfc6afab2a917e7f52c7aec0464cd5f2755b73f8361889fe4a"
+    },
+    {
+      "instance_id": "sympy__sympy-21171",
+      "arm": "F01",
+      "repetition": 0,
+      "resolved": false,
+      "patch_sha256": "e0d62e54de0ff82f7aa4ee9c1d40c327a68445983d4307c0de8262a8a373d69e"
+    },
+    {
+      "instance_id": "pytest-dev__pytest-5413",
+      "arm": "F01",
+      "repetition": 0,
+      "resolved": true,
+      "patch_sha256": "d326727bbc446463d89ccfc4e8459f88b5f9c1393ce3d19ea8d95bb343004782"
+    },
+    {
+      "instance_id": "django__django-14017",
+      "arm": "F01",
+      "repetition": 0,
+      "resolved": true,
+      "patch_sha256": "5abe4b812c1ac5c24038639fec20218dd1394ce39ab6bed294e77355d662798f"
+    },
+    {
+      "instance_id": "sympy__sympy-18199",
+      "arm": "F01",
+      "repetition": 0,
+      "resolved": false,
+      "patch_sha256": "564234467fdffa1700f3c804e866e3cf43b9342f48488684d88f727c8731d1ee"
+    },
+    {
+      "instance_id": "astropy__astropy-14182",
+      "arm": "F01",
+      "repetition": 0,
+      "resolved": false,
+      "patch_sha256": "e3e7ed32eb8fcdbdcdc35aa82bc4429c9da4c6dcd98dffe0a575b303fd3677bc"
+    },
+    {
+      "instance_id": "sympy__sympy-20049",
+      "arm": "F01",
+      "repetition": 0,
+      "resolved": false,
+      "patch_sha256": "904f86be7f979742cb4a90f71559320ca6f5dc8f5d93e8df2b524b3e95c28c3e"
+    },
+    {
+      "instance_id": "sympy__sympy-13437",
+      "arm": "F01",
+      "repetition": 0,
+      "resolved": false,
+      "patch_sha256": "258b84fb9d02c98fbd94e34b0223cdd65cd76aa7a3cb7ddcc8fca5bfb7a09e22"
+    },
+    {
+      "instance_id": "django__django-13768",
+      "arm": "F01",
+      "repetition": 0,
+      "resolved": true,
+      "patch_sha256": "f9e9fb7de226b20f7a847fe9debde908c360ffaa670bd22c3868fb24d8807935"
+    },
+    {
+      "instance_id": "django__django-15695",
+      "arm": "F01",
+      "repetition": 0,
+      "resolved": false,
+      "patch_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "instance_id": "matplotlib__matplotlib-18869",
+      "arm": "F01",
+      "repetition": 0,
+      "resolved": false,
+      "patch_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "instance_id": "psf__requests-2148",
+      "arm": "F01",
+      "repetition": 0,
+      "resolved": false,
+      "patch_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "instance_id": "django__django-11905",
+      "arm": "F01",
+      "repetition": 0,
+      "resolved": false,
+      "patch_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "instance_id": "django__django-13925",
+      "arm": "F01",
+      "repetition": 0,
+      "resolved": false,
+      "patch_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "instance_id": "sympy__sympy-11870",
+      "arm": "F01",
+      "repetition": 0,
+      "resolved": false,
+      "patch_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "instance_id": "sphinx-doc__sphinx-8282",
+      "arm": "F01",
+      "repetition": 0,
+      "resolved": false,
+      "patch_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "instance_id": "scikit-learn__scikit-learn-11040",
+      "arm": "F01",
+      "repetition": 0,
+      "resolved": false,
+      "patch_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "instance_id": "astropy__astropy-7746",
+      "arm": "F11",
+      "repetition": 0,
+      "resolved": false,
+      "patch_sha256": "d75b964295227369c6c0b8ed4a16ad4215d33aa541f6de48259ff416ccec4114"
+    },
+    {
+      "instance_id": "sympy__sympy-22005",
+      "arm": "F11",
+      "repetition": 0,
+      "resolved": false,
+      "patch_sha256": "3f91a85b681472d74245e2a2d4df9c6247c88975da643c98658f14ab3d6a7efb"
+    },
+    {
+      "instance_id": "django__django-12908",
+      "arm": "F11",
+      "repetition": 0,
+      "resolved": false,
+      "patch_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "instance_id": "sympy__sympy-18835",
+      "arm": "F11",
+      "repetition": 0,
+      "resolved": false,
+      "patch_sha256": "e9568e601af79567d4e0e167b0a8f9aef26cd7875526cf4efaeddbad9aa5feab"
+    },
+    {
+      "instance_id": "pytest-dev__pytest-5692",
+      "arm": "F11",
+      "repetition": 0,
+      "resolved": false,
+      "patch_sha256": "b1dca99601fb69ed6631d54424df5619ee898b394e437b8f6d261324fbe70e25"
+    },
+    {
+      "instance_id": "django__django-15400",
+      "arm": "F11",
+      "repetition": 0,
+      "resolved": true,
+      "patch_sha256": "de2c44ed90522770fbaa71d372340fd505a632ec062987f4daeb8ea9ba1e7d5b"
+    },
+    {
+      "instance_id": "sphinx-doc__sphinx-8721",
+      "arm": "F11",
+      "repetition": 0,
+      "resolved": true,
+      "patch_sha256": "6d1ac71c9669c1e2e0534d382bfaf4d99ee55485e9c39220ba07ad2ddad1bf88"
+    },
+    {
+      "instance_id": "django__django-15781",
+      "arm": "F11",
+      "repetition": 0,
+      "resolved": true,
+      "patch_sha256": "3621da720ddccc8879dff8552d805a4de39e2435cfdbac677ad59dc073b3c661"
+    },
+    {
+      "instance_id": "pytest-dev__pytest-7220",
+      "arm": "F11",
+      "repetition": 0,
+      "resolved": false,
+      "patch_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "instance_id": "django__django-10924",
+      "arm": "F11",
+      "repetition": 0,
+      "resolved": true,
+      "patch_sha256": "0e9ee103a2619157df40fbe994e3f4823303dcde70919383a74e5ae5506f860e"
+    },
+    {
+      "instance_id": "scikit-learn__scikit-learn-14092",
+      "arm": "F11",
+      "repetition": 0,
+      "resolved": false,
+      "patch_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "instance_id": "astropy__astropy-14365",
+      "arm": "F11",
+      "repetition": 0,
+      "resolved": false,
+      "patch_sha256": "18a45063017c6f7c64110bce88cb7ec09c063ac0284ca345cd741a6bb8677510"
+    },
+    {
+      "instance_id": "django__django-13448",
+      "arm": "F11",
+      "repetition": 0,
+      "resolved": true,
+      "patch_sha256": "61903e8854252c2b12da4963e7ae4ada32a6fdc0bc3b136673f6e25b6f6fc7d3"
+    },
+    {
+      "instance_id": "sympy__sympy-12454",
+      "arm": "F11",
+      "repetition": 0,
+      "resolved": false,
+      "patch_sha256": "0250653fa1289fbfc6afab2a917e7f52c7aec0464cd5f2755b73f8361889fe4a"
+    },
+    {
+      "instance_id": "sympy__sympy-21171",
+      "arm": "F11",
+      "repetition": 0,
+      "resolved": false,
+      "patch_sha256": "efa03957dca2af067d89f542a4691950aacaaa0880efd7990cc47886bb5eb63b"
+    },
+    {
+      "instance_id": "pytest-dev__pytest-5413",
+      "arm": "F11",
+      "repetition": 0,
+      "resolved": true,
+      "patch_sha256": "d326727bbc446463d89ccfc4e8459f88b5f9c1393ce3d19ea8d95bb343004782"
+    },
+    {
+      "instance_id": "django__django-14017",
+      "arm": "F11",
+      "repetition": 0,
+      "resolved": true,
+      "patch_sha256": "5abe4b812c1ac5c24038639fec20218dd1394ce39ab6bed294e77355d662798f"
+    },
+    {
+      "instance_id": "sympy__sympy-18199",
+      "arm": "F11",
+      "repetition": 0,
+      "resolved": false,
+      "patch_sha256": "564234467fdffa1700f3c804e866e3cf43b9342f48488684d88f727c8731d1ee"
+    },
+    {
+      "instance_id": "astropy__astropy-14182",
+      "arm": "F11",
+      "repetition": 0,
+      "resolved": false,
+      "patch_sha256": "e3e7ed32eb8fcdbdcdc35aa82bc4429c9da4c6dcd98dffe0a575b303fd3677bc"
+    },
+    {
+      "instance_id": "sympy__sympy-20049",
+      "arm": "F11",
+      "repetition": 0,
+      "resolved": false,
+      "patch_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "instance_id": "sympy__sympy-13437",
+      "arm": "F11",
+      "repetition": 0,
+      "resolved": false,
+      "patch_sha256": "978edbf9a4295bba605d583513264f7ef374eeaed5cc0cab32bba0803de76fad"
+    },
+    {
+      "instance_id": "django__django-13768",
+      "arm": "F11",
+      "repetition": 0,
+      "resolved": true,
+      "patch_sha256": "f9e9fb7de226b20f7a847fe9debde908c360ffaa670bd22c3868fb24d8807935"
+    },
+    {
+      "instance_id": "django__django-15695",
+      "arm": "F11",
+      "repetition": 0,
+      "resolved": false,
+      "patch_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "instance_id": "matplotlib__matplotlib-18869",
+      "arm": "F11",
+      "repetition": 0,
+      "resolved": false,
+      "patch_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "instance_id": "psf__requests-2148",
+      "arm": "F11",
+      "repetition": 0,
+      "resolved": false,
+      "patch_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "instance_id": "django__django-11905",
+      "arm": "F11",
+      "repetition": 0,
+      "resolved": false,
+      "patch_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "instance_id": "django__django-13925",
+      "arm": "F11",
+      "repetition": 0,
+      "resolved": false,
+      "patch_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "instance_id": "sympy__sympy-11870",
+      "arm": "F11",
+      "repetition": 0,
+      "resolved": false,
+      "patch_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "instance_id": "sphinx-doc__sphinx-8282",
+      "arm": "F11",
+      "repetition": 0,
+      "resolved": false,
+      "patch_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "instance_id": "scikit-learn__scikit-learn-11040",
+      "arm": "F11",
+      "repetition": 0,
+      "resolved": false,
+      "patch_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    }
+  ],
+  "reports": {
+    "F00": {
+      "path": "/home/slt/ReachPatch/Code/F00.evidence-78ffb9a1cf019fca.json",
+      "sha256": "e3341382c492a5e24f0a8d212e7f4c402adce12d32cf8988ea3a5c3525af1d05",
+      "resolved": 7,
+      "completed": 17,
+      "unresolved": 10,
+      "empty_patch": 13
+    },
+    "F10": {
+      "path": "/home/slt/ReachPatch/Code/F10.evidence-102572c2ebcae4c6.json",
+      "sha256": "1106e66788c92183fffcae3da44dfc29d5298c1262697ee717a9b8ae9f754de2",
+      "resolved": 8,
+      "completed": 19,
+      "unresolved": 11,
+      "empty_patch": 11
+    },
+    "F01": {
+      "path": "/home/slt/ReachPatch/Code/F01.evidence-66add175aa149927.json",
+      "sha256": "364da4b76526141d3415c3d2f97764b189e93e77fb7224df8fc1d14f6d6f3ae8",
+      "resolved": 8,
+      "completed": 20,
+      "unresolved": 12,
+      "empty_patch": 10
+    },
+    "F11": {
+      "path": "/home/slt/ReachPatch/Code/F11.evidence-d66caac7ed35157d.json",
+      "sha256": "b2c46a1433d508c28b160320f9d848a0ebd175c5ab77a31e96be1b8b16ede5a9",
+      "resolved": 8,
+      "completed": 18,
+      "unresolved": 10,
+      "empty_patch": 12
+    }
+  },
+  "reconciliation": "IMMUTABLE_HARNESS_REPORTS_NO_RERUN",
+  "arms": {
+    "F00": {
+      "n": 30,
+      "resolved": 7,
+      "missing": 0,
+      "lower": 0.23333333333333334,
+      "upper": 0.23333333333333334
+    },
+    "F10": {
+      "n": 30,
+      "resolved": 8,
+      "missing": 0,
+      "lower": 0.26666666666666666,
+      "upper": 0.26666666666666666
+    },
+    "F01": {
+      "n": 30,
+      "resolved": 8,
+      "missing": 0,
+      "lower": 0.26666666666666666,
+      "upper": 0.26666666666666666
+    },
+    "F11": {
+      "n": 30,
+      "resolved": 8,
+      "missing": 0,
+      "lower": 0.26666666666666666,
+      "upper": 0.26666666666666666
+    }
+  }
+}

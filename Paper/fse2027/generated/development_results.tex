@@ -1,0 +1,18 @@
+\subsection{Prospective development-cohort results}
+We evaluated 30 exposed development issues using repository-stratified sampling and randomized arm order within issue blocks. All four arms used DeepSeek Flash, temperature zero, a 40-call/250,000-token admission ceiling, a 900-second case budget, and at most two repair revisions. Each cell received one whole-case attempt; generation failures remain in the denominator. Official tests were opened only after every registered cell had sealed its final patch. These are developmental, not held-out confirmatory, results.
+\begin{table}[t]
+\caption{Prospective development factorial. Missing official outcomes are reported separately; reported tokens exclude unknown usage rather than imputing it as free.}
+\label{tab:development}
+\begin{tabular}{@{}lrrrrr@{}}
+\toprule
+Arm & Resolved & Errors & Calls & Reported tokens & Unknown usage \\
+\midrule
+F00 & 7/30 & 0 & 323 & 3,419,018 & 7 \\
+F01 & 8/30 & 0 & 334 & 3,571,680 & 8 \\
+F10 & 8/30 & 0 & 270 & 2,702,283 & 8 \\
+F11 & 8/30 & 0 & 282 & 2,961,716 & 7 \\
+\bottomrule
+\end{tabular}
+\end{table}
+Incomplete accounting prevents a complete-cost contrast; the token totals must be read as lower bounds.
+These observations do not establish repair non-inferiority or effectiveness of each individual reuse mechanism. A non-significant capability difference would not establish equivalence.

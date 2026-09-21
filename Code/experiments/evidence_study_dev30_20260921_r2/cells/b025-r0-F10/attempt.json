@@ -1,0 +1,11 @@
+{
+  "cell_id": "b025-r0-F10",
+  "instance_id": "django__django-11905",
+  "repetition": 0,
+  "arm": "F10",
+  "block": 25,
+  "position": 1,
+  "attempt_id": "b025-r0-F10-a1",
+  "started_epoch": 1789974996.1863568,
+  "implementation_hash": "7ce21b66fee1c83d45b448cb164680482ad29bf6ea6f62bf3c2ed4cc9b0b522b"
+}

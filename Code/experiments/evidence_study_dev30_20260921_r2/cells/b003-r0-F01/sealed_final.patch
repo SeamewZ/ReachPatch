@@ -1,0 +1,14 @@
+diff --git a/sympy/utilities/iterables.py b/sympy/utilities/iterables.py
+--- a/sympy/utilities/iterables.py
++++ b/sympy/utilities/iterables.py
+@@ -2109,7 +2109,10 @@
+     try:
+         seen = set()
+         result = result or []
++        n = len(seq)
+         for i, s in enumerate(seq):
++            if len(seq) != n:
++                raise RuntimeError('sequence changed size during iteration')
+             if not (s in seen or seen.add(s)):
+                 yield s
+     except TypeError:

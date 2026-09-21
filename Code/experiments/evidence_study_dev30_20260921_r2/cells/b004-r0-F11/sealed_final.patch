@@ -1,0 +1,28 @@
+diff --git a/src/_pytest/junitxml.py b/src/_pytest/junitxml.py
+--- a/src/_pytest/junitxml.py
++++ b/src/_pytest/junitxml.py
+@@ -309,6 +309,24 @@
+         request.node.user_properties.append((name, value))
+ 
+     return append_property
++
++
++def pytest_addoption(parser):
++    group = parser.getgroup("junitxml")
++    group.addoption(
++        "--junit-hostname",
++        action="store",
++        dest="junit_hostname",
++        default=None,
++        help="hostname value to include in the testsuite element of the JUnit XML report",
++    )
++    group.addoption(
++        "--junit-timestamp",
++        action="store",
++        dest="junit_timestamp",
++        default=None,
++        help="timestamp value to include in the testsuite element of the JUnit XML report",
++    )
+ 
+ 
+ @pytest.fixture

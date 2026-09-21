@@ -1,0 +1,75 @@
+% Native vector artwork. All three panels are projections of one mutable graph.
+\begin{tikzpicture}[
+  x=1cm,y=1cm,>=Stealth,
+  every node/.style={font=\small,text=FigureInk},
+  heading/.style={font=\small\bfseries,anchor=west},
+  entity/.style={draw=FigureRule,fill=white,rounded corners=2pt,
+    minimum height=6mm,inner sep=3pt,align=center},
+  evidence/.style={entity,draw=EvidenceBlue!50,fill=EvidenceBlue!5},
+  question/.style={entity,draw=DecisionTeal,fill=DecisionTeal!8},
+  edge/.style={->,draw=EvidenceBlue!85,line width=.65pt},
+  control/.style={->,draw=DecisionTeal,line width=.8pt},
+  revision/.style={->,draw=RevisionAmber,dashed,line width=.8pt},
+  detail/.style={font=\footnotesize,align=center},
+  action/.style={entity,text width=2.5cm,minimum height=8mm}
+]
+% Panel geometry remains fixed at the ACM single-column width.
+\fill[EvidenceBlue!3,rounded corners=3pt] (0,0) rectangle (4.35,5.5);
+\fill[DecisionTeal!3,rounded corners=3pt] (4.55,0) rectangle (9.05,5.5);
+\fill[black!2,rounded corners=3pt] (9.25,0) rectangle (13.8,5.5);
+\node[heading] at (.18,5.16) {(a) Evidence dependencies};
+\node[heading] at (4.73,5.16) {(b) Question lifecycle};
+\node[heading] at (9.43,5.16) {(c) On-demand interaction};
+\draw[FigureRule] (.18,4.86)--(4.17,4.86);
+\draw[FigureRule] (4.73,4.86)--(8.87,4.86);
+\draw[FigureRule] (9.43,4.86)--(13.62,4.86);
+% A small real dependency graph, not a module inventory.
+\node[evidence,text width=1.8cm] (req) at (1.14,4.27) {Requirement\\$r$};
+\node[evidence,text width=1.25cm] (src) at (3.23,4.27) {Source $d$};
+\node[question,text width=1.75cm] (claim) at (2.17,2.92) {Question $q$};
+\node[evidence,text width=1.8cm] (obs) at (1.14,1.48) {Observation\\$o$};
+\node[entity,text width=1.25cm] (patch) at (3.23,1.48) {Patch $p$};
+\draw[edge] (claim.north west)--(req.south east);
+\draw[edge] (claim.north east)--(src.south west);
+\node[detail,fill=EvidenceBlue!3,inner sep=1pt] at (2.18,3.61) {depends on};
+\draw[edge] (obs.north east)--(claim.south west);
+\draw[edge] (patch.north west)--(claim.south east);
+\node[detail,anchor=east] at (1.15,2.22) {supports};
+\node[detail,anchor=west] at (3.22,2.22) {requires};
+\node[detail] at (2.17,.48)
+  {Typed provenance\\Static $\neq$ executed};
+% Evidence-version lifecycle. Each outcome is explicitly named.
+\node[question,text width=3.3cm] (version) at (6.8,4.4)
+  {Evidence version $\nu(q,G)$};
+\node[question,text width=1.1cm] (openq) at (5.65,2.8) {\textsc{open}};
+\node[entity,text width=1.15cm] (answered) at (8.0,2.8) {resolved};
+\draw[control] (openq)--node[below,detail]{evidence}(answered);
+\draw[revision] (answered.north) to[out=100,in=80]
+  node[above,detail,text=RevisionAmber,fill=DecisionTeal!3,inner sep=1pt]
+  {version changed} (openq.north);
+\node[detail] at (6.8,2.05)
+  {supported / refuted / blocked};
+\node[entity,draw=RevisionAmber!60,fill=RevisionAmber!6,
+  text width=3.3cm] (reuse) at (6.8,1.23)
+  {Already attempted\\$\kappa_G(a)\in\mathcal H(G)$};
+\node[detail,text=RevisionAmber] at (6.8,.56)
+  {same key $\Rightarrow$ suppress repeat};
+% Actions are alternatives selected from a global frontier, not fixed stages.
+\node[action,draw=DecisionTeal,fill=DecisionTeal!7] (select) at (11.54,4.19)
+  {$a^*=\arg\min\rho_G(a)$\\eligible actions};
+\node[action] (repair) at (11.54,2.96) {Repair or recover};
+\node[action] (test) at (11.54,1.83) {Validate or falsify};
+\node[detail] at (11.54,.56)
+  {Trusted closure: certify\\Else: continue / uncertified};
+\draw[control] (select.south)--(repair.north);
+\draw[control] (select.east)--(13.32,4.19)--(13.32,1.83)--(test.east);
+% Sparse cross-panel links avoid passing through labels or evidence nodes.
+\draw[control] (claim.east)--(openq.west);
+\draw[control] (version.east)--(select.west);
+\draw[edge] (test.west)--(9.55,1.83)--(9.55,-.48)--(.12,-.48)--(.12,1.48)--(obs.west);
+\draw[edge] (repair.west)--(9.55,2.96)--(9.55,1.83);
+\node[detail,fill=white,inner xsep=5pt] at (6.8,-.48)
+  {record outcome in $G$; revisit dependent questions};
+\node[font=\footnotesize\itshape,text=FigureInk] at (6.9,-1.08)
+  {One evidence graph $G$: shared identities, shared provenance, incremental updates};
+\end{tikzpicture}

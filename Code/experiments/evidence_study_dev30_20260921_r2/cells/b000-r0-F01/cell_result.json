@@ -1,0 +1,12 @@
+{
+  "status": "GENERATED",
+  "return_code": 0,
+  "elapsed_seconds": 860.160001039505,
+  "journal_path": "/home/slt/ReachPatch/Code/experiments/evidence_study_dev30_20260921_r2/cells/b000-r0-F01/backend/runs/astropy__astropy-7746/request_journal.jsonl",
+  "run_root": "/home/slt/ReachPatch/Code/experiments/evidence_study_dev30_20260921_r2/cells/b000-r0-F01/backend/runs/astropy__astropy-7746",
+  "controller_certified": false,
+  "public_acceptance": false,
+  "patch_path": "/home/slt/ReachPatch/Code/experiments/evidence_study_dev30_20260921_r2/cells/b000-r0-F01/sealed_final.patch",
+  "patch_sha256": "9cd00e3eed2de4fdf053f62cdcf95cf0961ce54c20d478e93361468d31bcd5f4",
+  "attempt_id": "b000-r0-F01-a1"
+}

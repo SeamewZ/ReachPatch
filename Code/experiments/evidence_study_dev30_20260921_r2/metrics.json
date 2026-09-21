@@ -1,0 +1,16 @@
+{
+  "cohort": "development-30-issues-20260921-r2",
+  "status": "COMPLETED_DEVELOPMENT_NOT_CONFIRMATORY",
+  "arms": {
+    "F00": {"resolved": 7, "n": 30, "calls": 323, "reported_tokens": 3419018, "unknown_usage": 7},
+    "F11": {"resolved": 8, "n": 30, "calls": 282, "reported_tokens": 2961716, "unknown_usage": 7}
+  },
+  "comparisons": {
+    "resolved_delta_cases": 1,
+    "call_reduction_fraction": 0.12693498452012383,
+    "reported_token_lower_bound_reduction_fraction": 0.13376242082966184,
+    "calls_per_resolved_reduction_fraction": 0.23579175704950154,
+    "reported_tokens_per_resolved_lower_bound_reduction_fraction": 0.2420359209486166
+  },
+  "caveat": "Unknown provider usage prevents complete cost inference; development cohort is not held-out or a non-inferiority test."
+}

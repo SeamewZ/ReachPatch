@@ -1,0 +1,11 @@
+diff --git a/src/_pytest/junitxml.py b/src/_pytest/junitxml.py
+--- a/src/_pytest/junitxml.py
++++ b/src/_pytest/junitxml.py
+@@ -11,6 +11,7 @@
+ import functools
+ import os
+ import re
++import socket
+ import sys
+ import time
+ 

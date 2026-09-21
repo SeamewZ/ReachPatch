@@ -1,0 +1,166 @@
+from __future__ import annotations
+
+import json
+
+import pytest
+
+from experiments.reachavoid_51 import runner
+from reachpatch.models.base import SCHEMA_VERSION
+from reachpatch.models.reach_avoid import RepairObjective
+from reachpatch.reach_avoid.execution_checkpoint import EXECUTION_SCHEMA_NAME
+from reachpatch.repair.deepseek_agent import DeepSeekAgent
+
+
+def test_runner_reads_current_checkpoint_and_transition_schema(tmp_path):
+    assert runner.SCHEMA == "reachpatch-51-reach-avoid-v2"
+    checkpoint = tmp_path / "execution_checkpoints" / "checkpoint-current"
+    checkpoint.mkdir(parents=True)
+    (checkpoint / "checkpoint.json").write_text(json.dumps({
+        "schema": EXECUTION_SCHEMA_NAME,
+        "checkpoint": {
+            "checkpoint_id": "checkpoint-current",
+            "status": "P0",
+            "revision": 0,
+        },
+    }), encoding="utf-8")
+    transitions = tmp_path / "transitions"
+    transitions.mkdir()
+    (transitions / "transition-current.json").write_text(json.dumps({
+        "schema": SCHEMA_VERSION,
+        "certificate_id": "transition-current",
+    }), encoding="utf-8")
+
+    initial = runner._initial_checkpoint(tmp_path)
+    parsed_transitions = runner._transition_payloads(tmp_path)
+
+    assert initial["checkpoint_id"] == "checkpoint-current"
+    assert initial["_directory"] == str(checkpoint)
+    assert parsed_transitions[0]["certificate_id"] == "transition-current"
+
+
+def test_runner_reads_execution_v2_cumulative_diff_for_p0(tmp_path):
+    checkpoint = tmp_path / "execution_checkpoints" / "p0"
+    checkpoint.mkdir(parents=True)
+    (checkpoint / "checkpoint.json").write_text(json.dumps({
+        "schema": EXECUTION_SCHEMA_NAME,
+        "checkpoint": {
+            "checkpoint_id": "p0",
+            "status": "P0",
+            "revision": 0,
+            "cumulative_diff": "diff --git a/example.py b/example.py\n",
+            "patch_hash": "patch",
+        },
+    }), encoding="utf-8")
+
+    initial = runner._initial_checkpoint(tmp_path)
+
+    assert runner._initial_checkpoint_diff(initial).startswith("diff --git")
+
+
+def test_runner_rejects_legacy_canonical_diff_for_p0():
+    with pytest.raises(RuntimeError, match="no cumulative diff"):
+        runner._initial_checkpoint_diff({"canonical_diff": "legacy"})
+
+
+def test_runner_rejects_p0_checkpoint_without_diff():
+    with pytest.raises(RuntimeError, match="no cumulative diff"):
+        runner._initial_checkpoint_diff({"status": "P0"})
+
+
+def test_runner_unwraps_execution_state_for_component_evidence(tmp_path):
+    (tmp_path / "execution_summary.json").write_text(
+        json.dumps({"status": "REACHED", "transition_count": 0}),
+        encoding="utf-8",
+    )
+    (tmp_path / "execution_state.json").write_text(json.dumps({
+        "schema": EXECUTION_SCHEMA_NAME,
+        "state": {
+            "goal_contracts": [{"goal_id": "goal", "hard": True}],
+        },
+    }), encoding="utf-8")
+    checkpoint = tmp_path / "execution_checkpoints" / "final"
+    checkpoint.mkdir(parents=True)
+    (checkpoint / "checkpoint.json").write_text(json.dumps({
+        "schema": EXECUTION_SCHEMA_NAME,
+        "checkpoint": {"checkpoint_id": "final", "patch_hash": "patch"},
+        "target_results": [{
+            "check_id": "target", "status": "PASS", "stable": True,
+        }],
+        "preservation_results": [],
+        "challenge_results": [],
+    }), encoding="utf-8")
+
+    evidence = runner._execution_component_evidence(
+        tmp_path, {"checkpoint_id": "final"},
+    )
+
+    assert "requirement_graph" not in evidence
+    assert evidence["validation"]["executed_challenge_ids"] == []
+    assert evidence["validation"]["stable_target_pass_count"] == 1
+
+
+def test_diagnostic_official_rows_require_matching_ten_case_seal(
+    tmp_path, monkeypatch,
+):
+    instance_ids = [f"case-{index}" for index in range(10)]
+    sealed = tmp_path / "sealed.json"
+    official = tmp_path / "diagnostic-official.jsonl"
+    sealed.write_text(json.dumps({
+        "case_count": 10,
+        "instance_ids": instance_ids,
+    }), encoding="utf-8")
+    official.write_text(
+        "".join(json.dumps({"instance_id": item}) + "\n" for item in instance_ids),
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("REACHPATCH_DIAGNOSTIC10", "1")
+    monkeypatch.setattr(runner, "SEALED_MANIFEST", sealed)
+    monkeypatch.setattr(runner, "DIAGNOSTIC_OFFICIAL_PATH", official)
+
+    rows = runner._official_rows_after_seal()
+
+    assert [item["instance_id"] for item in rows] == instance_ids
+
+
+def test_runner_freezes_public_cohort_by_dataset_order(monkeypatch):
+    rows = [{"instance_id": f"case-{index}"} for index in range(51)]
+    monkeypatch.setenv("REACHPATCH_COHORT_SIZE", "50")
+
+    selected = runner._cohort_rows(rows, set())
+
+    assert len(selected) == 50
+    assert selected[0]["instance_id"] == "case-0"
+    assert selected[-1]["instance_id"] == "case-49"
+
+
+def test_runner_rejects_missing_unified_graph():
+    with pytest.raises(RuntimeError, match="missing unified graph hash"):
+        runner._validate_component_evidence("case-id", {})
+
+
+def test_runner_rejects_false_graph_causal_use():
+    evidence = {"dynamic_reach_avoid_graph": {"graph_hash": "hash", "participated": True}}
+    with pytest.raises(RuntimeError, match="no causal-use evidence"):
+        runner._validate_component_evidence("case-id", evidence)
+
+
+def test_runner_propagates_same_case_budget_configuration(monkeypatch):
+    monkeypatch.setenv("REACHPATCH_CASE_WALL_SECONDS", "1800")
+    monkeypatch.setenv("REACHPATCH_CASE_MODEL_CALLS", "80")
+    monkeypatch.setenv("REACHPATCH_CASE_TOKENS", "200000")
+    config = runner._case_configuration(3)
+    assert config.execution_budget_seconds == 1800
+    assert config.max_case_model_calls == 80
+    assert config.max_case_tokens == 200000
+def test_deepseek_retry_prompt_requires_a_different_patch(monkeypatch):
+    from reachpatch.repair.execution_objective import InitialPatchObjective
+    objective = InitialPatchObjective(
+        objective_id="objective", goal_contracts=(), public_context=(),
+        current_full_diff="", current_patch_hash="empty",
+    )
+    monkeypatch.setenv("REACHPATCH_RA51_ATTEMPT", "2")
+
+    prompt = DeepSeekAgent._prompt(objective)
+
+    assert "independent generation retry 2" in prompt.lower()
+    assert "do not repeat a rejected algorithm or exact diff" in prompt

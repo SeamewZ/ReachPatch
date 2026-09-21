@@ -1,0 +1,24 @@
+diff --git a/sympy/physics/vector/point.py b/sympy/physics/vector/point.py
+--- a/sympy/physics/vector/point.py
++++ b/sympy/physics/vector/point.py
+@@ -519,8 +519,18 @@
+ 
+         _check_frame(frame)
+         if not (frame in self._vel_dict):
+-            raise ValueError('Velocity of point ' + self.name + ' has not been'
+-                             ' defined in ReferenceFrame ' + frame.name)
++            # Try to calculate the velocity from the position of this point
++            # relative to another point whose velocity is known.
++            for otherpoint in self._pos_dict.keys():
++                try:
++                    othervel = otherpoint.vel(frame)
++                except ValueError:
++                    continue
++                self.set_vel(frame, othervel + self.pos_from(otherpoint).dt(frame))
++                break
++            else:
++                raise ValueError('Velocity of point ' + self.name + ' has not '
++                                 'been defined in ReferenceFrame ' + frame.name)
+         return self._vel_dict[frame]
+ 
+     def partial_velocity(self, frame, *gen_speeds):

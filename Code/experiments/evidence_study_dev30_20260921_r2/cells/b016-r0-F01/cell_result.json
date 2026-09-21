@@ -1,0 +1,12 @@
+{
+  "status": "GENERATED",
+  "return_code": 0,
+  "elapsed_seconds": 930.8612880706787,
+  "journal_path": "/home/slt/ReachPatch/Code/experiments/evidence_study_dev30_20260921_r2/cells/b016-r0-F01/backend/runs/django__django-14017/request_journal.jsonl",
+  "run_root": "/home/slt/ReachPatch/Code/experiments/evidence_study_dev30_20260921_r2/cells/b016-r0-F01/backend/runs/django__django-14017",
+  "controller_certified": false,
+  "public_acceptance": false,
+  "patch_path": "/home/slt/ReachPatch/Code/experiments/evidence_study_dev30_20260921_r2/cells/b016-r0-F01/sealed_final.patch",
+  "patch_sha256": "5abe4b812c1ac5c24038639fec20218dd1394ce39ab6bed294e77355d662798f",
+  "attempt_id": "b016-r0-F01-a1"
+}

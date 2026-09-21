@@ -1,0 +1,9 @@
+{
+  "instance_id": "controller-run-5",
+  "repository": "simple_repo",
+  "base_commit": "fixture-base",
+  "issue": "For every x, pkg.api.public(x) must return [].",
+  "visible_tests": [],
+  "public_metadata": {},
+  "environment": {}
+}

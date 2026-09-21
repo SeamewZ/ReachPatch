@@ -1,0 +1,12 @@
+{
+  "status": "GENERATED",
+  "return_code": 0,
+  "elapsed_seconds": 572.5285401344299,
+  "journal_path": "/home/slt/ReachPatch/Code/experiments/evidence_study_dev30_20260921_r2/cells/b006-r0-F11/backend/runs/sphinx-doc__sphinx-8721/request_journal.jsonl",
+  "run_root": "/home/slt/ReachPatch/Code/experiments/evidence_study_dev30_20260921_r2/cells/b006-r0-F11/backend/runs/sphinx-doc__sphinx-8721",
+  "controller_certified": false,
+  "public_acceptance": false,
+  "patch_path": "/home/slt/ReachPatch/Code/experiments/evidence_study_dev30_20260921_r2/cells/b006-r0-F11/sealed_final.patch",
+  "patch_sha256": "6d1ac71c9669c1e2e0534d382bfaf4d99ee55485e9c39220ba07ad2ddad1bf88",
+  "attempt_id": "b006-r0-F11-a1"
+}

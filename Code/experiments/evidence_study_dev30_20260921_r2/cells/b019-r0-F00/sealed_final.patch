@@ -1,0 +1,25 @@
+diff --git a/sympy/physics/vector/point.py b/sympy/physics/vector/point.py
+--- a/sympy/physics/vector/point.py
++++ b/sympy/physics/vector/point.py
+@@ -114,6 +114,21 @@
+         raise ValueError('No Connecting Path found between ' + other.name +
+                          ' and ' + self.name)
+ 
++    def _vel_from_pos(self, frame):
++        """Calculate the velocity of this point in ``frame`` from the
++        relative positions of points, if possible.
++
++        This searches the position graph for a point whose velocity is
++        already known in ``frame`` and differentiates the relative position
++        vector between the two points in ``frame``.
++        """
++        for point in self._pdict_list(self, 0):
++            if point is self:
++                continue
++            if frame in point._vel_dict:
++                return point._vel_dict[frame] + self.pos_from(point).dt(frame)
++        return None
++
+     def a1pt_theory(self, otherpoint, outframe, interframe):
+         """Sets the acceleration of this point with the 1-point theory.
+ 

@@ -1,0 +1,12 @@
+{
+  "status": "GENERATED",
+  "return_code": 0,
+  "elapsed_seconds": 276.16857528686523,
+  "journal_path": "/home/slt/ReachPatch/Code/experiments/evidence_study_dev30_20260921_r2/cells/b014-r0-F00/backend/runs/sympy__sympy-21171/request_journal.jsonl",
+  "run_root": "/home/slt/ReachPatch/Code/experiments/evidence_study_dev30_20260921_r2/cells/b014-r0-F00/backend/runs/sympy__sympy-21171",
+  "controller_certified": false,
+  "public_acceptance": false,
+  "patch_path": "/home/slt/ReachPatch/Code/experiments/evidence_study_dev30_20260921_r2/cells/b014-r0-F00/sealed_final.patch",
+  "patch_sha256": "efa03957dca2af067d89f542a4691950aacaaa0880efd7990cc47886bb5eb63b",
+  "attempt_id": "b014-r0-F00-a1"
+}

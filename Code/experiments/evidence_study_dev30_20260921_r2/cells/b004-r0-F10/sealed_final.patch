@@ -1,0 +1,12 @@
+diff --git a/src/_pytest/junitxml.py b/src/_pytest/junitxml.py
+--- a/src/_pytest/junitxml.py
++++ b/src/_pytest/junitxml.py
+@@ -13,6 +13,8 @@
+ import re
+ import sys
+ import time
++import socket
++from datetime import datetime
+ 
+ import py
+ 

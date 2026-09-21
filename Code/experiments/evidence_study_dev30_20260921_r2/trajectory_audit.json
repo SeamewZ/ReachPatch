@@ -1,0 +1,74 @@
+{
+  "protocol_sha256": "361fcc1e487d8152c9f0a61386c84f34be48b12865ccd2f8695614607c28d725",
+  "registered_cells": 120,
+  "started_attempts": 2,
+  "admitted_calls_all_started_attempts": 2,
+  "reported_tokens_lower_bound_all_started_attempts": 16133,
+  "unknown_usage_requests": 0,
+  "attempts": [
+    {
+      "cell_id": "b000-r0-F00",
+      "instance_id": "astropy__astropy-7746",
+      "repetition": 0,
+      "arm": "F00",
+      "block": 0,
+      "position": 0,
+      "terminal": "INTERRUPTED_OR_RUNNING",
+      "journal_exists": true,
+      "truncated_journal_records": 0,
+      "journal_sha256": "e33395e12679f429fdff9962979c6df38c27a58fc46c11aa3a21a1c8fe6c7385",
+      "cost": {
+        "model_calls": 0,
+        "reported_tokens_lower_bound": 0,
+        "unknown_usage_requests": 0,
+        "usage_complete": true,
+        "reservation_tokens": 0
+      },
+      "stages": {},
+      "provider_models": [],
+      "mechanism_events": {},
+      "context_elided_bytes": null,
+      "question_reopen_count": null,
+      "public_acceptance": null,
+      "controller_certified": null
+    },
+    {
+      "cell_id": "b001-r0-F11",
+      "instance_id": "sympy__sympy-22005",
+      "repetition": 0,
+      "arm": "F11",
+      "block": 1,
+      "position": 0,
+      "terminal": "INTERRUPTED_OR_RUNNING",
+      "journal_exists": true,
+      "truncated_journal_records": 0,
+      "journal_sha256": "a17db146ab4d3acfd44d33bc0aac747fd5386768c9d85a91ebe48b4202a4a07f",
+      "cost": {
+        "model_calls": 2,
+        "reported_tokens_lower_bound": 16133,
+        "unknown_usage_requests": 0,
+        "usage_complete": true,
+        "reservation_tokens": 59258
+      },
+      "stages": {
+        "INITIAL_GENERATION": {
+          "admitted_calls": 2,
+          "reported_tokens": 16133,
+          "raw_argument_duplicate_tools": 0,
+          "all_tools": 2,
+          "model_elapsed_seconds": 2.069840930402279
+        }
+      },
+      "provider_models": [
+        "deepseek-flash"
+      ],
+      "mechanism_events": {},
+      "context_elided_bytes": null,
+      "question_reopen_count": null,
+      "public_acceptance": null,
+      "controller_certified": null
+    }
+  ],
+  "duplicate_classification": "RAW_ARGUMENTS_ONLY_NOT_PROOF_OF_USELESS_WORK",
+  "causal_savings_claim": "REQUIRES_INDEPENDENT_MATCHED_INTERVENTION"
+}
